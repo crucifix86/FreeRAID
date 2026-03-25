@@ -24,6 +24,7 @@
     <nav class="tabbar">
       <button class="tab active" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard</button>
       <button class="tab" data-tab="settings" onclick="switchTab('settings')">Settings</button>
+      <button class="tab" data-tab="disks" onclick="switchTab('disks')">Disks</button>
       <button class="tab" data-tab="shares" onclick="switchTab('shares')">Shares</button>
       <button class="tab" data-tab="plugins" onclick="switchTab('plugins')">Plugins</button>
     </nav>
@@ -142,6 +143,65 @@
         </div>
 
       </div><!-- end settings -->
+
+      <!-- ── DISKS TAB ── -->
+      <div id="tab-disks" class="hidden">
+
+        <div class="settings-section">
+          <h2 class="settings-section-title">
+            Detected Disks
+            <button class="btn btn-sm btn-secondary" style="margin-left:auto" onclick="refreshDisks()">Rescan</button>
+          </h2>
+          <div id="array-stopped-notice" class="alert warning hidden" style="margin-bottom:12px">
+            Stop the array to assign or unassign disks.
+          </div>
+          <div id="disk-scan-list">
+            <div class="loading-msg">Scanning disks...</div>
+          </div>
+        </div>
+
+        <!-- Assign modal -->
+        <div id="assign-modal-backdrop" class="modal-backdrop hidden" onclick="closeAssignModal()">
+          <div class="modal" onclick="event.stopPropagation()">
+            <div class="modal-title">Assign Disk</div>
+            <div id="assign-modal-device" style="font-family:monospace;color:var(--text-dim);margin-bottom:16px"></div>
+            <div style="display:flex;flex-direction:column;gap:10px">
+              <button class="assign-role-btn" onclick="doAssign('array')">
+                <span class="assign-role-icon">💾</span>
+                <div>
+                  <div class="assign-role-name">Array Disk</div>
+                  <div class="assign-role-desc">Data storage — pooled via MergerFS</div>
+                </div>
+              </button>
+              <button class="assign-role-btn" onclick="doAssign('parity')">
+                <span class="assign-role-icon">🛡</span>
+                <div>
+                  <div class="assign-role-name">Parity</div>
+                  <div class="assign-role-desc">Protect array against one drive failure</div>
+                </div>
+              </button>
+              <button class="assign-role-btn" onclick="doAssign('cache')">
+                <span class="assign-role-icon">⚡</span>
+                <div>
+                  <div class="assign-role-name">Cache</div>
+                  <div class="assign-role-desc">SSD fast lane — data moves to array on sync</div>
+                </div>
+              </button>
+            </div>
+            <button class="btn btn-ghost" style="margin-top:16px;width:100%" onclick="closeAssignModal()">Cancel</button>
+          </div>
+        </div>
+
+        <!-- Disks log -->
+        <div class="settings-section">
+          <h2 class="settings-section-title">
+            Log
+            <button class="btn btn-sm btn-ghost" onclick="clearDisksLog()">Clear</button>
+          </h2>
+          <div class="log-panel" id="disks-log-panel"></div>
+        </div>
+
+      </div><!-- end disks -->
 
       <!-- ── SHARES TAB ── -->
       <div id="tab-shares" class="hidden">

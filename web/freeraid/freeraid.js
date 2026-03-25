@@ -45,10 +45,12 @@ function switchTab(name) {
     t.classList.toggle('active', t.dataset.tab === name);
   });
   document.getElementById('tab-dashboard').classList.toggle('hidden', name !== 'dashboard');
+  document.getElementById('tab-disks').classList.toggle('hidden',     name !== 'disks');
   document.getElementById('tab-settings').classList.toggle('hidden',  name !== 'settings');
   document.getElementById('tab-shares').classList.toggle('hidden',    name !== 'shares');
   document.getElementById('tab-plugins').classList.toggle('hidden',   name !== 'plugins');
   if (name === 'shares') refreshShares();
+  if (name === 'disks')  refreshDisks();
 }
 
 // ── Logging ──────────────────────────────────────────────────────────────────
@@ -268,6 +270,111 @@ function doCheckUpdate() {
       }
     })
     .catch(() => { if (statusEl) statusEl.textContent = 'Unreachable'; });
+}
+
+// ── Disks ─────────────────────────────────────────────────────────────────────
+
+function clearDisksLog() { document.getElementById('disks-log-panel').innerHTML = ''; }
+const dlog = (level, text) => appendLog('disks-log-panel', level, text);
+
+let _assignDev = null;
+
+function refreshDisks() {
+  const el = document.getElementById('disk-scan-list');
+  el.innerHTML = '<div class="loading-msg">Scanning...</div>';
+
+  let buf = '';
+  cockpit.spawn(['freeraid', 'disks-scan'], { superuser: 'require', err: 'ignore' })
+    .stream(d => { buf += d; })
+    .then(() => {
+      try {
+        const jsonStart = buf.indexOf('[');
+        renderDisks(JSON.parse(buf.slice(jsonStart)));
+      } catch(e) {
+        el.innerHTML = '<div class="loading-msg">Could not scan disks.</div>';
+      }
+    })
+    .catch(() => { el.innerHTML = '<div class="loading-msg">Scan failed.</div>'; });
+}
+
+function renderDisks(disks) {
+  const el      = document.getElementById('disk-scan-list');
+  const stopped = arrayState === 'stopped';
+  const notice  = document.getElementById('array-stopped-notice');
+
+  notice.classList.toggle('hidden', stopped);
+
+  if (!disks.length) {
+    el.innerHTML = '<div class="loading-msg">No disks detected.</div>';
+    return;
+  }
+
+  const roleColors = { array: 'role-array', parity: 'role-parity', cache: 'role-cache' };
+
+  el.innerHTML = disks.map(d => {
+    const roleClass = d.assigned ? (roleColors[d.role] || '') : 'unassigned';
+    const typeBadge = `<span class="disk-type-badge">${d.type}</span>`;
+
+    let statusHtml = '';
+    if (d.assigned) {
+      const roleLabel = d.role === 'array' ? 'Array' : d.role === 'parity' ? 'Parity' : 'Cache';
+      statusHtml = `<span class="badge badge-smb" style="margin-right:4px">${roleLabel}: ${d.slot}</span>`;
+    } else {
+      statusHtml = `<span style="color:var(--text-dim);font-size:12px">Unassigned</span>`;
+    }
+
+    const assignBtn = stopped
+      ? `<button class="btn btn-sm btn-primary" onclick="openAssignModal('${d.device}')">Assign</button>`
+      : '';
+    const unassignBtn = (stopped && d.assigned)
+      ? `<button class="btn btn-sm btn-ghost" onclick="doUnassign('${d.device}')">Unassign</button>`
+      : '';
+
+    const model = d.model || 'Unknown';
+    const fsBadge = d.has_fs ? `<span class="disk-type-badge" style="color:var(--yellow)">${d.has_fs}</span>` : '';
+
+    return `<div class="disk-scan-card ${roleClass}">
+      <div class="disk-device">${d.device}</div>
+      <div class="disk-model">${model} ${fsBadge}</div>
+      <div style="display:flex;gap:6px;align-items:center">${typeBadge}</div>
+      <div class="disk-size">${d.size}</div>
+      <div style="min-width:140px">${statusHtml}</div>
+      <div style="display:flex;gap:6px">${assignBtn}${unassignBtn}</div>
+    </div>`;
+  }).join('');
+}
+
+function openAssignModal(dev) {
+  _assignDev = dev;
+  document.getElementById('assign-modal-device').textContent = dev;
+  document.getElementById('assign-modal-backdrop').classList.remove('hidden');
+}
+
+function closeAssignModal() {
+  _assignDev = null;
+  document.getElementById('assign-modal-backdrop').classList.add('hidden');
+}
+
+function doAssign(role) {
+  if (!_assignDev) return;
+  const dev = _assignDev;
+  closeAssignModal();
+  dlog('cmd', `Assigning ${dev} as ${role}...`);
+  runCmd(['disks-assign', dev, role], 'disks-log-panel')
+    .then(() => {
+      dlog('success', `${dev} assigned as ${role}. Start the array to use it.`);
+      refreshDisks();
+      refreshStatus();
+    })
+    .catch(err => dlog('error', String(err)));
+}
+
+function doUnassign(dev) {
+  if (!confirm(`Unassign ${dev}?\n\nData on the disk is NOT deleted.`)) return;
+  dlog('cmd', `Unassigning ${dev}...`);
+  runCmd(['disks-unassign', dev], 'disks-log-panel')
+    .then(() => { refreshDisks(); refreshStatus(); })
+    .catch(err => dlog('error', String(err)));
 }
 
 // ── Shares ───────────────────────────────────────────────────────────────────

@@ -415,6 +415,134 @@ cmd_diff() {
     snapraid -c "$SNAPRAID_CONF" diff
 }
 
+cmd_disks_scan() {
+    # Return JSON array of all block devices with assignment status
+    local all_assigned
+    all_assigned=$(jq -r '
+        [.array.parity[]  | {device:.device, slot:.slot, role:"parity"}],
+        [.array.disks[]   | {device:.device, slot:.slot, role:"array"}],
+        [.array.cache[]   | {device:.device, slot:.slot, role:"cache"}]
+        | add // []
+    ' "$CONFIG_FILE" 2>/dev/null)
+
+    local disks_json="["
+    local first=true
+
+    while IFS= read -r line; do
+        # lsblk columns: NAME SIZE ROTA TYPE MODEL
+        local name size rota type model
+        name=$(echo "$line"  | awk '{print $1}')
+        size=$(echo "$line"  | awk '{print $2}')
+        rota=$(echo "$line"  | awk '{print $3}')  # 1=HDD 0=SSD
+        type=$(echo "$line"  | awk '{print $4}')
+        model=$(echo "$line" | cut -d' ' -f5-)
+
+        [ "$type" != "disk" ] && continue
+        local dev="/dev/${name}"
+
+        # Check if assigned
+        local assigned_slot="" assigned_role=""
+        assigned_slot=$(echo "$all_assigned" | jq -r --arg d "$dev" '.[] | select(.device==$d) | .slot' 2>/dev/null | head -1)
+        assigned_role=$(echo "$all_assigned" | jq -r --arg d "$dev" '.[] | select(.device==$d) | .role' 2>/dev/null | head -1)
+
+        local drive_type="HDD"
+        [ "$rota" = "0" ] && drive_type="SSD"
+
+        # Check if it has partitions / filesystem
+        local has_fs
+        has_fs=$(lsblk -no FSTYPE "$dev" 2>/dev/null | grep -v '^$' | head -1 || echo "")
+
+        # Trim model
+        model=$(echo "$model" | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
+
+        $first || disks_json+=","
+        first=false
+        disks_json+="{\"device\":\"${dev}\",\"name\":\"${name}\",\"size\":\"${size}\",\"type\":\"${drive_type}\",\"model\":\"${model//\"/\\\"}\",\"assigned\":$([ -n "$assigned_slot" ] && echo true || echo false),\"slot\":\"${assigned_slot}\",\"role\":\"${assigned_role}\",\"has_fs\":\"${has_fs}\"}"
+
+    done < <(lsblk -dn -o NAME,SIZE,ROTA,TYPE,MODEL 2>/dev/null)
+
+    disks_json+="]"
+    echo "$disks_json"
+}
+
+cmd_disks_assign() {
+    local dev="$1" role="$2" slot="$3" fstype="${4:-xfs}"
+    [ -z "$dev" ] || [ -z "$role" ] && die "Usage: freeraid disks-assign <device> <role:array|parity|cache> [slot] [fstype]"
+    [ -b "$dev" ] || die "Device $dev not found"
+
+    # Check array is stopped
+    local pool
+    pool=$(cfg_pool_mountpoint)
+    mountpoint -q "$pool" 2>/dev/null && die "Stop the array before reassigning disks: freeraid stop"
+
+    case "$role" in
+        array)
+            # Auto-assign next available slot if not specified
+            if [ -z "$slot" ]; then
+                local n=1
+                while jq -e --arg s "disk${n}" '.array.disks[] | select(.slot==$s)' "$CONFIG_FILE" &>/dev/null; do
+                    n=$((n+1))
+                done
+                slot="disk${n}"
+            fi
+            local mnt="/mnt/${slot}"
+            # Remove from other roles first
+            cmd_disks_unassign_dev "$dev" 2>/dev/null || true
+            jq --arg slot "$slot" --arg dev "$dev" --arg mnt "$mnt" --arg fs "$fstype" \
+               '.array.disks += [{"slot":$slot,"device":$dev,"mountpoint":$mnt,"fstype":$fs,"label":$slot,"enabled":true}]' \
+               "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+            info "Assigned $dev as array $slot"
+            ;;
+        parity)
+            if [ -z "$slot" ]; then
+                local p=0
+                while jq -e --arg s "$([ $p -eq 0 ] && echo 'parity' || echo "parity${p}")" '.array.parity[] | select(.slot==$s)' "$CONFIG_FILE" &>/dev/null; do
+                    p=$((p+1))
+                done
+                slot=$([ $p -eq 0 ] && echo "parity" || echo "parity${p}")
+            fi
+            local pmnt="/mnt/${slot}"
+            cmd_disks_unassign_dev "$dev" 2>/dev/null || true
+            jq --arg slot "$slot" --arg dev "$dev" --arg mnt "$pmnt" \
+               '.array.parity += [{"slot":$slot,"device":$dev,"mountpoint":$mnt,"fstype":"xfs","label":$slot}]' \
+               "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+            info "Assigned $dev as $slot"
+            ;;
+        cache)
+            slot="${slot:-cache}"
+            local cmnt="/mnt/${slot}"
+            cmd_disks_unassign_dev "$dev" 2>/dev/null || true
+            jq --arg slot "$slot" --arg dev "$dev" --arg mnt "$cmnt" \
+               '.array.cache += [{"slot":$slot,"device":$dev,"mountpoint":$mnt,"fstype":"ext4","label":$slot,"enabled":true}]' \
+               "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+            info "Assigned $dev as cache $slot"
+            ;;
+        *)
+            die "Role must be: array, parity, or cache"
+            ;;
+    esac
+}
+
+cmd_disks_unassign_dev() {
+    # Internal helper — remove a device from all roles
+    local dev="$1"
+    jq --arg d "$dev" '
+        .array.disks   |= map(select(.device != $d)) |
+        .array.parity  |= map(select(.device != $d)) |
+        .array.cache   |= map(select(.device != $d))
+    ' "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+}
+
+cmd_disks_unassign() {
+    local dev="$1"
+    [ -z "$dev" ] && die "Usage: freeraid disks-unassign <device>"
+    local pool
+    pool=$(cfg_pool_mountpoint)
+    mountpoint -q "$pool" 2>/dev/null && die "Stop the array before unassigning disks"
+    cmd_disks_unassign_dev "$dev"
+    info "Unassigned $dev"
+}
+
 cmd_add_disk() {
     local slot="$1" dev="$2" fstype="${3:-xfs}"
     [ -z "$slot" ] || [ -z "$dev" ] && die "Usage: freeraid add-disk <slot> <device> [fstype]"
@@ -775,6 +903,9 @@ case "${1:-help}" in
     diff)         cmd_diff ;;
     add-disk)     cmd_add_disk "${2:-}" "${3:-}" "${4:-}" ;;
     remove-disk)  cmd_remove_disk "${2:-}" ;;
+    disks-scan)    cmd_disks_scan ;;
+    disks-assign)  cmd_disks_assign "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
+    disks-unassign) cmd_disks_unassign "${2:-}" ;;
     shares-list)   cmd_shares_list ;;
     shares-apply)  cmd_shares_apply ;;
     shares-add)    cmd_shares_add "${2:-}" ;;
