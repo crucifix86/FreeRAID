@@ -11,7 +11,7 @@
     <header class="topbar">
       <div class="topbar-left">
         <span class="logo">FreeRAID</span>
-        <span class="version" id="version">v0.1.0</span>
+        <span class="version" id="version">v0.1.2</span>
       </div>
       <div class="topbar-right">
         <span class="array-badge" id="array-badge">●  Loading...</span>
@@ -20,60 +20,130 @@
       </div>
     </header>
 
+    <!-- Tab bar -->
+    <nav class="tabbar">
+      <button class="tab active" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard</button>
+      <button class="tab" data-tab="settings" onclick="switchTab('settings')">Settings</button>
+    </nav>
+
     <div class="content">
 
-      <!-- Update notification -->
+      <!-- Update notification (shown on all tabs) -->
       <div id="update-bar" class="alert update hidden">
         <span id="update-msg"></span>
-        <button class="btn btn-sm btn-primary" style="margin-left:16px" onclick="runUpdate()">Update Now</button>
+        <button class="btn btn-sm btn-primary" style="margin-left:16px" onclick="switchTab('settings')">View in Settings</button>
       </div>
 
-      <!-- Alert bar for operation output -->
+      <!-- Alert bar -->
       <div id="alert-bar" class="alert hidden"></div>
 
-      <!-- Summary row -->
-      <div class="summary-row">
-        <div class="summary-card">
-          <div class="summary-label">Array Capacity</div>
-          <div class="summary-value" id="array-total">—</div>
-        </div>
-        <div class="summary-card">
-          <div class="summary-label">Used</div>
-          <div class="summary-value" id="pool-used">—</div>
-        </div>
-        <div class="summary-card">
-          <div class="summary-label">Free</div>
-          <div class="summary-value" id="pool-free">—</div>
-        </div>
-        <div class="summary-card">
-          <div class="summary-label">Last Parity Sync</div>
-          <div class="summary-value" id="last-sync">—</div>
-        </div>
-      </div>
+      <!-- ── DASHBOARD TAB ── -->
+      <div id="tab-dashboard">
 
-      <!-- Drives section -->
-      <section>
-        <h2 class="section-title">Array Drives</h2>
-        <div class="drive-grid" id="drive-grid">
-          <div class="loading-msg">Loading drives...</div>
+        <!-- Summary row -->
+        <div class="summary-row">
+          <div class="summary-card">
+            <div class="summary-label">Array Capacity</div>
+            <div class="summary-value" id="array-total">—</div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-label">Used</div>
+            <div class="summary-value" id="pool-used">—</div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-label">Free</div>
+            <div class="summary-value" id="pool-free">—</div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-label">Last Parity Sync</div>
+            <div class="summary-value" id="last-sync">—</div>
+          </div>
         </div>
-      </section>
 
-      <!-- Log output panel -->
-      <section>
-        <h2 class="section-title">
-          Operation Log
-          <button class="btn btn-sm btn-ghost" onclick="clearLog()">Clear</button>
-        </h2>
-        <div class="log-panel" id="log-panel">
-          <div class="log-line log-info">FreeRAID web UI ready. Fetching status...</div>
+        <!-- Drives -->
+        <section>
+          <h2 class="section-title">Array Drives</h2>
+          <div class="drive-grid" id="drive-grid">
+            <div class="loading-msg">Loading drives...</div>
+          </div>
+        </section>
+
+        <!-- Log -->
+        <section>
+          <h2 class="section-title">
+            Operation Log
+            <button class="btn btn-sm btn-ghost" onclick="clearLog()">Clear</button>
+          </h2>
+          <div class="log-panel" id="log-panel">
+            <div class="log-line log-info">FreeRAID web UI ready. Fetching status...</div>
+          </div>
+        </section>
+
+      </div><!-- end dashboard -->
+
+      <!-- ── SETTINGS TAB ── -->
+      <div id="tab-settings" class="hidden">
+
+        <!-- Updates -->
+        <div class="settings-section">
+          <h2 class="settings-section-title">Updates</h2>
+          <div class="settings-card">
+            <div class="settings-row">
+              <div>
+                <div class="settings-label">Installed Version</div>
+                <div class="settings-value" id="s-version">—</div>
+              </div>
+              <div>
+                <div class="settings-label">Latest Available</div>
+                <div class="settings-value" id="s-latest">Checking...</div>
+              </div>
+              <div>
+                <div class="settings-label">Status</div>
+                <div class="settings-value" id="s-update-status">—</div>
+              </div>
+              <div style="display:flex;align-items:flex-end;gap:8px">
+                <button class="btn btn-secondary" id="btn-check-update" onclick="doCheckUpdate()">Check Now</button>
+                <button class="btn btn-primary hidden" id="btn-do-update" onclick="doUpdate()">Update Now</button>
+              </div>
+            </div>
+
+            <!-- Update log -->
+            <div id="update-log-wrap" class="hidden" style="margin-top:16px">
+              <div class="section-title" style="margin-bottom:8px">
+                Update Output
+                <button class="btn btn-sm btn-ghost" onclick="clearUpdateLog()">Clear</button>
+              </div>
+              <div class="log-panel" id="update-log-panel"></div>
+            </div>
+          </div>
         </div>
-      </section>
+
+        <!-- System Info -->
+        <div class="settings-section">
+          <h2 class="settings-section-title">System</h2>
+          <div class="settings-card">
+            <div class="settings-row">
+              <div>
+                <div class="settings-label">Hostname</div>
+                <div class="settings-value" id="s-hostname">—</div>
+              </div>
+              <div>
+                <div class="settings-label">Array State</div>
+                <div class="settings-value" id="s-array-state">—</div>
+              </div>
+              <div>
+                <div class="settings-label">Pool Mount</div>
+                <div class="settings-value" id="s-pool-mount">—</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div><!-- end settings -->
 
     </div>
   </div>
 
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/cockpit/0.0.1/cockpit.js" onerror="initFallback()"></script>
   <script src="freeraid.js"></script>
 </body>
 </html>

@@ -84,8 +84,75 @@ body {
 .btn-ghost:hover { color: var(--text); }
 .btn-sm       { font-size: 12px; padding: 4px 10px; }
 
+/* ── Tab bar ── */
+.tabbar {
+  display: flex;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--border);
+  padding: 0 24px;
+  gap: 4px;
+}
+
+.tab {
+  padding: 12px 18px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+  margin-bottom: -1px;
+}
+.tab:hover  { color: var(--text); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
 /* ── Content ── */
 .content { padding: 24px; max-width: 1200px; margin: 0 auto; }
+
+/* ── Settings ── */
+.settings-section { margin-bottom: 28px; }
+
+.settings-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  margin: 0 0 12px;
+}
+
+.settings-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+
+.settings-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 32px;
+  align-items: flex-start;
+}
+
+.settings-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
+.settings-value {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.settings-value.up-to-date { color: var(--green); }
+.settings-value.update-avail { color: var(--yellow); }
 
 /* ── Alert ── */
 .alert {
