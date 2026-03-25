@@ -23,11 +23,8 @@ cd "$REPO_DIR"
 
 echo "==> Releasing FreeRAID v${VERSION}"
 
-# 1. Update VERSION file
+# 1. Update VERSION file (this is the single source of truth)
 echo "$VERSION" > VERSION
-
-# 2. Update version string in CLI (still kept as fallback)
-sed -i "s/^FREERAID_VERSION=.*/FREERAID_VERSION=\"${VERSION}\"/" core/freeraid 2>/dev/null || true
 
 # 3. Build the component tarball — only the parts devices need to update
 TMPDIR=$(mktemp -d)
