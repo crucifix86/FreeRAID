@@ -800,6 +800,15 @@ cmd_docker_logs() {
     docker compose -f "$f" logs --tail=100 --no-color 2>&1 || true
 }
 
+cmd_docker_delete() {
+    local name="${1:-}"
+    [ -z "$name" ] && die "Usage: freeraid docker-delete <name>"
+    local f="${COMPOSE_DIR}/${name}.docker-compose.yml"
+    [ -f "$f" ] || die "No compose file found for: $name"
+    rm -f "$f"
+    info "Deleted compose file for: $name"
+}
+
 cmd_install_deps() {
     info "Installing FreeRAID dependencies..."
     apt-get update -qq
@@ -1000,6 +1009,7 @@ case "${1:-help}" in
     docker-start)  cmd_docker_start "${2:-}" ;;
     docker-stop)   cmd_docker_stop "${2:-}" ;;
     docker-logs)   cmd_docker_logs "${2:-}" ;;
+    docker-delete) cmd_docker_delete "${2:-}" ;;
     install-deps)  cmd_install_deps ;;
     config)        cmd_config ;;
     version)       cmd_version ;;

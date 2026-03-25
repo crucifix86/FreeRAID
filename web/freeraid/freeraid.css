@@ -507,6 +507,34 @@ body {
 .docker-state { font-size: 12px; font-weight: 500; min-width: 60px; }
 .docker-actions { display: flex; gap: 6px; margin-left: auto; }
 
+.docker-checkbox {
+  width: 15px; height: 15px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.docker-select-all-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 12px;
+  cursor: pointer;
+}
+
+.docker-delete-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: #2a1515;
+  border: 1px solid var(--red);
+  border-radius: var(--radius);
+  padding: 10px 16px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  color: #fca5a5;
+}
+
 /* ── Scrollbar ── */
 ::-webkit-scrollbar       { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: var(--bg2); }

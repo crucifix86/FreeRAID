@@ -620,6 +620,8 @@ function refreshDocker() {
     .catch(() => { el.innerHTML = '<div class="loading-msg">docker-list failed.</div>'; });
 }
 
+let _dockerSelection = new Set();
+
 function renderDocker(containers) {
   const el = document.getElementById('docker-container-list');
 
@@ -627,6 +629,9 @@ function renderDocker(containers) {
   document.getElementById('docker-running-count').textContent = running;
   document.getElementById('docker-stopped-count').textContent = containers.length - running;
   document.getElementById('docker-total-count').textContent   = containers.length;
+
+  const selectAllWrap = document.getElementById('docker-select-all-wrap');
+  selectAllWrap.style.display = containers.length ? '' : 'none';
 
   if (!containers.length) {
     el.innerHTML = '<div class="loading-msg">No compose files found in /etc/freeraid/compose/. ' +
@@ -640,11 +645,14 @@ function renderDocker(containers) {
     const stateLabel = isRunning ? 'Running' : 'Stopped';
     const stateColor = isRunning ? 'var(--green)' : 'var(--text-dim)';
     const nameSafe   = c.name.replace(/'/g, "\\'");
+    const checked    = _dockerSelection.has(c.name) ? 'checked' : '';
     const toggleBtn  = isRunning
       ? `<button class="btn btn-sm btn-danger" onclick="dockerStop('${nameSafe}')">Stop</button>`
       : `<button class="btn btn-sm btn-primary" onclick="dockerStart('${nameSafe}')">Start</button>`;
 
-    return `<div class="docker-card${isRunning ? ' running' : ''}">
+    return `<div class="docker-card${isRunning ? ' running' : ''}" id="dcard-${c.name}">
+      <input type="checkbox" class="docker-checkbox" ${checked}
+        onchange="dockerSelectToggle('${nameSafe}', this.checked)">
       <div class="docker-header">
         <span class="drive-status-dot ${dotClass}"></span>
         <span class="docker-name">${c.name}</span>
@@ -657,6 +665,77 @@ function renderDocker(containers) {
       </div>
     </div>`;
   }).join('');
+}
+
+function dockerSelectToggle(name, checked) {
+  if (checked) _dockerSelection.add(name);
+  else         _dockerSelection.delete(name);
+  _dockerUpdateSelectionUI();
+}
+
+function dockerToggleAll(checked) {
+  document.querySelectorAll('.docker-checkbox').forEach(cb => {
+    const name = cb.closest('[id^="dcard-"]').id.replace('dcard-', '');
+    cb.checked = checked;
+    if (checked) _dockerSelection.add(name);
+    else         _dockerSelection.delete(name);
+  });
+  _dockerUpdateSelectionUI();
+}
+
+function dockerClearSelection() {
+  _dockerSelection.clear();
+  document.querySelectorAll('.docker-checkbox').forEach(cb => { cb.checked = false; });
+  const selectAll = document.getElementById('docker-select-all');
+  if (selectAll) selectAll.checked = false;
+  _dockerUpdateSelectionUI();
+}
+
+function _dockerUpdateSelectionUI() {
+  const bar   = document.getElementById('docker-delete-bar');
+  const count = document.getElementById('docker-delete-count');
+  const n     = _dockerSelection.size;
+  if (n > 0) {
+    bar.classList.remove('hidden');
+    count.textContent = `${n} selected`;
+  } else {
+    bar.classList.add('hidden');
+  }
+}
+
+function dockerDeleteSelected() {
+  const names = [..._dockerSelection];
+  if (!names.length) return;
+  if (!confirm(`Delete ${names.length} compose file(s)?\n\n${names.join('\n')}\n\nThis removes the file from /etc/freeraid/compose/ — running containers are stopped first.`)) return;
+
+  dklog('cmd', `Deleting ${names.length} containers...`);
+  dockerClearSelection();
+
+  // Stop any running ones first, then delete — run sequentially
+  const doDeletes = () => {
+    const promises = names.map(name =>
+      runCmd(['docker-delete', name], 'docker-log-panel')
+        .then(() => dklog('success', `Deleted: ${name}`))
+        .catch(err => dklog('error', `${name}: ${String(err)}`))
+    );
+    Promise.all(promises).then(() => refreshDocker());
+  };
+
+  // Stop running containers first
+  const runningNames = names.filter(name => {
+    const card = document.getElementById('dcard-' + name);
+    return card && card.classList.contains('running');
+  });
+
+  if (runningNames.length) {
+    dklog('info', `Stopping ${runningNames.length} running container(s) first...`);
+    const stopPromises = runningNames.map(name =>
+      runCmd(['docker-stop', name], 'docker-log-panel').catch(() => {})
+    );
+    Promise.all(stopPromises).then(doDeletes);
+  } else {
+    doDeletes();
+  }
 }
 
 function dockerStart(name) {

@@ -330,8 +330,20 @@
         <div class="settings-section">
           <h2 class="settings-section-title">
             Containers
+            <label class="docker-select-all-wrap" id="docker-select-all-wrap" style="display:none">
+              <input type="checkbox" id="docker-select-all" onchange="dockerToggleAll(this.checked)">
+              <span style="font-size:12px;font-weight:400;text-transform:none;letter-spacing:0;color:var(--text-dim)">Select all</span>
+            </label>
             <button class="btn btn-sm btn-secondary" style="margin-left:auto" onclick="refreshDocker()">Refresh</button>
           </h2>
+
+          <!-- Delete bar — shown when items are selected -->
+          <div id="docker-delete-bar" class="docker-delete-bar hidden">
+            <span id="docker-delete-count">0 selected</span>
+            <button class="btn btn-sm btn-danger" onclick="dockerDeleteSelected()">Delete Selected</button>
+            <button class="btn btn-sm btn-ghost" onclick="dockerClearSelection()">Cancel</button>
+          </div>
+
           <div id="docker-container-list">
             <div class="loading-msg">Loading containers...</div>
           </div>
