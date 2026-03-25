@@ -139,8 +139,8 @@ function applyStatus(data) {
   btn.className   = 'btn ' + (arrayState === 'started' ? 'btn-danger' : 'btn-primary');
 
   // Pool stats
-  if (data.pool && data.pool.size) {
-    document.getElementById('pool-size').textContent = data.pool.size || '—';
+  document.getElementById('array-total').textContent = data.array_total || '—';
+  if (data.pool) {
     document.getElementById('pool-used').textContent = data.pool.used || '—';
     document.getElementById('pool-free').textContent = data.pool.free || '—';
   }

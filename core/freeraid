@@ -146,9 +146,28 @@ cmd_status_json() {
     done < <(jq -r '.array.cache[] | .slot + " " + .device + " " + .mountpoint + " " + (.enabled|tostring) + " " + .label' "$CONFIG_FILE")
     cache_json+="]"
 
-    printf '{"version":"%s","array_state":"%s","pool":{"mountpoint":"%s","size":"%s","used":"%s","free":"%s","pct":"%s"},"parity":%s,"disks":%s,"cache":%s,"last_sync":"%s"}\n' \
+    # Total raw array capacity = sum of enabled data disk sizes in bytes
+    local total_bytes=0
+    while IFS=' ' read -r dev enabled; do
+        if [ "$enabled" = "true" ] && [ -b "$dev" ]; then
+            local b
+            b=$(lsblk -dn -o SIZE --bytes "$dev" 2>/dev/null || echo 0)
+            total_bytes=$((total_bytes + b))
+        fi
+    done < <(jq -r '.array.disks[] | .device + " " + (.enabled|tostring)' "$CONFIG_FILE")
+
+    # Human-readable total (awk handles GB/TB nicely)
+    local array_total
+    array_total=$(awk -v b="$total_bytes" 'BEGIN{
+        if(b>=1099511627776) printf "%.1fT", b/1099511627776
+        else if(b>=1073741824) printf "%.1fG", b/1073741824
+        else if(b>=1048576) printf "%.1fM", b/1048576
+        else printf "%dB", b
+    }')
+
+    printf '{"version":"%s","array_state":"%s","pool":{"mountpoint":"%s","size":"%s","used":"%s","free":"%s","pct":"%s"},"array_total":"%s","parity":%s,"disks":%s,"cache":%s,"last_sync":"%s"}\n' \
         "$FREERAID_VERSION" "$array_state" "$pool" "$pool_size" "$pool_used" "$pool_free" "$pool_pct" \
-        "$parity_json" "$disks_json" "$cache_json" "$last_sync"
+        "$array_total" "$parity_json" "$disks_json" "$cache_json" "$last_sync"
 }
 
 cmd_status() {
