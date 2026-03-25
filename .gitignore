@@ -1,0 +1,9 @@
+# VM disk images - do not commit
+vm/disks/
+vm/*.iso
+
+# Logs
+*.log
+
+# Temp files
+*.tmp

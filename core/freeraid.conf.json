@@ -1,0 +1,116 @@
+{
+  "_version": "1",
+  "_schema": "freeraid-config",
+
+  "system": {
+    "hostname": "freeraid",
+    "timezone": "America/Chicago",
+    "language": "en_US"
+  },
+
+  "array": {
+    "state": "stopped",
+    "parity": [
+      {
+        "slot": "parity",
+        "device": "/dev/vdf",
+        "mountpoint": "/mnt/parity",
+        "fstype": "xfs",
+        "label": "Parity"
+      }
+    ],
+    "disks": [
+      {
+        "slot": "disk1",
+        "device": "/dev/vdb",
+        "mountpoint": "/mnt/disk1",
+        "fstype": "xfs",
+        "label": "Disk 1",
+        "enabled": true
+      },
+      {
+        "slot": "disk2",
+        "device": "/dev/vdc",
+        "mountpoint": "/mnt/disk2",
+        "fstype": "xfs",
+        "label": "Disk 2",
+        "enabled": true
+      },
+      {
+        "slot": "disk3",
+        "device": "/dev/vdd",
+        "mountpoint": "/mnt/disk3",
+        "fstype": "xfs",
+        "label": "Disk 3",
+        "enabled": false
+      },
+      {
+        "slot": "disk4",
+        "device": "/dev/vde",
+        "mountpoint": "/mnt/disk4",
+        "fstype": "xfs",
+        "label": "Disk 4",
+        "enabled": false
+      }
+    ],
+    "cache": [
+      {
+        "slot": "cache",
+        "device": "/dev/vdg",
+        "mountpoint": "/mnt/cache",
+        "fstype": "ext4",
+        "label": "Cache",
+        "enabled": true
+      }
+    ],
+    "pool_mountpoint": "/mnt/user",
+    "mergerfs_options": "defaults,allow_other,use_ino,cache.files=off,dropcacheonclose=true,category.create=mfs"
+  },
+
+  "snapraid": {
+    "sync_schedule": "0 3 * * *",
+    "scrub_schedule": "0 4 * * 0",
+    "scrub_percent": 22,
+    "scrub_age": 10,
+    "diff_warn_deleted": 40,
+    "diff_warn_updated": 40,
+    "content_files": ["/mnt/disk1/.snapraid.content", "/mnt/disk2/.snapraid.content"],
+    "exclude": ["/lost+found/", "*.tmp", "*.!qB", "*.part"]
+  },
+
+  "shares": [
+    {
+      "name": "Media",
+      "path": "/mnt/user/Media",
+      "comment": "Movies, TV, Music",
+      "smb_enabled": true,
+      "smb_public": true,
+      "nfs_enabled": false,
+      "cache_mode": "prefer",
+      "include_disks": []
+    },
+    {
+      "name": "Appdata",
+      "path": "/mnt/user/Appdata",
+      "comment": "Docker container config",
+      "smb_enabled": false,
+      "nfs_enabled": false,
+      "cache_mode": "only",
+      "include_disks": []
+    }
+  ],
+
+  "network": {
+    "interface": "eth0",
+    "dhcp": true,
+    "ip": "",
+    "gateway": "",
+    "dns": ["1.1.1.1", "8.8.8.8"]
+  },
+
+  "docker": {
+    "enabled": true,
+    "data_root": "/mnt/user/Appdata/docker",
+    "compose_dir": "/mnt/user/Appdata/compose"
+  }
+}

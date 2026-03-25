@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FreeRAID</title>
+  <link rel="stylesheet" href="freeraid.css">
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="topbar-left">
+        <span class="logo">FreeRAID</span>
+        <span class="version" id="version">v0.1.0</span>
+      </div>
+      <div class="topbar-right">
+        <span class="array-badge" id="array-badge">●  Loading...</span>
+        <button class="btn btn-primary" id="btn-start-stop" onclick="toggleArray()">Start Array</button>
+        <button class="btn btn-secondary" id="btn-sync" onclick="runSync()">Sync Parity</button>
+      </div>
+    </header>
+
+    <div class="content">
+
+      <!-- Alert bar for operation output -->
+      <div id="alert-bar" class="alert hidden"></div>
+
+      <!-- Summary row -->
+      <div class="summary-row">
+        <div class="summary-card">
+          <div class="summary-label">Pool Size</div>
+          <div class="summary-value" id="pool-size">—</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label">Used</div>
+          <div class="summary-value" id="pool-used">—</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label">Free</div>
+          <div class="summary-value" id="pool-free">—</div>
+        </div>
+        <div class="summary-card">
+          <div class="summary-label">Last Parity Sync</div>
+          <div class="summary-value" id="last-sync">—</div>
+        </div>
+      </div>
+
+      <!-- Drives section -->
+      <section>
+        <h2 class="section-title">Array Drives</h2>
+        <div class="drive-grid" id="drive-grid">
+          <div class="loading-msg">Loading drives...</div>
+        </div>
+      </section>
+
+      <!-- Log output panel -->
+      <section>
+        <h2 class="section-title">
+          Operation Log
+          <button class="btn btn-sm btn-ghost" onclick="clearLog()">Clear</button>
+        </h2>
+        <div class="log-panel" id="log-panel">
+          <div class="log-line log-info">FreeRAID web UI ready. Fetching status...</div>
+        </div>
+      </section>
+
+    </div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/cockpit/0.0.1/cockpit.js" onerror="initFallback()"></script>
+  <script src="freeraid.js"></script>
+</body>
+</html>

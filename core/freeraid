@@ -1,0 +1,491 @@
+#!/usr/bin/env bash
+# freeraid - main CLI for FreeRAID array management
+# Usage: freeraid <command> [options]
+
+set -euo pipefail
+
+FREERAID_VERSION="0.1.0"
+CONFIG_FILE="${FREERAID_CONFIG:-/boot/config/freeraid.conf.json}"
+SNAPRAID_CONF="/etc/snapraid.conf"
+LOG_FILE="/var/log/freeraid.log"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG_FILE"; }
+info()    { echo -e "${GREEN}==>${NC} $*"; log "INFO: $*"; }
+warn()    { echo -e "${YELLOW}WARN:${NC} $*"; log "WARN: $*"; }
+error()   { echo -e "${RED}ERROR:${NC} $*" >&2; log "ERROR: $*"; }
+die()     { error "$*"; exit 1; }
+require() { command -v "$1" &>/dev/null || die "Required tool not found: $1 — run: freeraid install-deps"; }
+
+# ── Config helpers ──────────────────────────────────────────────────────────────
+
+cfg() { jq -r "$1" "$CONFIG_FILE" 2>/dev/null; }
+
+cfg_array_disks_enabled() {
+    jq -r '.array.disks[] | select(.enabled==true) | .device + " " + .mountpoint + " " + .fstype' "$CONFIG_FILE"
+}
+
+cfg_parity_mountpoints() {
+    jq -r '.array.parity[] | .mountpoint + " " + .device + " " + .fstype' "$CONFIG_FILE"
+}
+
+cfg_pool_mountpoint() { cfg '.array.pool_mountpoint'; }
+cfg_mergerfs_opts()   { cfg '.array.mergerfs_options'; }
+
+# ── Snapraid config generator ────────────────────────────────────────────────────
+
+generate_snapraid_conf() {
+    local conf=""
+    local parity_index=0
+
+    while IFS=' ' read -r mnt dev fstype; do
+        if [ $parity_index -eq 0 ]; then
+            conf+="parity $mnt/snapraid.parity"$'\n'
+        else
+            conf+="${parity_index}-parity $mnt/snapraid.parity"$'\n'
+        fi
+        parity_index=$((parity_index + 1))
+    done < <(cfg_parity_mountpoints)
+
+    conf+=$'\n'
+
+    local disk_index=1
+    while IFS=' ' read -r dev mnt fstype; do
+        conf+="data d${disk_index} ${mnt}/"$'\n'
+        disk_index=$((disk_index + 1))
+    done < <(cfg_array_disks_enabled)
+
+    conf+=$'\n'
+
+    while IFS= read -r cfile; do
+        conf+="content $cfile"$'\n'
+    done < <(jq -r '.snapraid.content_files[]' "$CONFIG_FILE")
+
+    conf+=$'\n'
+
+    while IFS= read -r excl; do
+        conf+="exclude $excl"$'\n'
+    done < <(jq -r '.snapraid.exclude[]' "$CONFIG_FILE")
+
+    echo "$conf"
+}
+
+# ── Array commands ───────────────────────────────────────────────────────────────
+
+cmd_status_json() {
+    local pool
+    pool=$(cfg_pool_mountpoint)
+
+    local array_state="stopped"
+    mountpoint -q "$pool" 2>/dev/null && array_state="started"
+
+    # Pool stats
+    local pool_size="" pool_used="" pool_free="" pool_pct=""
+    if [ "$array_state" = "started" ]; then
+        read -r pool_size pool_used pool_free pool_pct < <(df -h "$pool" 2>/dev/null | awk 'NR==2{print $2,$3,$4,$5}' || echo "? ? ? ?")
+    fi
+
+    # Last sync
+    local last_sync
+    last_sync=$(journalctl -u freeraid-sync --no-pager -n 1 --output=short 2>/dev/null | grep -oP '\d{4}-\d{2}-\d{2}' | head -1 || echo "never")
+
+    # Parity drives JSON
+    local parity_json="["
+    local first=true
+    while IFS=' ' read -r slot dev mnt fstype label; do
+        local present=false size="" synced=false
+        [ -b "$dev" ] && present=true
+        $present && size=$(lsblk -dn -o SIZE "$dev" 2>/dev/null || echo "?")
+        mountpoint -q "$mnt" 2>/dev/null && synced=true
+        $first || parity_json+=","
+        first=false
+        parity_json+="{\"slot\":\"$slot\",\"device\":\"$dev\",\"mountpoint\":\"$mnt\",\"size\":\"$size\",\"present\":$present,\"mounted\":$synced,\"label\":\"$label\"}"
+    done < <(jq -r '.array.parity[] | .slot + " " + .device + " " + .mountpoint + " " + .fstype + " " + .label' "$CONFIG_FILE")
+    parity_json+="]"
+
+    # Data drives JSON
+    local disks_json="["
+    first=true
+    while IFS=' ' read -r slot dev mnt enabled label; do
+        local present=false size="" mounted=false used="" free="" pct=""
+        [ -b "$dev" ] && present=true
+        $present && size=$(lsblk -dn -o SIZE "$dev" 2>/dev/null || echo "?")
+        mountpoint -q "$mnt" 2>/dev/null && mounted=true
+        if $mounted; then
+            read -r used free pct < <(df -h "$mnt" 2>/dev/null | awk 'NR==2{print $3,$4,$5}' || echo "? ? ?")
+        fi
+        $first || disks_json+=","
+        first=false
+        disks_json+="{\"slot\":\"$slot\",\"device\":\"$dev\",\"mountpoint\":\"$mnt\",\"enabled\":$enabled,\"present\":$present,\"mounted\":$mounted,\"size\":\"$size\",\"used\":\"$used\",\"free\":\"$free\",\"pct\":\"$pct\",\"label\":\"$label\"}"
+    done < <(jq -r '.array.disks[] | .slot + " " + .device + " " + .mountpoint + " " + (.enabled|tostring) + " " + .label' "$CONFIG_FILE")
+    disks_json+="]"
+
+    # Cache drives JSON
+    local cache_json="["
+    first=true
+    while IFS=' ' read -r slot dev mnt enabled label; do
+        local present=false size="" mounted=false used="" free="" pct=""
+        [ -b "$dev" ] && present=true
+        $present && size=$(lsblk -dn -o SIZE "$dev" 2>/dev/null || echo "?")
+        mountpoint -q "$mnt" 2>/dev/null && mounted=true
+        if $mounted; then
+            read -r used free pct < <(df -h "$mnt" 2>/dev/null | awk 'NR==2{print $3,$4,$5}' || echo "? ? ?")
+        fi
+        $first || cache_json+=","
+        first=false
+        cache_json+="{\"slot\":\"$slot\",\"device\":\"$dev\",\"mountpoint\":\"$mnt\",\"enabled\":$enabled,\"present\":$present,\"mounted\":$mounted,\"size\":\"$size\",\"used\":\"$used\",\"free\":\"$free\",\"pct\":\"$pct\",\"label\":\"$label\"}"
+    done < <(jq -r '.array.cache[] | .slot + " " + .device + " " + .mountpoint + " " + (.enabled|tostring) + " " + .label' "$CONFIG_FILE")
+    cache_json+="]"
+
+    printf '{"version":"%s","array_state":"%s","pool":{"mountpoint":"%s","size":"%s","used":"%s","free":"%s","pct":"%s"},"parity":%s,"disks":%s,"cache":%s,"last_sync":"%s"}\n' \
+        "$FREERAID_VERSION" "$array_state" "$pool" "$pool_size" "$pool_used" "$pool_free" "$pool_pct" \
+        "$parity_json" "$disks_json" "$cache_json" "$last_sync"
+}
+
+cmd_status() {
+    # Machine-readable mode for web UI
+    if [ "${FREERAID_JSON:-}" = "1" ] || [ "${1:-}" = "--json" ]; then
+        cmd_status_json
+        return
+    fi
+
+    echo -e "${BOLD}FreeRAID v${FREERAID_VERSION} — Array Status${NC}"
+    echo "────────────────────────────────────────────"
+
+    local pool
+    pool=$(cfg_pool_mountpoint)
+
+    local array_running=false
+    if mountpoint -q "$pool" 2>/dev/null; then
+        array_running=true
+        echo -e "Array:   ${GREEN}STARTED${NC}"
+    else
+        echo -e "Array:   ${YELLOW}STOPPED${NC}"
+    fi
+
+    echo ""
+    echo -e "${BOLD}Parity Drives:${NC}"
+    while IFS=' ' read -r slot dev label; do
+        if [ -b "$dev" ]; then
+            local size
+            size=$(lsblk -dn -o SIZE "$dev" 2>/dev/null || echo "?")
+            echo -e "  ${GREEN}●${NC} $slot  $dev  $size  $label"
+        else
+            echo -e "  ${RED}✗${NC} $slot  $dev  [not found]"
+        fi
+    done < <(jq -r '.array.parity[] | .slot + " " + .device + " " + .label' "$CONFIG_FILE")
+
+    echo ""
+    echo -e "${BOLD}Data Drives:${NC}"
+    while IFS=' ' read -r slot dev mnt enabled label; do
+        if [ "$enabled" = "true" ]; then
+            if [ -b "$dev" ]; then
+                local size used avail
+                size=$(lsblk -dn -o SIZE "$dev" 2>/dev/null || echo "?")
+                if mountpoint -q "$mnt" 2>/dev/null; then
+                    read -r used avail _ < <(df -h "$mnt" 2>/dev/null | awk 'NR==2{print $3,$4,$5}' || echo "? ? ?")
+                    echo -e "  ${GREEN}●${NC} $slot  $dev  $size  used:$used free:$avail  $label"
+                else
+                    echo -e "  ${YELLOW}○${NC} $slot  $dev  $size  [not mounted]  $label"
+                fi
+            else
+                echo -e "  ${RED}✗${NC} $slot  $dev  [not found]  $label"
+            fi
+        else
+            echo -e "  ${BLUE}–${NC} $slot  $dev  [disabled]  $label"
+        fi
+    done < <(jq -r '.array.disks[] | .slot + " " + .device + " " + .mountpoint + " " + (.enabled|tostring) + " " + .label' "$CONFIG_FILE")
+
+    if $array_running; then
+        echo ""
+        echo -e "${BOLD}Pool (${pool}):${NC}"
+        df -h "$pool" 2>/dev/null | awk 'NR==2{printf "  Size: %s  Used: %s  Free: %s  (%s used)\n",$2,$3,$4,$5}' || echo "  [error reading pool]"
+    fi
+
+    local last_sync
+    last_sync=$(journalctl -u freeraid-sync --no-pager -n 1 --output=short 2>/dev/null | grep -oP '\d{4}-\d{2}-\d{2}' | head -1 || echo "never")
+    echo ""
+    echo -e "Last parity sync: ${last_sync}"
+}
+
+cmd_start() {
+    info "Starting FreeRAID array..."
+
+    require jq
+    require mergerfs
+
+    local pool
+    pool=$(cfg_pool_mountpoint)
+
+    # Format + mount parity drives
+    while IFS=' ' read -r mnt dev fstype; do
+        if [ ! -b "$dev" ]; then
+            warn "Parity device $dev not found, skipping"
+            continue
+        fi
+        mkdir -p "$mnt"
+        if ! blkid "$dev" &>/dev/null; then
+            info "Formatting parity $dev as $fstype..."
+            case "$fstype" in
+                xfs)  mkfs.xfs -f -L "parity" "$dev" ;;
+                ext4) mkfs.ext4 -F -L "parity" "$dev" ;;
+                *) mkfs.xfs -f "$dev" ;;
+            esac
+        fi
+        if ! mountpoint -q "$mnt"; then
+            info "Mounting parity $dev → $mnt"
+            mount "$dev" "$mnt" || die "Failed to mount parity $dev"
+        fi
+    done < <(cfg_parity_mountpoints)
+
+    # Format + mount each enabled data disk
+    while IFS=' ' read -r dev mnt fstype; do
+        if [ ! -b "$dev" ]; then
+            warn "Device $dev not found, skipping"
+            continue
+        fi
+
+        mkdir -p "$mnt"
+
+        if ! blkid "$dev" &>/dev/null; then
+            info "Formatting $dev as $fstype..."
+            case "$fstype" in
+                xfs)  mkfs.xfs -f -L "$(basename "$mnt")" "$dev" ;;
+                ext4) mkfs.ext4 -F -L "$(basename "$mnt")" "$dev" ;;
+                btrfs) mkfs.btrfs -f -L "$(basename "$mnt")" "$dev" ;;
+                *) die "Unknown fstype: $fstype" ;;
+            esac
+        fi
+
+        if ! mountpoint -q "$mnt"; then
+            info "Mounting $dev → $mnt"
+            mount "$dev" "$mnt" || die "Failed to mount $dev"
+        else
+            info "$mnt already mounted"
+        fi
+    done < <(cfg_array_disks_enabled)
+
+    # Mount cache
+    local cache_dev cache_mnt cache_fs
+    cache_dev=$(jq -r '.array.cache[] | select(.enabled==true) | .device' "$CONFIG_FILE" | head -1)
+    cache_mnt=$(jq -r '.array.cache[] | select(.enabled==true) | .mountpoint' "$CONFIG_FILE" | head -1)
+    cache_fs=$(jq -r '.array.cache[] | select(.enabled==true) | .fstype' "$CONFIG_FILE" | head -1)
+
+    if [ -n "$cache_dev" ] && [ -b "$cache_dev" ]; then
+        mkdir -p "$cache_mnt"
+        if ! blkid "$cache_dev" &>/dev/null; then
+            info "Formatting cache $cache_dev as $cache_fs..."
+            mkfs."$cache_fs" -F "$cache_dev" 2>/dev/null || mkfs."$cache_fs" "$cache_dev"
+        fi
+        if ! mountpoint -q "$cache_mnt"; then
+            info "Mounting cache $cache_dev → $cache_mnt"
+            mount "$cache_dev" "$cache_mnt"
+        fi
+    fi
+
+    # Build mergerfs branches string
+    local branches=""
+    while IFS=' ' read -r dev mnt fstype; do
+        [ -b "$dev" ] && branches+="${mnt}:"
+    done < <(cfg_array_disks_enabled)
+
+    # Prepend cache as highest priority
+    if [ -n "$cache_mnt" ] && mountpoint -q "$cache_mnt" 2>/dev/null; then
+        branches="${cache_mnt}:${branches}"
+    fi
+
+    branches="${branches%:}"  # strip trailing colon
+
+    if [ -z "$branches" ]; then
+        die "No drives available to pool"
+    fi
+
+    mkdir -p "$pool"
+
+    if ! mountpoint -q "$pool"; then
+        info "Mounting mergerfs pool: $branches → $pool"
+        mergerfs "$branches" "$pool" -o "$(cfg_mergerfs_opts)" || die "mergerfs failed"
+    else
+        info "Pool already mounted at $pool"
+    fi
+
+    # Generate snapraid config
+    info "Generating snapraid config..."
+    generate_snapraid_conf > "$SNAPRAID_CONF"
+
+    # Update array state in config
+    jq '.array.state = "started"' "$CONFIG_FILE" > /tmp/freeraid.conf.tmp \
+        && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+
+    info "Array started. Pool at ${pool}"
+    cmd_status
+}
+
+cmd_stop() {
+    info "Stopping FreeRAID array..."
+
+    local pool
+    pool=$(cfg_pool_mountpoint)
+
+    # Unmount pool first
+    if mountpoint -q "$pool" 2>/dev/null; then
+        info "Unmounting pool $pool"
+        umount "$pool" || umount -l "$pool"
+    fi
+
+    # Unmount data disks in reverse order
+    while IFS=' ' read -r dev mnt fstype; do
+        if mountpoint -q "$mnt" 2>/dev/null; then
+            info "Unmounting $mnt"
+            umount "$mnt" || umount -l "$mnt"
+        fi
+    done < <(cfg_array_disks_enabled | tac)
+
+    # Unmount cache
+    local cache_mnt
+    cache_mnt=$(jq -r '.array.cache[] | select(.enabled==true) | .mountpoint' "$CONFIG_FILE" | head -1)
+    if [ -n "$cache_mnt" ] && mountpoint -q "$cache_mnt" 2>/dev/null; then
+        info "Unmounting cache $cache_mnt"
+        umount "$cache_mnt" || umount -l "$cache_mnt"
+    fi
+
+    # Unmount parity drives
+    while IFS=' ' read -r mnt dev fstype; do
+        if mountpoint -q "$mnt" 2>/dev/null; then
+            info "Unmounting parity $mnt"
+            umount "$mnt" || umount -l "$mnt"
+        fi
+    done < <(cfg_parity_mountpoints)
+
+    jq '.array.state = "stopped"' "$CONFIG_FILE" > /tmp/freeraid.conf.tmp \
+        && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+
+    info "Array stopped."
+}
+
+cmd_sync() {
+    info "Running SnapRAID sync (parity update)..."
+    require snapraid
+
+    [ -f "$SNAPRAID_CONF" ] || { generate_snapraid_conf > "$SNAPRAID_CONF"; info "Generated $SNAPRAID_CONF"; }
+
+    snapraid -c "$SNAPRAID_CONF" sync && info "Sync complete." || die "Sync failed — check snapraid output above"
+}
+
+cmd_scrub() {
+    local percent
+    percent=$(cfg '.snapraid.scrub_percent')
+    percent="${percent:-22}"
+    info "Running SnapRAID scrub (${percent}% of parity)..."
+    require snapraid
+    snapraid -c "$SNAPRAID_CONF" scrub -p "$percent" && info "Scrub complete." || die "Scrub failed"
+}
+
+cmd_diff() {
+    info "SnapRAID diff (what changed since last sync)..."
+    require snapraid
+    snapraid -c "$SNAPRAID_CONF" diff
+}
+
+cmd_add_disk() {
+    local slot="$1" dev="$2" fstype="${3:-xfs}"
+    [ -z "$slot" ] || [ -z "$dev" ] && die "Usage: freeraid add-disk <slot> <device> [fstype]"
+    [ -b "$dev" ] || die "Device $dev does not exist"
+
+    info "Adding $dev as $slot ($fstype)"
+
+    local mnt="/mnt/${slot}"
+    local existing
+    existing=$(jq -r --arg s "$slot" '.array.disks[] | select(.slot==$s) | .slot' "$CONFIG_FILE" 2>/dev/null || true)
+    [ -n "$existing" ] && die "Slot $slot already exists in config"
+
+    jq --arg slot "$slot" --arg dev "$dev" --arg mnt "$mnt" --arg fs "$fstype" \
+       '.array.disks += [{"slot":$slot,"device":$dev,"mountpoint":$mnt,"fstype":$fs,"label":$slot,"enabled":true}]' \
+       "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+
+    info "Added $slot. Run 'freeraid start' to mount the array with the new disk."
+}
+
+cmd_remove_disk() {
+    local slot="$1"
+    [ -z "$slot" ] && die "Usage: freeraid remove-disk <slot>"
+    info "Disabling slot $slot (data remains on disk)"
+    jq --arg s "$slot" '(.array.disks[] | select(.slot==$s)).enabled = false' \
+       "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+    info "Slot $slot disabled. Run 'freeraid stop && freeraid start' to apply."
+}
+
+cmd_install_deps() {
+    info "Installing FreeRAID dependencies..."
+    apt-get update -qq
+    apt-get install -y \
+        mergerfs \
+        snapraid \
+        jq \
+        xfsprogs \
+        btrfs-progs \
+        samba \
+        nfs-kernel-server \
+        docker.io \
+        docker-compose-plugin \
+        cockpit \
+        2>&1 | grep -E '(Setting up|already|Error)' || true
+    info "All dependencies installed."
+}
+
+cmd_help() {
+    cat <<EOF
+
+${BOLD}FreeRAID v${FREERAID_VERSION}${NC} — Open source Unraid alternative
+
+${BOLD}ARRAY COMMANDS${NC}
+  status              Show array, disk, and pool status
+  start               Mount all drives and start the pool
+  stop                Unmount pool and all drives safely
+  add-disk <slot> <dev> [fs]   Add a drive to the array
+  remove-disk <slot>           Disable a drive slot
+
+${BOLD}PARITY COMMANDS${NC}
+  sync                Update parity (run after adding files)
+  scrub               Verify parity data integrity
+  diff                Show what changed since last sync
+
+${BOLD}SYSTEM${NC}
+  install-deps        Install all required packages (Debian/Ubuntu)
+  config              Print current config path and contents
+
+${BOLD}CONFIG${NC}
+  Default config: /boot/config/freeraid.conf.json
+  Override:       FREERAID_CONFIG=/path/to/config freeraid <cmd>
+
+EOF
+}
+
+cmd_config() {
+    echo "Config: $CONFIG_FILE"
+    echo "────────────────────────────────────────────"
+    cat "$CONFIG_FILE"
+}
+
+# ── Dispatch ─────────────────────────────────────────────────────────────────────
+
+case "${1:-help}" in
+    status)       cmd_status "${2:-}" ;;
+    start)        cmd_start ;;
+    stop)         cmd_stop ;;
+    sync)         cmd_sync ;;
+    scrub)        cmd_scrub ;;
+    diff)         cmd_diff ;;
+    add-disk)     cmd_add_disk "${2:-}" "${3:-}" "${4:-}" ;;
+    remove-disk)  cmd_remove_disk "${2:-}" ;;
+    install-deps) cmd_install_deps ;;
+    config)       cmd_config ;;
+    help|--help|-h) cmd_help ;;
+    *) error "Unknown command: ${1}"; cmd_help; exit 1 ;;
+esac
