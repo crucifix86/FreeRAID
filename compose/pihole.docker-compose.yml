@@ -1,0 +1,33 @@
+{
+  "version": "3.8",
+  "services": {
+    "pihole": {
+      "image": "pihole/pihole:latest",
+      "container_name": "pihole",
+      "restart": "unless-stopped",
+      "network_mode": "br0",
+      "environment": {
+        "PIHOLE_DNS_": "8.8.8.8;8.8.4.4",
+        "TZ": "Europe/London",
+        "WEBPASSWORD": "admin",
+        "INTERFACE": "br0",
+        "ServerIP": "192.168.1.24",
+        "ServerIPv6": "",
+        "IPv6": "False",
+        "DNSMASQ_LISTENING": "all",
+        "WEBUIBOXEDLAYOUT": "boxed"
+      },
+      "ports": [
+        "53:53/tcp",
+        "53:53/tcp",
+        "67:67/tcp",
+        "80:80/tcp",
+        "443:443/tcp"
+      ],
+      "volumes": [
+        "/mnt/user/appdata/pihole/pihole/:/etc/pihole/:rw",
+        "/mnt/user/appdata/pihole/dnsmasq.d/:/etc/dnsmasq.d/:rw"
+      ]
+    }
+  }
+}

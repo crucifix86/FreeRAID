@@ -1,0 +1,28 @@
+{
+  "version": "3.8",
+  "services": {
+    "binhex-crafty-4": {
+      "image": "binhex/arch-crafty-4",
+      "container_name": "binhex-crafty-4",
+      "restart": "unless-stopped",
+      "network_mode": "bridge",
+      "environment": {
+        "TZ": "Etc/UTC",
+        "JAVA_VERSION": "latest",
+        "UMASK": "000",
+        "PUID": "99",
+        "PGID": "100"
+      },
+      "ports": [
+        "8000:8000/tcp",
+        "8443:8443/tcp",
+        "19132-25565:19132-19232/tcp",
+        "19132-25565:19132-19232/tcp",
+        "25565-25575:25565-25575/tcp"
+      ],
+      "volumes": [
+        "/mnt/user/appdata/binhex-crafty-4:/config:rw"
+      ]
+    }
+  }
+}

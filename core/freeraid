@@ -9,6 +9,7 @@ FREERAID_VERSION="$(cat "$VERSION_FILE" 2>/dev/null | tr -d '[:space:]' || echo 
 CONFIG_FILE="${FREERAID_CONFIG:-/boot/config/freeraid.conf.json}"
 SNAPRAID_CONF="/etc/snapraid.conf"
 LOG_FILE="/var/log/freeraid.log"
+COMPOSE_DIR="/etc/freeraid/compose"
 GITHUB_REPO="crucifix86/FreeRAID"
 GITHUB_API="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
 
@@ -730,6 +731,75 @@ PYEOF
     info "Done. Run 'freeraid shares-apply' to activate via Samba."
 }
 
+cmd_docker_list() {
+    if [ ! -d "$COMPOSE_DIR" ]; then
+        echo "[]"
+        return 0
+    fi
+
+    # Get running container names
+    local running
+    running=$(docker ps --format '{{.Names}}' 2>/dev/null || echo "")
+
+    local result="["
+    local first=true
+
+    for f in "$COMPOSE_DIR"/*.docker-compose.yml; do
+        [ -f "$f" ] || continue
+        local basename="${f##*/}"
+        local name="${basename%.docker-compose.yml}"
+
+        local image container_name
+        image=$(jq -r '(.services | to_entries[0].value.image) // "unknown"' "$f" 2>/dev/null || echo "unknown")
+        container_name=$(jq -r '(.services | to_entries[0].value.container_name) // ""' "$f" 2>/dev/null || echo "")
+        [ -z "$container_name" ] && container_name="$name"
+
+        local state="stopped"
+        if echo "$running" | grep -qxF "$container_name" 2>/dev/null; then
+            state="running"
+        fi
+
+        $first || result+=","
+        first=false
+        result+=$(printf '{"name":"%s","container_name":"%s","image":"%s","state":"%s"}' \
+            "$name" "$container_name" "$image" "$state")
+    done
+
+    result+="]"
+    echo "$result"
+}
+
+cmd_docker_start() {
+    local name="${1:-}"
+    [ -z "$name" ] && die "Usage: freeraid docker-start <name>"
+    local f="${COMPOSE_DIR}/${name}.docker-compose.yml"
+    [ -f "$f" ] || die "No compose file found for: $name"
+    require docker
+    info "Starting $name..."
+    docker compose -f "$f" up -d
+    info "$name started."
+}
+
+cmd_docker_stop() {
+    local name="${1:-}"
+    [ -z "$name" ] && die "Usage: freeraid docker-stop <name>"
+    local f="${COMPOSE_DIR}/${name}.docker-compose.yml"
+    [ -f "$f" ] || die "No compose file found for: $name"
+    require docker
+    info "Stopping $name..."
+    docker compose -f "$f" down
+    info "$name stopped."
+}
+
+cmd_docker_logs() {
+    local name="${1:-}"
+    [ -z "$name" ] && die "Usage: freeraid docker-logs <name>"
+    local f="${COMPOSE_DIR}/${name}.docker-compose.yml"
+    [ -f "$f" ] || die "No compose file found for: $name"
+    require docker
+    docker compose -f "$f" logs --tail=100 --no-color 2>&1 || true
+}
+
 cmd_install_deps() {
     info "Installing FreeRAID dependencies..."
     apt-get update -qq
@@ -816,6 +886,17 @@ cmd_update() {
         info "Importer updated"
     fi
 
+    # Stage new compose files (skip existing — user data)
+    if [ -d "$tmpdir/compose" ]; then
+        mkdir -p "$COMPOSE_DIR"
+        for f in "$tmpdir/compose/"*.docker-compose.yml; do
+            [ -f "$f" ] || continue
+            dest="$COMPOSE_DIR/$(basename "$f")"
+            [ -f "$dest" ] || cp "$f" "$dest"
+        done
+        info "Compose files updated"
+    fi
+
     # Update version file
     mkdir -p "$(dirname "$VERSION_FILE")"
     echo "$latest_ver" > "$VERSION_FILE"
@@ -868,6 +949,12 @@ ${BOLD}SHARES${NC}
   shares-apply             Write smb.conf and reload Samba
   shares-import <dir>      Import shares from Unraid config directory
 
+${BOLD}DOCKER${NC}
+  docker-list              List all containers and their state (JSON)
+  docker-start <name>      Start a container via docker compose
+  docker-stop <name>       Stop a container via docker compose
+  docker-logs <name>       Show last 100 lines of container logs
+
 ${BOLD}UPDATES${NC}
   version             Show installed version
   check-update        Check if an update is available (JSON output)
@@ -909,6 +996,10 @@ case "${1:-help}" in
     shares-add)    cmd_shares_add "${2:-}" ;;
     shares-remove) cmd_shares_remove "${2:-}" ;;
     shares-import) cmd_shares_import "${2:-}" ;;
+    docker-list)   cmd_docker_list ;;
+    docker-start)  cmd_docker_start "${2:-}" ;;
+    docker-stop)   cmd_docker_stop "${2:-}" ;;
+    docker-logs)   cmd_docker_logs "${2:-}" ;;
     install-deps)  cmd_install_deps ;;
     config)        cmd_config ;;
     version)       cmd_version ;;

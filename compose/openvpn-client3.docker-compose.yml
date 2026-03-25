@@ -1,0 +1,14 @@
+{
+  "version": "3.8",
+  "services": {
+    "openvpn-client3": {
+      "image": "ich777/openvpn-client",
+      "container_name": "openvpn-client3",
+      "restart": "unless-stopped",
+      "network_mode": "bridge",
+      "volumes": [
+        "/mnt/cache/appdata/openvpn-client3:/vpn:rw"
+      ]
+    }
+  }
+}

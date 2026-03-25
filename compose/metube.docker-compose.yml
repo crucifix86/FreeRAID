@@ -1,0 +1,23 @@
+{
+  "version": "3.8",
+  "services": {
+    "metube": {
+      "image": "alexta69/metube",
+      "container_name": "metube",
+      "restart": "unless-stopped",
+      "network_mode": "bridge",
+      "environment": {
+        "OUTPUT_TEMPLATE": "%(channel)s/%(title)s.%(ext)s",
+        "UID": "99",
+        "GID": "100",
+        "UMASK": "000"
+      },
+      "ports": [
+        "8081:8081/tcp"
+      ],
+      "volumes": [
+        "/mnt/user/Downloads/missing/:/downloads:rw"
+      ]
+    }
+  }
+}

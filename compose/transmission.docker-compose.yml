@@ -1,0 +1,33 @@
+{
+  "version": "3.8",
+  "services": {
+    "transmission": {
+      "image": "lscr.io/linuxserver/transmission",
+      "container_name": "transmission",
+      "restart": "unless-stopped",
+      "network_mode": "bridge",
+      "environment": {
+        "TRANSMISSION_WEB_HOME": "",
+        "USER": "p9246235",
+        "PASS": "85yoENr2JEPL",
+        "WHITELIST": "",
+        "PEERPORT": "",
+        "HOST_WHITELIST": "",
+        "PUID": "99",
+        "PGID": "100",
+        "UMASK": "022"
+      },
+      "ports": [
+        "9091:9091/tcp",
+        "51413:51413/tcp",
+        "51413:51413/tcp"
+      ],
+      "volumes": [
+        "/mnt/user/Downloads/:/downloads:rw",
+        "/mnt/user/Downloads/:/watch:rw",
+        "/mnt/user/Downloads/:/data:rw",
+        "/mnt/user/appdata/transmission:/config:rw"
+      ]
+    }
+  }
+}

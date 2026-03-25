@@ -1,0 +1,26 @@
+{
+  "version": "3.8",
+  "services": {
+    "embyserver": {
+      "image": "emby/embyserver:latest",
+      "container_name": "embyserver",
+      "restart": "unless-stopped",
+      "network_mode": "host",
+      "environment": {
+        "UID": "2",
+        "GID": "2",
+        "GIDLIST": "2"
+      },
+      "ports": [
+        "8096:8096/tcp"
+      ],
+      "volumes": [
+        "/mnt:/mnt:rw",
+        "/mnt/user/Media/:/Data:rw",
+        "/mnt/user/Books/:/Books:rw",
+        "/mnt/user/Books Misc/:/Misc Books:rw",
+        "/mnt/user/dockersshare/emby/:/config:rw"
+      ]
+    }
+  }
+}

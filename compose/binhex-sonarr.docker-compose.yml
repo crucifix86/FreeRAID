@@ -1,0 +1,26 @@
+{
+  "version": "3.8",
+  "services": {
+    "binhex-sonarr": {
+      "image": "binhex/arch-sonarr",
+      "container_name": "binhex-sonarr",
+      "restart": "unless-stopped",
+      "network_mode": "bridge",
+      "privileged": true,
+      "environment": {
+        "UMASK": "000",
+        "PUID": "99",
+        "PGID": "100"
+      },
+      "ports": [
+        "8989:8989/tcp",
+        "9897:9897/tcp"
+      ],
+      "volumes": [
+        "/mnt/user/Downloads/:/data:rw",
+        "/mnt/user:/media:rw",
+        "/mnt/user/appdata/binhex-sonarr:/config:rw"
+      ]
+    }
+  }
+}

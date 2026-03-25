@@ -1,0 +1,25 @@
+{
+  "version": "3.8",
+  "services": {
+    "plex": {
+      "image": "lscr.io/linuxserver/plex",
+      "container_name": "plex",
+      "restart": "unless-stopped",
+      "network_mode": "none",
+      "privileged": true,
+      "environment": {
+        "VERSION": "docker",
+        "PLEX_CLAIM": "",
+        "PUID": "99",
+        "PGID": "100",
+        "UMASK": "022"
+      },
+      "volumes": [
+        "/mnt/user/Media/Series/:/tv:rw",
+        "/mnt/user/Media/Movies/:/movies:rw",
+        "/mnt/user/Media/:/Data:rw",
+        "/mnt/user/dockersshare/:/config:rw"
+      ]
+    }
+  }
+}

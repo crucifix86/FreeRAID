@@ -1,0 +1,28 @@
+{
+  "version": "3.8",
+  "services": {
+    "binhex-krusader": {
+      "image": "binhex/arch-krusader",
+      "container_name": "binhex-krusader",
+      "restart": "unless-stopped",
+      "network_mode": "bridge",
+      "privileged": true,
+      "environment": {
+        "TEMP_FOLDER": "/config/home/.config/krusader/tmp",
+        "WEBPAGE_TITLE": "Krusader",
+        "VNC_PASSWORD": "",
+        "UMASK": "000",
+        "PUID": "99",
+        "PGID": "100"
+      },
+      "ports": [
+        "6080:6080/tcp"
+      ],
+      "volumes": [
+        "/mnt:/UNRAID:rw",
+        "/mnt/disks/:/UNSSIGNED:rw",
+        "/mnt/user/appdata/binhex-krusader:/config:rw"
+      ]
+    }
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "version": "3.8",
+  "services": {
+    "passthroughvpn": {
+      "image": "dyonr/passthroughvpn",
+      "container_name": "passthroughvpn",
+      "restart": "unless-stopped",
+      "network_mode": "bridge",
+      "privileged": true,
+      "environment": {
+        "VPN_ENABLED": "yes",
+        "VPN_TYPE": "openvpn",
+        "VPN_USERNAME": "",
+        "VPN_PASSWORD": "",
+        "LAN_NETWORK": "192.168.0.0/24",
+        "ADDITIONAL_PORTS": "",
+        "RESTART_CONTAINER": "no",
+        "PUID": "99",
+        "PGID": "100",
+        "NAME_SERVERS": "1.1.1.1,1.0.0.1",
+        "UMASK": "002",
+        "HEALTH_CHECK_HOST": "one.one.one.one",
+        "HEALTH_CHECK_INTERVAL": "300",
+        "HEALTH_CHECK_SILENT": "1"
+      },
+      "volumes": [
+        "/mnt/user/appdata/passthroughvpn:/config:rw"
+      ]
+    }
+  }
+}

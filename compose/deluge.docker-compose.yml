@@ -1,0 +1,27 @@
+{
+  "version": "3.8",
+  "services": {
+    "deluge": {
+      "image": "lscr.io/linuxserver/deluge",
+      "container_name": "deluge",
+      "restart": "unless-stopped",
+      "network_mode": "none",
+      "environment": {
+        "DELUGE_LOGLEVEL": "error",
+        "PUID": "99",
+        "PGID": "100",
+        "UMASK": "022"
+      },
+      "ports": [
+        "8112:8112/tcp",
+        "6881:6881/tcp",
+        "6881:6881/tcp"
+      ],
+      "volumes": [
+        "/mnt/user/Downloads/:/downloads:rw",
+        "/mnt/user/Downloads/:/data:rw",
+        "/mnt/user/appdata/deluge:/config:rw"
+      ]
+    }
+  }
+}

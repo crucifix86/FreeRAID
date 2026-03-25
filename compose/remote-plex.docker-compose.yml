@@ -1,0 +1,23 @@
+{
+  "version": "3.8",
+  "services": {
+    "remote-plex": {
+      "image": "binhex/arch-plex",
+      "container_name": "remote-plex",
+      "restart": "unless-stopped",
+      "network_mode": "host",
+      "environment": {
+        "TRANS_DIR": "/config/transcode",
+        "NVIDIA_DRIVER_CAPABILITIES": "all",
+        "NVIDIA_VISIBLE_DEVICES": "",
+        "UMASK": "000",
+        "PUID": "99",
+        "PGID": "100"
+      },
+      "volumes": [
+        "/mnt/user:/media:rw",
+        "/mnt/user/appdata/remote-plex:/config:rw"
+      ]
+    }
+  }
+}

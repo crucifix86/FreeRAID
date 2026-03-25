@@ -26,6 +26,7 @@
       <button class="tab" data-tab="settings" onclick="switchTab('settings')">Settings</button>
       <button class="tab" data-tab="disks" onclick="switchTab('disks')">Disks</button>
       <button class="tab" data-tab="shares" onclick="switchTab('shares')">Shares</button>
+      <button class="tab" data-tab="docker" onclick="switchTab('docker')">Docker</button>
       <button class="tab" data-tab="plugins" onclick="switchTab('plugins')">Plugins</button>
     </nav>
 
@@ -305,6 +306,47 @@
         </div>
 
       </div><!-- end shares -->
+
+      <!-- ── DOCKER TAB ── -->
+      <div id="tab-docker" class="hidden">
+
+        <!-- Summary -->
+        <div class="summary-row">
+          <div class="summary-card">
+            <div class="summary-label">Running</div>
+            <div class="summary-value" id="docker-running-count">—</div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-label">Stopped</div>
+            <div class="summary-value" id="docker-stopped-count">—</div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-label">Total</div>
+            <div class="summary-value" id="docker-total-count">—</div>
+          </div>
+        </div>
+
+        <!-- Container list -->
+        <div class="settings-section">
+          <h2 class="settings-section-title">
+            Containers
+            <button class="btn btn-sm btn-secondary" style="margin-left:auto" onclick="refreshDocker()">Refresh</button>
+          </h2>
+          <div id="docker-container-list">
+            <div class="loading-msg">Loading containers...</div>
+          </div>
+        </div>
+
+        <!-- Docker log -->
+        <div class="settings-section">
+          <h2 class="settings-section-title">
+            Log
+            <button class="btn btn-sm btn-ghost" onclick="clearDockerLog()">Clear</button>
+          </h2>
+          <div class="log-panel" id="docker-log-panel"></div>
+        </div>
+
+      </div><!-- end docker -->
 
       <!-- ── PLUGINS TAB ── -->
       <div id="tab-plugins" class="hidden">

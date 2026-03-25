@@ -1,0 +1,14 @@
+{
+  "version": "3.8",
+  "services": {
+    "speedtest": {
+      "image": "adolfintel/speedtest",
+      "container_name": "speedtest",
+      "restart": "unless-stopped",
+      "network_mode": "bridge",
+      "ports": [
+        "6580:80/tcp"
+      ]
+    }
+  }
+}

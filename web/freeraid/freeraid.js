@@ -44,13 +44,12 @@ function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => {
     t.classList.toggle('active', t.dataset.tab === name);
   });
-  document.getElementById('tab-dashboard').classList.toggle('hidden', name !== 'dashboard');
-  document.getElementById('tab-disks').classList.toggle('hidden',     name !== 'disks');
-  document.getElementById('tab-settings').classList.toggle('hidden',  name !== 'settings');
-  document.getElementById('tab-shares').classList.toggle('hidden',    name !== 'shares');
-  document.getElementById('tab-plugins').classList.toggle('hidden',   name !== 'plugins');
+  ['dashboard','disks','settings','shares','docker','plugins'].forEach(t => {
+    document.getElementById('tab-'+t).classList.toggle('hidden', name !== t);
+  });
   if (name === 'shares') refreshShares();
   if (name === 'disks')  refreshDisks();
+  if (name === 'docker') refreshDocker();
 }
 
 // ── Logging ──────────────────────────────────────────────────────────────────
@@ -596,6 +595,88 @@ function doUnraidImport() {
       cockpit.spawn(['rm', '-rf', tmpdir], { superuser: 'require' }).catch(() => {});
     })
     .catch(err => slog('error', String(err)));
+}
+
+// ── Docker ────────────────────────────────────────────────────────────────────
+
+function clearDockerLog() { document.getElementById('docker-log-panel').innerHTML = ''; }
+const dklog = (level, text) => appendLog('docker-log-panel', level, text);
+
+function refreshDocker() {
+  const el = document.getElementById('docker-container-list');
+  el.innerHTML = '<div class="loading-msg">Loading...</div>';
+
+  let buf = '';
+  cockpit.spawn(['freeraid', 'docker-list'], { superuser: 'require', err: 'ignore' })
+    .stream(d => { buf += d; })
+    .then(() => {
+      try {
+        const jsonStart = buf.indexOf('[');
+        renderDocker(JSON.parse(buf.slice(jsonStart)));
+      } catch(e) {
+        el.innerHTML = '<div class="loading-msg">Could not load containers.</div>';
+      }
+    })
+    .catch(() => { el.innerHTML = '<div class="loading-msg">docker-list failed.</div>'; });
+}
+
+function renderDocker(containers) {
+  const el = document.getElementById('docker-container-list');
+
+  const running = containers.filter(c => c.state === 'running').length;
+  document.getElementById('docker-running-count').textContent = running;
+  document.getElementById('docker-stopped-count').textContent = containers.length - running;
+  document.getElementById('docker-total-count').textContent   = containers.length;
+
+  if (!containers.length) {
+    el.innerHTML = '<div class="loading-msg">No compose files found in /etc/freeraid/compose/. ' +
+      'Import from Unraid or add .docker-compose.yml files manually.</div>';
+    return;
+  }
+
+  el.innerHTML = containers.map(c => {
+    const isRunning  = c.state === 'running';
+    const dotClass   = isRunning ? 'dot-green' : 'dot-grey';
+    const stateLabel = isRunning ? 'Running' : 'Stopped';
+    const stateColor = isRunning ? 'var(--green)' : 'var(--text-dim)';
+    const nameSafe   = c.name.replace(/'/g, "\\'");
+    const toggleBtn  = isRunning
+      ? `<button class="btn btn-sm btn-danger" onclick="dockerStop('${nameSafe}')">Stop</button>`
+      : `<button class="btn btn-sm btn-primary" onclick="dockerStart('${nameSafe}')">Start</button>`;
+
+    return `<div class="docker-card${isRunning ? ' running' : ''}">
+      <div class="docker-header">
+        <span class="drive-status-dot ${dotClass}"></span>
+        <span class="docker-name">${c.name}</span>
+      </div>
+      <div class="docker-image">${c.image}</div>
+      <div class="docker-state" style="color:${stateColor}">${stateLabel}</div>
+      <div class="docker-actions">
+        ${toggleBtn}
+        <button class="btn btn-sm btn-ghost" onclick="dockerLogs('${nameSafe}')">Logs</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function dockerStart(name) {
+  dklog('cmd', `Starting ${name}...`);
+  runCmd(['docker-start', name], 'docker-log-panel')
+    .then(() => { dklog('success', `${name} started.`); refreshDocker(); })
+    .catch(err => dklog('error', String(err)));
+}
+
+function dockerStop(name) {
+  dklog('cmd', `Stopping ${name}...`);
+  runCmd(['docker-stop', name], 'docker-log-panel')
+    .then(() => { dklog('success', `${name} stopped.`); refreshDocker(); })
+    .catch(err => dklog('error', String(err)));
+}
+
+function dockerLogs(name) {
+  dklog('cmd', `=== Logs: ${name} ===`);
+  runCmd(['docker-logs', name], 'docker-log-panel')
+    .catch(err => dklog('error', String(err)));
 }
 
 function doUpdate() {

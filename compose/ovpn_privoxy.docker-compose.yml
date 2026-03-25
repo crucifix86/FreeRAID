@@ -1,0 +1,23 @@
+{
+  "version": "3.8",
+  "services": {
+    "ovpn_privoxy": {
+      "image": "alturismo/ovpn_privoxy",
+      "container_name": "ovpn_privoxy",
+      "restart": "unless-stopped",
+      "network_mode": "bridge",
+      "privileged": true,
+      "environment": {
+        "LOCAL_NET": "192.168.1.0/24",
+        "OPENVPN_FILE": "Frankfurt.ovpn"
+      },
+      "ports": [
+        "8184:8080/tcp",
+        "1080:1080/tcp"
+      ],
+      "volumes": [
+        "/mnt/user/appdata/OVPN_Privoxy:/config:rw"
+      ]
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "version": "3.8",
+  "services": {
+    "eq": {
+      "image": "git clone https://github.com/Akkadius/akk-stack.git &amp;&amp; cd akk-stack",
+      "container_name": "eq",
+      "restart": "unless-stopped",
+      "network_mode": "bridge"
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "version": "3.8",
+  "services": {
+    "ollama": {
+      "image": "ollama/ollama",
+      "container_name": "ollama",
+      "restart": "unless-stopped",
+      "network_mode": "bridge",
+      "environment": {
+        "OLLAMA_ORIGINS": "*",
+        "NVIDIA_VISIBLE_DEVICES": "all",
+        "NVIDIA_DRIVER_CAPABILITIES": "all"
+      },
+      "ports": [
+        "11434:11434/tcp"
+      ],
+      "volumes": [
+        "/mnt/user/appdata/ollama:/root/.ollama:rw"
+      ]
+    }
+  }
+}

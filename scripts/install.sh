@@ -95,6 +95,17 @@ step "3/6" "Setting up config directory"
 
 mkdir -p "$CONFIG_DIR"
 mkdir -p "$LOG_DIR"
+mkdir -p /etc/freeraid/compose
+
+# Copy compose files (skip existing — these are user data)
+if [ -d "$REPO_DIR/compose" ]; then
+    for f in "$REPO_DIR/compose/"*.docker-compose.yml; do
+        [ -f "$f" ] || continue
+        dest="/etc/freeraid/compose/$(basename "$f")"
+        [ -f "$dest" ] || cp "$f" "$dest"
+    done
+    info "Compose files staged in /etc/freeraid/compose/"
+fi
 
 if [ ! -f "$CONFIG_DIR/freeraid.conf.json" ]; then
     cp "$REPO_DIR/core/freeraid.conf.json" "$CONFIG_DIR/freeraid.conf.json"

@@ -33,6 +33,7 @@ trap "rm -rf $TMPDIR" EXIT
 TARBALL_NAME="freeraid-components-${VERSION}.tar.gz"
 STAGE="$TMPDIR/stage"
 mkdir -p "$STAGE/web/freeraid"
+mkdir -p "$STAGE/compose"
 
 # CLI (renamed to just 'freeraid' at root of tarball)
 cp core/freeraid "$STAGE/freeraid"
@@ -48,6 +49,11 @@ cp web/freeraid/manifest.json \
    web/freeraid/freeraid.css \
    web/freeraid/freeraid.js \
    "$STAGE/web/freeraid/"
+
+# Compose files (not overwritten on update — user data)
+if [ -d compose ]; then
+    cp compose/*.docker-compose.yml "$STAGE/compose/" 2>/dev/null || true
+fi
 
 # VERSION inside tarball so updater can verify
 cp VERSION "$STAGE/VERSION"

@@ -1,0 +1,28 @@
+{
+  "version": "3.8",
+  "services": {
+    "tubesync": {
+      "image": "ghcr.io/meeb/tubesync:latest",
+      "container_name": "tubesync",
+      "restart": "unless-stopped",
+      "network_mode": "bridge",
+      "environment": {
+        "TUBESYNC_WORKERS": "2",
+        "HTTP_USER": "kingofnie",
+        "HTTP_PASS": "",
+        "DATABASE_CONNECTION": "",
+        "TUBESYNC_HOSTS": "localhost",
+        "TUBESYNC_DEBUG": "False",
+        "PUID": "99",
+        "PGID": "100"
+      },
+      "ports": [
+        "4848:4848/tcp"
+      ],
+      "volumes": [
+        "/mnt/user/appdata/tubesync:/config:rw",
+        "/mnt/user/Media/Youtube/:/downloads:rw"
+      ]
+    }
+  }
+}

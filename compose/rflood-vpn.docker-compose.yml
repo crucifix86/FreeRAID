@@ -1,0 +1,27 @@
+{
+  "version": "3.8",
+  "services": {
+    "rflood-vpn": {
+      "image": "ghcr.io/hotio/rflood:release",
+      "container_name": "rflood-vpn",
+      "restart": "unless-stopped",
+      "network_mode": "bridge",
+      "environment": {
+        "VPN_ENABLED": "true",
+        "VPN_LAN_NETWORK": "",
+        "FLOOD_AUTH": "false",
+        "VPN_CONF": "wg0",
+        "VPN_ADDITIONAL_PORTS": "",
+        "PUID": "99",
+        "PGID": "100",
+        "UMASK": "002"
+      },
+      "ports": [
+        "3000:3000/tcp"
+      ],
+      "volumes": [
+        "/mnt/user/appdata/rflood-vpn:/config:rw"
+      ]
+    }
+  }
+}

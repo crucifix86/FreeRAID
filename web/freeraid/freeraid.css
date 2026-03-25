@@ -480,6 +480,33 @@ body {
 
 .share-actions { display: flex; gap: 6px; margin-left: auto; }
 
+/* ── Docker container cards ── */
+.docker-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.docker-card.running { border-left-color: var(--green); }
+.docker-card:hover { border-color: var(--accent); }
+
+.docker-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 180px;
+}
+
+.docker-name  { font-weight: 600; font-size: 14px; }
+.docker-image { font-family: monospace; font-size: 12px; color: var(--text-dim); flex: 1; }
+.docker-state { font-size: 12px; font-weight: 500; min-width: 60px; }
+.docker-actions { display: flex; gap: 6px; margin-left: auto; }
+
 /* ── Scrollbar ── */
 ::-webkit-scrollbar       { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: var(--bg2); }

@@ -1,0 +1,24 @@
+{
+  "version": "3.8",
+  "services": {
+    "lazylibrarian-calibre": {
+      "image": "thraxis/lazylibrarian-calibre",
+      "container_name": "lazylibrarian-calibre",
+      "restart": "unless-stopped",
+      "network_mode": "bridge",
+      "environment": {
+        "PUID": "99",
+        "PGID": "100"
+      },
+      "ports": [
+        "5299:5299/tcp"
+      ],
+      "volumes": [
+        "/mnt/user/Doug/Book Downloads/:/downloads:rw",
+        "/mnt/user/Books/:/books:rw",
+        "/mnt/user/Doug/Magazines/:/magazines:rw",
+        "/mnt/user/appdata/lazylibrarian-calibre:/config:rw"
+      ]
+    }
+  }
+}

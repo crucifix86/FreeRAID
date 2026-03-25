@@ -1,0 +1,18 @@
+{
+  "version": "3.8",
+  "services": {
+    "flaresolverr": {
+      "image": "flaresolverr/flaresolverr",
+      "container_name": "flaresolverr",
+      "restart": "unless-stopped",
+      "network_mode": "bridge",
+      "environment": {
+        "LOG_LEVEL": "info",
+        "TZ": "UTC"
+      },
+      "ports": [
+        "8191:8191/tcp"
+      ]
+    }
+  }
+}

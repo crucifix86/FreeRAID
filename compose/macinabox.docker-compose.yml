@@ -1,0 +1,31 @@
+{
+  "version": "3.8",
+  "services": {
+    "macinabox": {
+      "image": "spaceinvaderone/macinabox",
+      "container_name": "macinabox",
+      "restart": "unless-stopped",
+      "network_mode": "bridge",
+      "privileged": true,
+      "environment": {
+        "flavour": "High Sierra",
+        "vminstall": "Auto install",
+        "vdisksize": "100G",
+        "vdisktype": "raw",
+        "opencore": "stock",
+        "replaceopencore": "no",
+        "overridenic": "no",
+        "VMIMAGES": "/mnt/user/domains/",
+        "ISOIMAGES": "/mnt/user/isos/",
+        "injectfixxml": "yes"
+      },
+      "volumes": [
+        "/mnt/user/domains/:/domains:rw",
+        "/mnt/user/isos/:/isos:rw",
+        "/mnt/user/appdata/macinabox:/config:rw",
+        "/mnt/user/system/custom_ovmf/:/customovmf/:rw",
+        "/boot/config/plugins/user.scripts/scripts:/userscripts:rw"
+      ]
+    }
+  }
+}
