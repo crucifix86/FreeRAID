@@ -416,50 +416,48 @@ cmd_diff() {
 }
 
 cmd_disks_scan() {
-    # Return JSON array of all block devices with assignment status
+    # Build a flat lookup of all assigned devices from config
     local all_assigned
     all_assigned=$(jq -r '
-        [.array.parity[]  | {device:.device, slot:.slot, role:"parity"}],
-        [.array.disks[]   | {device:.device, slot:.slot, role:"array"}],
-        [.array.cache[]   | {device:.device, slot:.slot, role:"cache"}]
-        | add // []
-    ' "$CONFIG_FILE" 2>/dev/null)
+        [
+          (.array.parity[] | {device:.device, slot:.slot, role:"parity"}),
+          (.array.disks[]  | {device:.device, slot:.slot, role:"array"}),
+          (.array.cache[]  | {device:.device, slot:.slot, role:"cache"})
+        ]
+    ' "$CONFIG_FILE" 2>/dev/null || echo "[]")
 
     local disks_json="["
     local first=true
 
-    while IFS= read -r line; do
-        # lsblk columns: NAME SIZE ROTA TYPE MODEL
-        local name size rota type model
-        name=$(echo "$line"  | awk '{print $1}')
-        size=$(echo "$line"  | awk '{print $2}')
-        rota=$(echo "$line"  | awk '{print $3}')  # 1=HDD 0=SSD
-        type=$(echo "$line"  | awk '{print $4}')
-        model=$(echo "$line" | cut -d' ' -f5-)
-
+    while read -r name size rota type; do
         [ "$type" != "disk" ] && continue
         local dev="/dev/${name}"
 
-        # Check if assigned
-        local assigned_slot="" assigned_role=""
-        assigned_slot=$(echo "$all_assigned" | jq -r --arg d "$dev" '.[] | select(.device==$d) | .slot' 2>/dev/null | head -1)
-        assigned_role=$(echo "$all_assigned" | jq -r --arg d "$dev" '.[] | select(.device==$d) | .role' 2>/dev/null | head -1)
+        # Get model separately to handle blank/spaces safely
+        local model
+        model=$(lsblk -dn -o MODEL "$dev" 2>/dev/null | tr -d '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        [ -z "$model" ] && model="Virtual Disk"
 
         local drive_type="HDD"
         [ "$rota" = "0" ] && drive_type="SSD"
 
-        # Check if it has partitions / filesystem
+        # Filesystem on the raw device (if any)
         local has_fs
         has_fs=$(lsblk -no FSTYPE "$dev" 2>/dev/null | grep -v '^$' | head -1 || echo "")
 
-        # Trim model
-        model=$(echo "$model" | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
+        # Lookup assignment
+        local assigned_slot assigned_role
+        assigned_slot=$(echo "$all_assigned" | jq -r --arg d "$dev" '.[] | select(.device==$d) | .slot' 2>/dev/null | head -1 || echo "")
+        assigned_role=$(echo "$all_assigned"  | jq -r --arg d "$dev" '.[] | select(.device==$d) | .role' 2>/dev/null | head -1 || echo "")
 
         $first || disks_json+=","
         first=false
-        disks_json+="{\"device\":\"${dev}\",\"name\":\"${name}\",\"size\":\"${size}\",\"type\":\"${drive_type}\",\"model\":\"${model//\"/\\\"}\",\"assigned\":$([ -n "$assigned_slot" ] && echo true || echo false),\"slot\":\"${assigned_slot}\",\"role\":\"${assigned_role}\",\"has_fs\":\"${has_fs}\"}"
+        disks_json+=$(printf '{"device":"%s","name":"%s","size":"%s","type":"%s","model":"%s","assigned":%s,"slot":"%s","role":"%s","has_fs":"%s"}' \
+            "$dev" "$name" "$size" "$drive_type" "$model" \
+            "$([ -n "$assigned_slot" ] && echo true || echo false)" \
+            "$assigned_slot" "$assigned_role" "$has_fs")
 
-    done < <(lsblk -dn -o NAME,SIZE,ROTA,TYPE,MODEL 2>/dev/null)
+    done < <(lsblk -dn -o NAME,SIZE,ROTA,TYPE 2>/dev/null)
 
     disks_json+="]"
     echo "$disks_json"
