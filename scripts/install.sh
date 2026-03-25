@@ -66,6 +66,7 @@ apt-get install -y \
     python3 \
     python3-pip \
     smartmontools \
+    unzip \
     hdparm \
     lsblk \
     2>&1 | grep -E '(Setting up|already|Error|WARNING)' || true

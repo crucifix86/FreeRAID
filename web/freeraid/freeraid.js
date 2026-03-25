@@ -285,7 +285,7 @@ function refreshShares() {
         renderShares(JSON.parse(buf.slice(jsonStart)));
       } catch(e) {
         document.getElementById('shares-list').innerHTML =
-          '<div class="loading-msg">No shares configured yet.</div>';
+          '<div class="loading-msg">No shares configured yet. Create one or import from Unraid above.</div>';
       }
     })
     .catch(() => {
@@ -297,47 +297,68 @@ function refreshShares() {
 function renderShares(shares) {
   const el = document.getElementById('shares-list');
   if (!shares.length) {
-    el.innerHTML = '<div class="loading-msg">No shares configured. Add one above or import from Unraid.</div>';
+    el.innerHTML = '<div class="loading-msg">No shares configured. Create one or import from Unraid above.</div>';
     return;
   }
-
   el.innerHTML = shares.map(s => {
-    const smbBadge  = s.smb_enabled ? `<span class="badge badge-smb">SMB</span>` : '';
-    const nfsBadge  = s.nfs_enabled ? `<span class="badge badge-nfs">NFS</span>` : '';
-    const secBadge  = s.smb_security === 'public'
+    const smbBadge    = s.smb_enabled ? `<span class="badge badge-smb">SMB</span>` : '';
+    const nfsBadge    = s.nfs_enabled ? `<span class="badge badge-nfs">NFS</span>` : '';
+    const secBadge    = (s.smb_security === 'public')
       ? `<span class="badge badge-public">Public</span>`
       : `<span class="badge badge-private">Private</span>`;
-    const cacheBadge = s.cache_mode
-      ? `<span class="badge badge-cache">Cache: ${s.cache_mode}</span>` : '';
-    const unraidBadge = s._imported_from_unraid
-      ? `<span class="badge badge-unraid">Unraid</span>` : '';
-
+    const cacheBadge  = s.cache_mode ? `<span class="badge badge-cache">Cache: ${s.cache_mode}</span>` : '';
+    const unraidBadge = s._imported_from_unraid ? `<span class="badge badge-unraid">Unraid</span>` : '';
+    const nameSafe    = s.name.replace(/'/g, "\\'");
     return `<div class="share-card">
       <div class="share-name">${s.name}</div>
       <div class="share-path">${s.path}</div>
       <div class="share-badges">${smbBadge}${nfsBadge}${secBadge}${cacheBadge}${unraidBadge}</div>
       <div class="share-actions">
-        <button class="btn btn-sm btn-ghost" onclick="removeShare('${s.name}')">Remove</button>
+        <button class="btn btn-sm btn-ghost" onclick="removeShare('${nameSafe}')">Remove</button>
       </div>
     </div>`;
   }).join('');
 }
 
-function showAddShare()  { document.getElementById('add-share-form').classList.remove('hidden'); }
-function hideAddShare()  { document.getElementById('add-share-form').classList.add('hidden'); }
+function toggleAddShare() {
+  document.getElementById('add-share-form').classList.toggle('hidden');
+}
 
 function doAddShare() {
-  const name = document.getElementById('new-share-name').value.trim();
-  if (!name) return;
-  hideAddShare();
-  slog('cmd', `Adding share: ${name}`);
+  const name     = document.getElementById('new-share-name').value.trim();
+  const comment  = document.getElementById('new-share-comment').value.trim();
+  const security = document.getElementById('new-share-security').value;
+  const cache    = document.getElementById('new-share-cache').value;
+  const smb      = document.getElementById('new-share-smb').checked;
+  const nfs      = document.getElementById('new-share-nfs').checked;
+
+  if (!name) { alert('Share name is required'); return; }
+
+  toggleAddShare();
+  slog('cmd', `Creating share: ${name}`);
+
+  // Add via CLI then patch settings via config directly
   runCmd(['shares-add', name], 'shares-log-panel')
-    .then(() => { refreshShares(); document.getElementById('new-share-name').value = ''; })
+    .then(() => {
+      // Patch the extra fields into config via jq
+      return new Promise((resolve, reject) => {
+        cockpit.spawn(['bash', '-c',
+          `jq '(.shares[] | select(.name=="${name}")) |= . + {"comment":"${comment}","smb_security":"${security}","cache_mode":"${cache}","smb_enabled":${smb},"nfs_enabled":${nfs}}' /boot/config/freeraid.conf.json > /tmp/fr.tmp && mv /tmp/fr.tmp /boot/config/freeraid.conf.json`
+        ], { superuser: 'require' })
+          .then(resolve).catch(reject);
+      });
+    })
+    .then(() => {
+      document.getElementById('new-share-name').value    = '';
+      document.getElementById('new-share-comment').value = '';
+      refreshShares();
+      slog('success', `Share "${name}" created.`);
+    })
     .catch(err => slog('error', String(err)));
 }
 
 function removeShare(name) {
-  if (!confirm(`Remove share "${name}"? (Files are NOT deleted)`)) return;
+  if (!confirm(`Remove share "${name}"?\n\nFiles on disk are NOT deleted.`)) return;
   slog('cmd', `Removing share: ${name}`);
   runCmd(['shares-remove', name], 'shares-log-panel')
     .then(() => refreshShares())
@@ -345,8 +366,128 @@ function removeShare(name) {
 }
 
 function applyShares() {
-  slog('cmd', 'Applying shares (reloading Samba)...');
+  slog('cmd', 'Writing smb.conf and reloading Samba...');
   runCmd(['shares-apply'], 'shares-log-panel')
+    .then(() => slog('success', 'Samba reloaded. Shares are live.'))
+    .catch(err => slog('error', String(err)));
+}
+
+// ── Unraid config upload & import ─────────────────────────────────────────────
+
+let _importTmpPath = null;
+
+// Drag and drop
+document.addEventListener('DOMContentLoaded', () => {
+  const zone = document.getElementById('drop-zone');
+  if (!zone) return;
+  zone.addEventListener('dragover',  e => { e.preventDefault(); zone.classList.add('drag-over'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
+  zone.addEventListener('drop', e => {
+    e.preventDefault();
+    zone.classList.remove('drag-over');
+    const file = e.dataTransfer.files[0];
+    if (file) processUploadedFile(file);
+  });
+});
+
+function handleUnraidUpload(input) {
+  if (input.files[0]) processUploadedFile(input.files[0]);
+}
+
+function processUploadedFile(file) {
+  if (!file.name.endsWith('.zip')) {
+    alert('Please upload a .zip file (Unraid flash backup or config zip).');
+    return;
+  }
+
+  slog('info', `Uploading ${file.name} (${(file.size/1024).toFixed(0)}KB)...`);
+
+  const reader = new FileReader();
+  reader.onload = e => {
+    const data    = new Uint8Array(e.target.result);
+    const tmpPath = `/tmp/unraid-upload-${Date.now()}.zip`;
+    _importTmpPath = tmpPath;
+
+    // Write zip to server via cockpit.file
+    cockpit.file(tmpPath, { binary: true, superuser: 'require' })
+      .replace(data)
+      .then(() => {
+        slog('success', `Uploaded to ${tmpPath} — scanning...`);
+        return previewImport(tmpPath);
+      })
+      .catch(err => slog('error', 'Upload failed: ' + String(err)));
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function previewImport(zipPath) {
+  // Extract zip and count what's inside
+  let buf = '';
+  return new Promise((resolve, reject) => {
+    cockpit.spawn(['bash', '-c',
+      `TMPDIR=$(mktemp -d /tmp/unraid-import-XXXXXX) && unzip -q "${zipPath}" -d "$TMPDIR" 2>/dev/null || true; ` +
+      `CONFDIR=$(find "$TMPDIR" -name "disk.cfg" -o -name "ident.cfg" 2>/dev/null | head -1 | xargs dirname 2>/dev/null || echo ""); ` +
+      `if [ -z "$CONFDIR" ]; then CONFDIR=$(find "$TMPDIR" -type d -name "config" | head -1); fi; ` +
+      `SHARES=$(ls "$CONFDIR/shares/"*.cfg 2>/dev/null | wc -l || echo 0); ` +
+      `DOCKER=$(ls "$CONFDIR/plugins/dockerMan/templates-user/"*.xml 2>/dev/null | wc -l || echo 0); ` +
+      `HAS_DISK=$([ -f "$CONFDIR/disk.cfg" ] && echo 1 || echo 0); ` +
+      `HAS_NET=$([ -f "$CONFDIR/network.cfg" ] && echo 1 || echo 0); ` +
+      `echo "$TMPDIR|$CONFDIR|$SHARES|$DOCKER|$HAS_DISK|$HAS_NET"`
+    ], { superuser: 'require' })
+      .stream(d => { buf += d; })
+      .then(() => {
+        const parts = buf.trim().split('|');
+        const [tmpdir, confdir, shares, docker, hasDisk, hasNet] = parts;
+        showImportPreview({ tmpdir, confdir, shares: +shares, docker: +docker, hasDisk: hasDisk==='1', hasNet: hasNet==='1' });
+        resolve();
+      })
+      .catch(reject);
+  });
+}
+
+function showImportPreview(info) {
+  if (!info.confdir) {
+    slog('error', 'Could not find config/ directory in zip. Make sure it contains a Unraid flash backup.');
+    return;
+  }
+
+  // Store confdir for import step
+  document.getElementById('btn-do-import').dataset.confdir = info.confdir;
+  document.getElementById('btn-do-import').dataset.tmpdir  = info.tmpdir;
+
+  const rows = [
+    info.shares  ? `<div class="preview-row"><span class="preview-count">${info.shares}</span> User shares (SMB/NFS settings)</div>` : '',
+    info.docker  ? `<div class="preview-row"><span class="preview-count">${info.docker}</span> Docker app templates → compose files</div>` : '',
+    info.hasDisk ? `<div class="preview-row"><span class="preview-count">✓</span> Disk assignments (parity, data, cache)</div>` : '',
+    info.hasNet  ? `<div class="preview-row"><span class="preview-count">✓</span> Network config (hostname, IP settings)</div>` : '',
+  ].filter(Boolean).join('');
+
+  document.getElementById('import-preview-content').innerHTML = rows || '<div class="loading-msg">Nothing recognizable found in this zip.</div>';
+  document.getElementById('import-preview').classList.remove('hidden');
+}
+
+function clearImportPreview() {
+  document.getElementById('import-preview').classList.add('hidden');
+  document.getElementById('unraid-file-input').value = '';
+  _importTmpPath = null;
+}
+
+function doUnraidImport() {
+  const btn     = document.getElementById('btn-do-import');
+  const confdir = btn.dataset.confdir;
+  const tmpdir  = btn.dataset.tmpdir;
+
+  if (!confdir) { slog('error', 'No config directory found.'); return; }
+
+  clearImportPreview();
+  slog('cmd', `Importing from ${confdir}...`);
+
+  runCmd(['shares-import', confdir], 'shares-log-panel')
+    .then(() => {
+      refreshShares();
+      // Cleanup temp dir
+      cockpit.spawn(['rm', '-rf', tmpdir], { superuser: 'require' }).catch(() => {});
+    })
     .catch(err => slog('error', String(err)));
 }
 

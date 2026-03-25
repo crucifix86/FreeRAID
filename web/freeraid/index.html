@@ -146,22 +146,87 @@
       <!-- ── SHARES TAB ── -->
       <div id="tab-shares" class="hidden">
 
+        <!-- Import from Unraid -->
+        <div class="settings-section">
+          <h2 class="settings-section-title">Import from Unraid</h2>
+          <div class="settings-card">
+            <p style="color:var(--text-dim);font-size:13px;margin:0 0 14px">
+              Upload your Unraid flash backup zip (or just the <code>config/</code> folder as a zip).
+              FreeRAID will import your shares, disk assignments, and Docker templates.
+            </p>
+            <div id="drop-zone" class="drop-zone" onclick="document.getElementById('unraid-file-input').click()">
+              <div class="drop-zone-icon">📦</div>
+              <div class="drop-zone-text">Drop Unraid backup zip here or <span class="drop-zone-link">browse</span></div>
+              <div class="drop-zone-hint">Accepts .zip flash backup or a config.zip containing shares/*.cfg</div>
+            </div>
+            <input type="file" id="unraid-file-input" accept=".zip" style="display:none" onchange="handleUnraidUpload(this)">
+
+            <!-- Preview -->
+            <div id="import-preview" class="hidden" style="margin-top:16px">
+              <div class="settings-label" style="margin-bottom:8px">Found in backup:</div>
+              <div id="import-preview-content"></div>
+              <div style="display:flex;gap:8px;margin-top:14px">
+                <button class="btn btn-primary" id="btn-do-import" onclick="doUnraidImport()">Import Everything</button>
+                <button class="btn btn-ghost" onclick="clearImportPreview()">Cancel</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Create new share -->
         <div class="settings-section">
           <h2 class="settings-section-title">
             User Shares
-            <button class="btn btn-sm btn-primary" style="margin-left:auto" onclick="showAddShare()">+ Add Share</button>
+            <button class="btn btn-sm btn-primary" style="margin-left:auto" onclick="toggleAddShare()">+ New Share</button>
             <button class="btn btn-sm btn-secondary" onclick="applyShares()">Apply (Reload Samba)</button>
           </h2>
 
-          <!-- Add share form -->
+          <!-- Create share form -->
           <div id="add-share-form" class="settings-card hidden" style="margin-bottom:12px">
-            <div style="display:flex;gap:12px;align-items:flex-end">
+            <div class="share-form-grid">
               <div>
-                <div class="settings-label">Share Name</div>
+                <div class="settings-label">Share Name *</div>
                 <input id="new-share-name" class="text-input" placeholder="e.g. Movies" />
               </div>
-              <button class="btn btn-primary" onclick="doAddShare()">Create</button>
-              <button class="btn btn-ghost" onclick="hideAddShare()">Cancel</button>
+              <div>
+                <div class="settings-label">Comment</div>
+                <input id="new-share-comment" class="text-input" placeholder="Optional description" />
+              </div>
+              <div>
+                <div class="settings-label">SMB Access</div>
+                <select id="new-share-security" class="text-input">
+                  <option value="public">Public (no password)</option>
+                  <option value="secure">Secure (users only)</option>
+                  <option value="private">Private (read/write lists)</option>
+                </select>
+              </div>
+              <div>
+                <div class="settings-label">Cache Mode</div>
+                <select id="new-share-cache" class="text-input">
+                  <option value="yes">Yes — use cache if available</option>
+                  <option value="prefer">Prefer — write to cache first</option>
+                  <option value="only">Only — cache drive only</option>
+                  <option value="no">No — bypass cache</option>
+                </select>
+              </div>
+              <div style="display:flex;align-items:center;gap:8px">
+                <label class="toggle-wrap">
+                  <input type="checkbox" id="new-share-smb" checked>
+                  <span class="toggle"></span>
+                  <span class="settings-label" style="margin:0">SMB Enabled</span>
+                </label>
+              </div>
+              <div style="display:flex;align-items:center;gap:8px">
+                <label class="toggle-wrap">
+                  <input type="checkbox" id="new-share-nfs">
+                  <span class="toggle"></span>
+                  <span class="settings-label" style="margin:0">NFS Enabled</span>
+                </label>
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;margin-top:16px">
+              <button class="btn btn-primary" onclick="doAddShare()">Create Share</button>
+              <button class="btn btn-ghost" onclick="toggleAddShare()">Cancel</button>
             </div>
           </div>
 
@@ -173,7 +238,7 @@
         <!-- Shares log -->
         <div class="settings-section">
           <h2 class="settings-section-title">
-            Shares Log
+            Log
             <button class="btn btn-sm btn-ghost" onclick="clearSharesLog()">Clear</button>
           </h2>
           <div class="log-panel" id="shares-log-panel"></div>
