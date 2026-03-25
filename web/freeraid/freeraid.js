@@ -30,6 +30,8 @@ window.addEventListener('load', () => {
   }
   refreshStatus();
   setInterval(refreshStatus, 8000);
+  // Check for updates once on load, no need to hammer it
+  checkForUpdate();
 });
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -253,4 +255,42 @@ function runSync() {
 function setButtonsDisabled(disabled) {
   document.getElementById('btn-start-stop').disabled = disabled;
   document.getElementById('btn-sync').disabled = disabled;
+}
+
+// ── Update check ─────────────────────────────────────────────────────────────
+
+function checkForUpdate() {
+  let buf = '';
+  cockpit.spawn(['freeraid', 'check-update'], { superuser: 'require', err: 'ignore' })
+    .stream(d => { buf += d; })
+    .then(() => {
+      try {
+        const data = JSON.parse(buf.trim());
+        if (data.update_available) {
+          const bar = document.getElementById('update-bar');
+          document.getElementById('update-msg').textContent =
+            `Update available: v${data.current} → v${data.latest}`;
+          bar.classList.remove('hidden');
+        }
+      } catch (_) {}
+    })
+    .catch(() => {});
+}
+
+function runUpdate() {
+  if (opRunning) return;
+  opRunning = true;
+  setButtonsDisabled(true);
+  document.getElementById('update-bar').classList.add('hidden');
+
+  runCmd(['update'], 'system update')
+    .then(() => {
+      showAlert('success', 'Update applied! Reloading...');
+      setTimeout(() => window.location.reload(), 3000);
+    })
+    .catch(() => {})
+    .finally(() => {
+      opRunning = false;
+      setButtonsDisabled(false);
+    });
 }

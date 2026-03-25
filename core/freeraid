@@ -4,10 +4,13 @@
 
 set -euo pipefail
 
-FREERAID_VERSION="0.1.0"
+VERSION_FILE="${FREERAID_VERSION_FILE:-/etc/freeraid/VERSION}"
+FREERAID_VERSION="$(cat "$VERSION_FILE" 2>/dev/null | tr -d '[:space:]' || echo '0.1.0')"
 CONFIG_FILE="${FREERAID_CONFIG:-/boot/config/freeraid.conf.json}"
 SNAPRAID_CONF="/etc/snapraid.conf"
 LOG_FILE="/var/log/freeraid.log"
+GITHUB_REPO="crucifix86/FreeRAID"
+GITHUB_API="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -439,6 +442,102 @@ cmd_install_deps() {
     info "All dependencies installed."
 }
 
+cmd_version() {
+    echo "FreeRAID v${FREERAID_VERSION}"
+}
+
+cmd_update() {
+    require curl
+    require jq
+
+    info "Checking for updates (current: v${FREERAID_VERSION})..."
+
+    # Fetch latest release info from GitHub
+    local release_json
+    release_json=$(curl -fsSL "$GITHUB_API" 2>/dev/null) \
+        || die "Could not reach GitHub. Check your internet connection."
+
+    local latest_tag latest_ver tarball_url
+    latest_tag=$(echo "$release_json" | jq -r '.tag_name')
+    latest_ver="${latest_tag#v}"  # strip leading 'v'
+    tarball_url=$(echo "$release_json" | jq -r '.assets[] | select(.name | test("freeraid-components")) | .browser_download_url')
+
+    if [ -z "$latest_tag" ] || [ "$latest_tag" = "null" ]; then
+        die "No releases found at ${GITHUB_API}"
+    fi
+
+    info "Latest release: ${latest_tag}"
+
+    # Compare versions (simple string compare works for semver x.y.z)
+    if [ "$latest_ver" = "$FREERAID_VERSION" ]; then
+        info "Already up to date (v${FREERAID_VERSION})"
+        return 0
+    fi
+
+    if [ -z "$tarball_url" ] || [ "$tarball_url" = "null" ]; then
+        die "No component tarball found in release ${latest_tag}. Expected asset named 'freeraid-components-*.tar.gz'"
+    fi
+
+    info "Downloading components tarball for ${latest_tag}..."
+    local tmpdir
+    tmpdir=$(mktemp -d /tmp/freeraid-update-XXXXXX)
+    trap "rm -rf $tmpdir" EXIT
+
+    curl -fsSL "$tarball_url" -o "$tmpdir/components.tar.gz" \
+        || die "Download failed"
+
+    info "Applying update..."
+    tar -xzf "$tmpdir/components.tar.gz" -C "$tmpdir"
+
+    # Install CLI
+    if [ -f "$tmpdir/freeraid" ]; then
+        cp "$tmpdir/freeraid" /usr/local/bin/freeraid
+        chmod +x /usr/local/bin/freeraid
+        info "CLI updated"
+    fi
+
+    # Install web UI
+    if [ -d "$tmpdir/web/freeraid" ]; then
+        cp -r "$tmpdir/web/freeraid/." /usr/share/cockpit/freeraid/
+        info "Web UI updated"
+        systemctl restart cockpit.socket 2>/dev/null || true
+    fi
+
+    # Install importer
+    if [ -f "$tmpdir/unraid-import" ]; then
+        cp "$tmpdir/unraid-import" /usr/local/bin/freeraid-import
+        chmod +x /usr/local/bin/freeraid-import
+        info "Importer updated"
+    fi
+
+    # Update version file
+    mkdir -p "$(dirname "$VERSION_FILE")"
+    echo "$latest_ver" > "$VERSION_FILE"
+
+    info "FreeRAID updated to v${latest_ver}"
+}
+
+cmd_check_update() {
+    require curl
+    require jq
+
+    local release_json latest_tag latest_ver
+    release_json=$(curl -fsSL "$GITHUB_API" 2>/dev/null) || {
+        warn "Could not reach GitHub"
+        return 1
+    }
+    latest_tag=$(echo "$release_json" | jq -r '.tag_name')
+    latest_ver="${latest_tag#v}"
+
+    if [ "$latest_ver" = "$FREERAID_VERSION" ]; then
+        echo '{"update_available":false,"current":"'"$FREERAID_VERSION"'","latest":"'"$latest_ver"'"}'
+    else
+        local release_notes
+        release_notes=$(echo "$release_json" | jq -r '.body // ""' | head -5)
+        echo '{"update_available":true,"current":"'"$FREERAID_VERSION"'","latest":"'"$latest_ver"'","notes":'"$(echo "$release_notes" | jq -Rs .)"'}'
+    fi
+}
+
 cmd_help() {
     cat <<EOF
 
@@ -455,6 +554,11 @@ ${BOLD}PARITY COMMANDS${NC}
   sync                Update parity (run after adding files)
   scrub               Verify parity data integrity
   diff                Show what changed since last sync
+
+${BOLD}UPDATES${NC}
+  version             Show installed version
+  check-update        Check if an update is available (JSON output)
+  update              Download and apply latest release from GitHub
 
 ${BOLD}SYSTEM${NC}
   install-deps        Install all required packages (Debian/Ubuntu)
@@ -484,8 +588,11 @@ case "${1:-help}" in
     diff)         cmd_diff ;;
     add-disk)     cmd_add_disk "${2:-}" "${3:-}" "${4:-}" ;;
     remove-disk)  cmd_remove_disk "${2:-}" ;;
-    install-deps) cmd_install_deps ;;
-    config)       cmd_config ;;
+    install-deps)  cmd_install_deps ;;
+    config)        cmd_config ;;
+    version)       cmd_version ;;
+    update)        cmd_update ;;
+    check-update)  cmd_check_update ;;
     help|--help|-h) cmd_help ;;
     *) error "Unknown command: ${1}"; cmd_help; exit 1 ;;
 esac

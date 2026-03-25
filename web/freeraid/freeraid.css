@@ -97,6 +97,7 @@ body {
   white-space: pre-wrap;
   font-family: monospace;
 }
+.alert.update  { background: #1e1a3a; border-color: var(--accent); color: #c4b5fd; display: flex; align-items: center; }
 .alert.info    { background: #1e2a3a; border-color: var(--blue);   color: #93c5fd; }
 .alert.success { background: #14261f; border-color: var(--green);  color: #86efac; }
 .alert.error   { background: #2a1515; border-color: var(--red);    color: #fca5a5; }
