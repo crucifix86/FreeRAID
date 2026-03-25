@@ -885,7 +885,6 @@ cmd_update() {
     if [ -d "$tmpdir/web/freeraid" ]; then
         cp -r "$tmpdir/web/freeraid/." /usr/share/cockpit/freeraid/
         info "Web UI updated"
-        systemctl restart cockpit.socket 2>/dev/null || true
     fi
 
     # Install importer

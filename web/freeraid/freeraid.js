@@ -28,7 +28,12 @@ window.addEventListener('load', () => {
   if (typeof cockpit === 'undefined') initFallback();
   refreshStatus();
   setInterval(refreshStatus, 8000);
-  doCheckUpdate();
+  // Skip update check if we just finished an update (flag set before reload)
+  if (!sessionStorage.getItem('justUpdated')) {
+    doCheckUpdate();
+  } else {
+    sessionStorage.removeItem('justUpdated');
+  }
 });
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -777,10 +782,12 @@ function doUpdate() {
 
   runCmd(['update'], 'update-log-panel')
     .then(() => {
-      ulog('success', 'Update complete — reloading in 3 seconds...');
+      ulog('success', `Update complete — reloading in 3 seconds...`);
       const statusEl = document.getElementById('s-update-status');
       if (statusEl) { statusEl.textContent = 'Up to date'; statusEl.className = 'settings-value up-to-date'; }
       if (btnUpdate) btnUpdate.classList.add('hidden');
+      document.getElementById('update-bar').classList.add('hidden');
+      sessionStorage.setItem('justUpdated', '1');
       setTimeout(() => window.location.reload(), 3000);
     })
     .catch(err => {
