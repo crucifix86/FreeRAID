@@ -24,6 +24,7 @@
     <nav class="tabbar">
       <button class="tab active" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard</button>
       <button class="tab" data-tab="settings" onclick="switchTab('settings')">Settings</button>
+      <button class="tab" data-tab="shares" onclick="switchTab('shares')">Shares</button>
       <button class="tab" data-tab="plugins" onclick="switchTab('plugins')">Plugins</button>
     </nav>
 
@@ -141,6 +142,44 @@
         </div>
 
       </div><!-- end settings -->
+
+      <!-- ── SHARES TAB ── -->
+      <div id="tab-shares" class="hidden">
+
+        <div class="settings-section">
+          <h2 class="settings-section-title">
+            User Shares
+            <button class="btn btn-sm btn-primary" style="margin-left:auto" onclick="showAddShare()">+ Add Share</button>
+            <button class="btn btn-sm btn-secondary" onclick="applyShares()">Apply (Reload Samba)</button>
+          </h2>
+
+          <!-- Add share form -->
+          <div id="add-share-form" class="settings-card hidden" style="margin-bottom:12px">
+            <div style="display:flex;gap:12px;align-items:flex-end">
+              <div>
+                <div class="settings-label">Share Name</div>
+                <input id="new-share-name" class="text-input" placeholder="e.g. Movies" />
+              </div>
+              <button class="btn btn-primary" onclick="doAddShare()">Create</button>
+              <button class="btn btn-ghost" onclick="hideAddShare()">Cancel</button>
+            </div>
+          </div>
+
+          <div id="shares-list">
+            <div class="loading-msg">Loading shares...</div>
+          </div>
+        </div>
+
+        <!-- Shares log -->
+        <div class="settings-section">
+          <h2 class="settings-section-title">
+            Shares Log
+            <button class="btn btn-sm btn-ghost" onclick="clearSharesLog()">Clear</button>
+          </h2>
+          <div class="log-panel" id="shares-log-panel"></div>
+        </div>
+
+      </div><!-- end shares -->
 
       <!-- ── PLUGINS TAB ── -->
       <div id="tab-plugins" class="hidden">

@@ -46,7 +46,9 @@ function switchTab(name) {
   });
   document.getElementById('tab-dashboard').classList.toggle('hidden', name !== 'dashboard');
   document.getElementById('tab-settings').classList.toggle('hidden',  name !== 'settings');
+  document.getElementById('tab-shares').classList.toggle('hidden',    name !== 'shares');
   document.getElementById('tab-plugins').classList.toggle('hidden',   name !== 'plugins');
+  if (name === 'shares') refreshShares();
 }
 
 // ── Logging ──────────────────────────────────────────────────────────────────
@@ -266,6 +268,86 @@ function doCheckUpdate() {
       }
     })
     .catch(() => { if (statusEl) statusEl.textContent = 'Unreachable'; });
+}
+
+// ── Shares ───────────────────────────────────────────────────────────────────
+
+function clearSharesLog() { document.getElementById('shares-log-panel').innerHTML = ''; }
+const slog = (level, text) => appendLog('shares-log-panel', level, text);
+
+function refreshShares() {
+  let buf = '';
+  cockpit.spawn(['freeraid', 'shares-list'], { superuser: 'require', err: 'ignore' })
+    .stream(d => { buf += d; })
+    .then(() => {
+      try {
+        const jsonStart = buf.indexOf('[');
+        renderShares(JSON.parse(buf.slice(jsonStart)));
+      } catch(e) {
+        document.getElementById('shares-list').innerHTML =
+          '<div class="loading-msg">No shares configured yet.</div>';
+      }
+    })
+    .catch(() => {
+      document.getElementById('shares-list').innerHTML =
+        '<div class="loading-msg">Could not load shares.</div>';
+    });
+}
+
+function renderShares(shares) {
+  const el = document.getElementById('shares-list');
+  if (!shares.length) {
+    el.innerHTML = '<div class="loading-msg">No shares configured. Add one above or import from Unraid.</div>';
+    return;
+  }
+
+  el.innerHTML = shares.map(s => {
+    const smbBadge  = s.smb_enabled ? `<span class="badge badge-smb">SMB</span>` : '';
+    const nfsBadge  = s.nfs_enabled ? `<span class="badge badge-nfs">NFS</span>` : '';
+    const secBadge  = s.smb_security === 'public'
+      ? `<span class="badge badge-public">Public</span>`
+      : `<span class="badge badge-private">Private</span>`;
+    const cacheBadge = s.cache_mode
+      ? `<span class="badge badge-cache">Cache: ${s.cache_mode}</span>` : '';
+    const unraidBadge = s._imported_from_unraid
+      ? `<span class="badge badge-unraid">Unraid</span>` : '';
+
+    return `<div class="share-card">
+      <div class="share-name">${s.name}</div>
+      <div class="share-path">${s.path}</div>
+      <div class="share-badges">${smbBadge}${nfsBadge}${secBadge}${cacheBadge}${unraidBadge}</div>
+      <div class="share-actions">
+        <button class="btn btn-sm btn-ghost" onclick="removeShare('${s.name}')">Remove</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function showAddShare()  { document.getElementById('add-share-form').classList.remove('hidden'); }
+function hideAddShare()  { document.getElementById('add-share-form').classList.add('hidden'); }
+
+function doAddShare() {
+  const name = document.getElementById('new-share-name').value.trim();
+  if (!name) return;
+  hideAddShare();
+  slog('cmd', `Adding share: ${name}`);
+  runCmd(['shares-add', name], 'shares-log-panel')
+    .then(() => { refreshShares(); document.getElementById('new-share-name').value = ''; })
+    .catch(err => slog('error', String(err)));
+}
+
+function removeShare(name) {
+  if (!confirm(`Remove share "${name}"? (Files are NOT deleted)`)) return;
+  slog('cmd', `Removing share: ${name}`);
+  runCmd(['shares-remove', name], 'shares-log-panel')
+    .then(() => refreshShares())
+    .catch(err => slog('error', String(err)));
+}
+
+function applyShares() {
+  slog('cmd', 'Applying shares (reloading Samba)...');
+  runCmd(['shares-apply'], 'shares-log-panel')
+    .catch(err => slog('error', String(err)));
 }
 
 function doUpdate() {

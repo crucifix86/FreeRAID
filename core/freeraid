@@ -443,6 +443,167 @@ cmd_remove_disk() {
     info "Slot $slot disabled. Run 'freeraid stop && freeraid start' to apply."
 }
 
+cmd_shares_list() {
+    jq -c '.shares // []' "$CONFIG_FILE"
+}
+
+cmd_shares_apply() {
+    # Write smb.conf and reload samba based on current shares config
+    require samba
+
+    local smb_conf="/etc/samba/smb.conf"
+    local pool
+    pool=$(cfg_pool_mountpoint)
+
+    info "Writing Samba config..."
+
+    cat > "$smb_conf" <<SMBEOF
+[global]
+   workgroup = WORKGROUP
+   server string = FreeRAID
+   netbios name = $(hostname)
+   security = user
+   map to guest = bad user
+   dns proxy = no
+   fruit:metadata = stream
+   fruit:model = MacSamba
+   vfs objects = catia fruit streams_xattr
+
+SMBEOF
+
+    while IFS= read -r share; do
+        local name smb_enabled smb_security comment cache_mode read_list write_list
+        name=$(echo "$share" | jq -r '.name')
+        smb_enabled=$(echo "$share" | jq -r '.smb_enabled')
+        smb_security=$(echo "$share" | jq -r '.smb_security // "public"')
+        comment=$(echo "$share" | jq -r '.comment // ""')
+        read_list=$(echo "$share" | jq -r '.smb_read_list // [] | join(",")')
+        write_list=$(echo "$share" | jq -r '.smb_write_list // [] | join(",")')
+        local path="${pool}/${name}"
+
+        [ "$smb_enabled" = "false" ] && continue
+
+        mkdir -p "$path"
+
+        cat >> "$smb_conf" <<SHAREEOF
+[${name}]
+   path = ${path}
+   comment = ${comment}
+SHAREEOF
+
+        if [ "$smb_security" = "public" ]; then
+            cat >> "$smb_conf" <<SHAREEOF
+   guest ok = yes
+   browseable = yes
+   writable = yes
+SHAREEOF
+        else
+            cat >> "$smb_conf" <<SHAREEOF
+   guest ok = no
+   browseable = yes
+   writable = yes
+SHAREEOF
+            [ -n "$read_list"  ] && echo "   read list = ${read_list}" >> "$smb_conf"
+            [ -n "$write_list" ] && echo "   write list = ${write_list}" >> "$smb_conf"
+        fi
+        echo "" >> "$smb_conf"
+
+    done < <(jq -c '.shares[]' "$CONFIG_FILE" 2>/dev/null)
+
+    systemctl restart smbd nmbd 2>/dev/null || systemctl restart samba 2>/dev/null || true
+    info "Samba reloaded. Shares active."
+}
+
+cmd_shares_add() {
+    local name="$1"
+    [ -z "$name" ] && die "Usage: freeraid shares-add <name>"
+    local existing
+    existing=$(jq -r --arg n "$name" '.shares[] | select(.name==$n) | .name' "$CONFIG_FILE" 2>/dev/null || true)
+    [ -n "$existing" ] && die "Share '$name' already exists"
+
+    jq --arg name "$name" \
+       '.shares += [{"name":$name,"path":("/mnt/user/"+$name),"comment":"","smb_enabled":true,"smb_security":"public","smb_read_list":[],"smb_write_list":[],"nfs_enabled":false,"cache_mode":"yes","cache_pool":"cache","include_disks":[],"exclude_disks":[]}]' \
+       "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+
+    info "Share '$name' added. Run 'freeraid shares-apply' to activate."
+}
+
+cmd_shares_remove() {
+    local name="$1"
+    [ -z "$name" ] && die "Usage: freeraid shares-remove <name>"
+    jq --arg n "$name" 'del(.shares[] | select(.name==$n))' \
+       "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+    info "Share '$name' removed. Run 'freeraid shares-apply' to apply."
+}
+
+cmd_shares_import() {
+    # Import shares from a Unraid config directory
+    local src="${1:-}"
+    [ -z "$src" ] && die "Usage: freeraid shares-import <path-to-unraid-config-dir>"
+    [ -d "$src/shares" ] || die "No shares/ directory found in $src"
+
+    require python3
+
+    local tmpout
+    tmpout=$(mktemp /tmp/freeraid-shares-XXXXXX.json)
+
+    python3 - "$src" "$tmpout" <<'PYEOF'
+import sys, json, re
+from pathlib import Path
+
+def parse_cfg(path):
+    result = {}
+    if not path.exists(): return result
+    for line in path.read_text(errors='replace').splitlines():
+        line = line.strip()
+        if not line or line.startswith('#'): continue
+        m = re.match(r'^(\w+)="?([^"]*)"?$', line)
+        if m: result[m.group(1)] = m.group(2)
+    return result
+
+config_dir = Path(sys.argv[1])
+out_file   = sys.argv[2]
+shares = []
+
+for f in sorted((config_dir / 'shares').glob('*.cfg')):
+    s    = parse_cfg(f)
+    name = f.stem
+    shares.append({
+        "name":           name,
+        "path":           f'/mnt/user/{name}',
+        "comment":        s.get('shareComment', ''),
+        "smb_enabled":    s.get('shareExport', 'e') == 'e',
+        "smb_security":   s.get('shareSecurity', 'public'),
+        "smb_read_list":  [u for u in s.get('shareReadList','').split(',') if u],
+        "smb_write_list": [u for u in s.get('shareWriteList','').split(',') if u],
+        "nfs_enabled":    s.get('shareExportNFS', '-') != '-',
+        "nfs_security":   s.get('shareSecurityNFS', 'public'),
+        "cache_mode":     s.get('shareUseCache', 'yes'),
+        "cache_pool":     s.get('shareCachePool', 'cache'),
+        "allocator":      s.get('shareAllocator', 'highwater'),
+        "split_level":    s.get('shareSplitLevel', ''),
+        "include_disks":  [d for d in s.get('shareInclude','').split(',') if d],
+        "exclude_disks":  [d for d in s.get('shareExclude','').split(',') if d],
+        "cow":            s.get('shareCOW', 'auto'),
+        "_imported_from_unraid": True
+    })
+
+json.dump(shares, open(out_file, 'w'), indent=2)
+print(f"Parsed {len(shares)} shares")
+PYEOF
+
+    local count
+    count=$(jq 'length' "$tmpout")
+    info "Importing $count shares from $src..."
+
+    # Merge into config — replace existing shares array
+    jq --slurpfile newshares "$tmpout" '.shares = $newshares[0]' \
+       "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+
+    rm -f "$tmpout"
+    info "Done. Run 'freeraid shares-apply' to activate via Samba."
+}
+
 cmd_install_deps() {
     info "Installing FreeRAID dependencies..."
     apt-get update -qq
@@ -574,6 +735,13 @@ ${BOLD}PARITY COMMANDS${NC}
   scrub               Verify parity data integrity
   diff                Show what changed since last sync
 
+${BOLD}SHARES${NC}
+  shares-list              List all shares (JSON)
+  shares-add <name>        Add a new share
+  shares-remove <name>     Remove a share
+  shares-apply             Write smb.conf and reload Samba
+  shares-import <dir>      Import shares from Unraid config directory
+
 ${BOLD}UPDATES${NC}
   version             Show installed version
   check-update        Check if an update is available (JSON output)
@@ -607,6 +775,11 @@ case "${1:-help}" in
     diff)         cmd_diff ;;
     add-disk)     cmd_add_disk "${2:-}" "${3:-}" "${4:-}" ;;
     remove-disk)  cmd_remove_disk "${2:-}" ;;
+    shares-list)   cmd_shares_list ;;
+    shares-apply)  cmd_shares_apply ;;
+    shares-add)    cmd_shares_add "${2:-}" ;;
+    shares-remove) cmd_shares_remove "${2:-}" ;;
+    shares-import) cmd_shares_import "${2:-}" ;;
     install-deps)  cmd_install_deps ;;
     config)        cmd_config ;;
     version)       cmd_version ;;

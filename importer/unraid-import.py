@@ -114,7 +114,7 @@ def import_network(config_dir: Path) -> dict:
 
 
 def import_shares(config_dir: Path) -> list:
-    """Read share configs from config/shares/*.cfg"""
+    """Read share configs from config/shares/*.cfg using real Unraid field names."""
     shares = []
     shares_dir = config_dir / 'shares'
     if not shares_dir.exists():
@@ -124,16 +124,41 @@ def import_shares(config_dir: Path) -> list:
         s = parse_cfg(share_file)
         name = share_file.stem
 
-        smb_security = s.get('shareSmb', 'public')
+        # shareExport: "e" = enabled, "-" = disabled
+        smb_enabled = s.get('shareExport', 'e') == 'e'
+        smb_security = s.get('shareSecurity', 'public')   # public / secure / private
+        smb_read_list  = [u for u in s.get('shareReadList', '').split(',') if u]
+        smb_write_list = [u for u in s.get('shareWriteList', '').split(',') if u]
+
+        # shareExportNFS: "-" = disabled, anything else = enabled
+        nfs_enabled = s.get('shareExportNFS', '-') != '-'
+
+        # shareUseCache: "yes" / "no" / "prefer" / "only"
+        cache_mode = s.get('shareUseCache', 'yes')
+
+        # cache pool name (appdata uses "prefer" + specific pool)
+        cache_pool = s.get('shareCachePool', 'cache')
+
+        include_disks = [d for d in s.get('shareInclude', '').split(',') if d]
+        exclude_disks = [d for d in s.get('shareExclude', '').split(',') if d]
+
         shares.append({
             "name": name,
             "path": f'/mnt/user/{name}',
             "comment": s.get('shareComment', ''),
-            "smb_enabled": s.get('shareSMBEnabled', 'yes').lower() == 'yes',
-            "smb_public": smb_security == 'public',
-            "nfs_enabled": s.get('shareNFSEnabled', 'no').lower() == 'yes',
-            "cache_mode": s.get('shareCacheMode', 'prefer'),
-            "include_disks": [d for d in s.get('shareInclude', '').split(',') if d],
+            "smb_enabled": smb_enabled,
+            "smb_security": smb_security,
+            "smb_read_list": smb_read_list,
+            "smb_write_list": smb_write_list,
+            "nfs_enabled": nfs_enabled,
+            "nfs_security": s.get('shareSecurityNFS', 'public'),
+            "cache_mode": cache_mode,
+            "cache_pool": cache_pool,
+            "allocator": s.get('shareAllocator', 'highwater'),
+            "split_level": s.get('shareSplitLevel', ''),
+            "include_disks": include_disks,
+            "exclude_disks": exclude_disks,
+            "cow": s.get('shareCOW', 'auto'),
             "_imported_from_unraid": True
         })
 
