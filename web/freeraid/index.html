@@ -24,6 +24,7 @@
     <nav class="tabbar">
       <button class="tab active" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard</button>
       <button class="tab" data-tab="settings" onclick="switchTab('settings')">Settings</button>
+      <button class="tab" data-tab="plugins" onclick="switchTab('plugins')">Plugins</button>
     </nav>
 
     <div class="content">
@@ -140,6 +141,18 @@
         </div>
 
       </div><!-- end settings -->
+
+      <!-- ── PLUGINS TAB ── -->
+      <div id="tab-plugins" class="hidden">
+        <div class="settings-section">
+          <h2 class="settings-section-title">Plugins</h2>
+          <div class="settings-card" style="text-align:center;padding:48px">
+            <div style="font-size:32px;margin-bottom:12px">🧩</div>
+            <div style="font-size:16px;font-weight:600;margin-bottom:8px">Plugin Manager</div>
+            <div style="color:var(--text-dim);font-size:13px">Coming soon — extend FreeRAID with community plugins.</div>
+          </div>
+        </div>
+      </div><!-- end plugins -->
 
     </div>
   </div>

@@ -46,6 +46,7 @@ function switchTab(name) {
   });
   document.getElementById('tab-dashboard').classList.toggle('hidden', name !== 'dashboard');
   document.getElementById('tab-settings').classList.toggle('hidden',  name !== 'settings');
+  document.getElementById('tab-plugins').classList.toggle('hidden',   name !== 'plugins');
 }
 
 // ── Logging ──────────────────────────────────────────────────────────────────
