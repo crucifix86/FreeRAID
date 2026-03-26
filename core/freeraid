@@ -443,6 +443,9 @@ cmd_start() {
     jq '.array.state = "started"' "$CONFIG_FILE" > /tmp/freeraid.conf.tmp \
         && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
 
+    # Apply spin-down settings (only for drives that have it explicitly set)
+    cmd_spindown_apply 2>/dev/null || true
+
     info "Array started. Pool at ${pool}"
     cmd_status
 }
@@ -2205,6 +2208,72 @@ cmd_sysinfo() {
         "$hostname" "$uptime_sec" "$cpu_model" "$cpu_cores" "$kernel"
 }
 
+# ── Disk spin-down ───────────────────────────────────────────────────────────────
+
+cmd_spindown_get() {
+    # Returns JSON: [{device, value, label, spindle_status}]
+    require hdparm
+    local out="["
+    local first=true
+    while IFS= read -r dev; do
+        [ -b "$dev" ] || continue
+        local saved_val
+        saved_val=$(jq -r --arg d "$(basename "$dev")" '.spindown[$d] // 0' "$CONFIG_FILE" 2>/dev/null || echo "0")
+        local spindle="unknown"
+        local hdparm_out; hdparm_out=$(hdparm -C "$dev" 2>&1 || true)
+        local parsed; parsed=$(echo "$hdparm_out" | grep -oP '(?<=drive state is:  )[^\r\n]+' | head -1 | tr -d ' \r\n')
+        [ -n "$parsed" ] && spindle="$parsed"
+        $first || out+=","
+        out+="{\"device\":\"$dev\",\"value\":$saved_val,\"spindle\":\"$spindle\"}"
+        first=false
+    done < <(jq -r '
+        (.array.disks[]  | select(.enabled==true) | .device),
+        (.array.parity[] | .device),
+        (.array.cache[]  | select(.enabled==true) | .device)
+    ' "$CONFIG_FILE" 2>/dev/null | sort -u)
+    out+="]"
+    echo "$out"
+}
+
+cmd_spindown_set() {
+    # Usage: freeraid spindown-set <device> <value>
+    # value 0 = disabled, otherwise hdparm -S value
+    local dev="${1:-}" val="${2:-0}"
+    [ -z "$dev" ] && die "Usage: freeraid spindown-set <device> <value>"
+    [ -b "$dev" ] || die "Device not found: $dev"
+
+    local key; key=$(basename "$dev")
+
+    # Save to config (.spindown is a map of basename → value)
+    jq --arg k "$key" --argjson v "$val" \
+       '.spindown[$k] = $v' \
+       "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+
+    # Apply immediately
+    require hdparm
+    hdparm -S "$val" "$dev" &>/dev/null
+    if [ "$val" -eq 0 ]; then
+        info "Spin-down disabled for $dev."
+    else
+        info "Spin-down set to value $val for $dev."
+    fi
+}
+
+cmd_spindown_apply() {
+    # Apply all saved spindown settings — called on array start
+    command -v hdparm &>/dev/null || return 0
+    local any=false
+    while IFS="=" read -r key val; do
+        # Find the full device path
+        local dev="/dev/$key"
+        [ -b "$dev" ] || continue
+        [ "$val" -eq 0 ] && continue  # 0 = disabled, skip
+        hdparm -S "$val" "$dev" &>/dev/null && any=true
+    done < <(jq -r '.spindown // {} | to_entries[] | .key + "=" + (.value | tostring)' "$CONFIG_FILE" 2>/dev/null)
+    $any && info "Spin-down settings applied."
+    return 0
+}
+
 # ── Log viewer ───────────────────────────────────────────────────────────────────
 
 cmd_logs_get() {
@@ -2296,6 +2365,9 @@ case "${1:-help}" in
     mover-set-schedule)   cmd_mover_set_schedule "${2:-}" "${3:-}" ;;
     parity-get-schedule)  cmd_parity_get_schedule ;;
     parity-set-schedule)  cmd_parity_set_schedule "${2:-}" "${3:-}" "${4:-}" ;;
+    spindown-get)         cmd_spindown_get ;;
+    spindown-set)         cmd_spindown_set "${2:-}" "${3:-}" ;;
+    spindown-apply)       cmd_spindown_apply ;;
     logs-get)             cmd_logs_get "${2:-}" "${3:-}" ;;
     setup-status)         cmd_setup_status ;;
     setup-complete)       cmd_setup_complete ;;

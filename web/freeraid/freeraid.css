@@ -1198,3 +1198,23 @@ body {
 .log-src-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
 
 .log-panel-tall { min-height: 500px; max-height: 70vh; }
+
+/* ── Disk spin-down ── */
+.spindown-grid { display: flex; flex-direction: column; gap: 8px; }
+.spindown-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.spindown-dev { font-family: monospace; font-weight: 600; min-width: 100px; }
+.spindle-badge {
+  font-size: 11px; font-weight: 600;
+  padding: 2px 8px; border-radius: 10px;
+  text-transform: uppercase; letter-spacing: 0.3px;
+}
+.spindle-on  { background: #1f3a2a; color: var(--green); }
+.spindle-off { background: #2a2410; color: var(--yellow); }

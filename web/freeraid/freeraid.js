@@ -762,6 +762,7 @@ const dlog = (level, text) => appendLog('disks-log-panel', level, text);
 let _assignDev = null;
 
 function refreshDisks() {
+  refreshSpindown();
   const el = document.getElementById('disk-scan-list');
   el.innerHTML = '<div class="loading-msg">Scanning...</div>';
 
@@ -2596,4 +2597,79 @@ function toggleLogTail() {
     clearInterval(_logTailInt);
     _logTailInt = null;
   }
+}
+
+// ── Disk Spin-down ────────────────────────────────────────────────────────────
+
+const SPINDOWN_OPTIONS = [
+  { value: 0,   label: 'Disabled (never spin down)' },
+  { value: 60,  label: '5 minutes' },
+  { value: 120, label: '10 minutes' },
+  { value: 180, label: '15 minutes' },
+  { value: 240, label: '20 minutes' },
+  { value: 241, label: '30 minutes' },
+  { value: 242, label: '1 hour' },
+  { value: 244, label: '2 hours' },
+  { value: 248, label: '4 hours' },
+];
+
+function refreshSpindown() {
+  const el = document.getElementById('spindown-list');
+  if (!el) return;
+  el.innerHTML = '<div class="loading-msg" style="font-size:12px">Loading...</div>';
+
+  let buf = '';
+  cockpit.spawn(['freeraid', 'spindown-get'], { superuser: 'require', err: 'ignore' })
+    .stream(d => { buf += d; })
+    .then(() => {
+      try { renderSpindown(JSON.parse(buf.trim())); }
+      catch(e) { el.innerHTML = '<div class="loading-msg">Could not load spin-down settings.</div>'; }
+    })
+    .catch(() => { el.innerHTML = '<div class="loading-msg">hdparm not available.</div>'; });
+}
+
+function renderSpindown(drives) {
+  const el = document.getElementById('spindown-list');
+  if (!drives.length) {
+    el.innerHTML = '<div class="loading-msg">No drives found.</div>';
+    return;
+  }
+
+  const opts = SPINDOWN_OPTIONS.map(o =>
+    `<option value="${o.value}">${o.label}</option>`
+  ).join('');
+
+  el.innerHTML = `
+    <div class="spindown-grid">
+      ${drives.map(d => {
+        const devSafe = d.device.replace(/'/g, "\\'");
+        const spinBadge = d.spindle === 'active/idle'
+          ? `<span class="spindle-badge spindle-on">spinning</span>`
+          : d.spindle === 'standby'
+          ? `<span class="spindle-badge spindle-off">standby</span>`
+          : '';
+        const selOpts = SPINDOWN_OPTIONS.map(o =>
+          `<option value="${o.value}" ${o.value === d.value ? 'selected' : ''}>${o.label}</option>`
+        ).join('');
+        return `<div class="spindown-row">
+          <div class="spindown-dev">${d.device}</div>
+          <div style="display:flex;align-items:center;gap:8px;flex:1">
+            ${spinBadge}
+          </div>
+          <select class="install-select" style="min-width:220px"
+            onchange="setSpindown('${devSafe}', this.value)">
+            ${selOpts}
+          </select>
+        </div>`;
+      }).join('')}
+    </div>
+    <div style="margin-top:10px;font-size:12px;color:var(--text-dim)">
+      Changes apply immediately and persist across reboots. Drives spin back up automatically when accessed.
+    </div>`;
+}
+
+function setSpindown(dev, value) {
+  cockpit.spawn(['freeraid', 'spindown-set', dev, value], { superuser: 'require', err: 'out' })
+    .then(() => refreshSpindown())
+    .catch(() => {});
 }
