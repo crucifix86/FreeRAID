@@ -17,6 +17,9 @@
         <span class="array-badge" id="array-badge">●  Loading...</span>
         <button class="btn btn-primary" id="btn-start-stop" onclick="toggleArray()">Start Array</button>
         <button class="btn btn-secondary" id="btn-sync" onclick="runSync()">Sync Parity</button>
+        <button class="btn btn-secondary" id="btn-scrub" onclick="runScrub()">Parity Check</button>
+        <button class="btn btn-ghost" onclick="sysReboot()">Reboot</button>
+        <button class="btn btn-ghost" onclick="sysShutdown()">Shutdown</button>
       </div>
     </header>
 
@@ -62,6 +65,45 @@
             <div class="summary-label">Last Parity Sync</div>
             <div class="summary-value" id="last-sync">—</div>
           </div>
+        </div>
+
+        <!-- System Stats -->
+        <div class="sysstat-row">
+          <div class="sysstat-card">
+            <div class="sysstat-header">
+              <span class="sysstat-label">CPU</span>
+              <span class="sysstat-value" id="cpu-pct">—</span>
+            </div>
+            <canvas id="cpu-chart" class="sysstat-canvas" width="220" height="44"></canvas>
+          </div>
+          <div class="sysstat-card">
+            <div class="sysstat-header">
+              <span class="sysstat-label">RAM</span>
+              <span class="sysstat-value" id="ram-pct">—</span>
+            </div>
+            <canvas id="ram-chart" class="sysstat-canvas" width="220" height="44"></canvas>
+          </div>
+          <div class="sysstat-card">
+            <div class="sysstat-header">
+              <span class="sysstat-label">Network</span>
+              <span class="sysstat-value" id="net-val">—</span>
+            </div>
+            <canvas id="net-chart" class="sysstat-canvas" width="220" height="44"></canvas>
+          </div>
+        </div>
+
+        <!-- System Info -->
+        <div class="sysinfo-row">
+          <div class="sysinfo-item">
+            <span class="sysinfo-label">Hostname</span>
+            <div class="sysinfo-edit-wrap">
+              <span class="sysinfo-value" id="si-hostname">—</span>
+              <button class="btn-inline-edit" onclick="editHostname()" title="Edit hostname">✎</button>
+            </div>
+          </div>
+          <div class="sysinfo-item"><span class="sysinfo-label">Uptime</span><span class="sysinfo-value" id="si-uptime">—</span></div>
+          <div class="sysinfo-item"><span class="sysinfo-label">CPU</span><span class="sysinfo-value" id="si-cpu">—</span></div>
+          <div class="sysinfo-item"><span class="sysinfo-label">Kernel</span><span class="sysinfo-value" id="si-kernel">—</span></div>
         </div>
 
         <!-- Drives -->
@@ -326,6 +368,26 @@
           </div>
         </div>
 
+        <!-- App Browser -->
+        <div class="settings-section">
+          <h2 class="settings-section-title">
+            App Browser
+            <button class="btn btn-sm btn-primary" style="margin-left:auto" onclick="toggleAppBrowser()">Browse Apps</button>
+          </h2>
+          <div id="app-browser-panel" class="hidden">
+            <div class="app-browser-toolbar">
+              <input type="text" id="app-search-input" class="app-search-input" placeholder="Search 3000+ apps..." oninput="searchApps()" />
+              <select id="app-category-filter" class="app-category-select" onchange="searchApps()">
+                <option value="">All Categories</option>
+              </select>
+              <button class="btn btn-sm btn-ghost" onclick="refreshAppFeed()" id="app-feed-btn">Update Feed</button>
+            </div>
+            <div id="app-grid" class="app-grid">
+              <div class="loading-msg">Click "Browse Apps" to load the app library.</div>
+            </div>
+          </div>
+        </div>
+
         <!-- Container list -->
         <div class="settings-section">
           <h2 class="settings-section-title">
@@ -372,6 +434,31 @@
         </div>
       </div><!-- end plugins -->
 
+    </div>
+  </div>
+
+  <!-- App Install Modal -->
+  <div id="app-install-backdrop" class="modal-backdrop hidden" onclick="closeAppInstall()">
+    <div class="modal modal-wide" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <img id="app-install-icon" src="" style="width:28px;height:28px;object-fit:contain;border-radius:4px;margin-right:8px" onerror="this.style.display='none'">
+        <span id="app-install-title">Install App</span>
+        <button class="modal-close" onclick="closeAppInstall()">✕</button>
+      </div>
+      <div id="app-install-body" class="app-install-body"></div>
+    </div>
+  </div>
+
+  <!-- SMART Details Modal -->
+  <div id="smart-modal-backdrop" class="modal-backdrop hidden" onclick="closeSmartModal()">
+    <div class="modal" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <span id="smart-modal-title">SMART Data</span>
+        <button class="modal-close" onclick="closeSmartModal()">✕</button>
+      </div>
+      <div id="smart-modal-body" class="smart-modal-body">
+        <div class="loading-msg">Loading...</div>
+      </div>
     </div>
   </div>
 

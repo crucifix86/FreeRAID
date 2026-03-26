@@ -24,10 +24,132 @@ function initFallback() {
   ulog('warn', 'Running without Cockpit — demo mode');
 }
 
+// ── System stats (CPU / RAM / Network sparklines) ─────────────────────────────
+
+const _sysPrev  = { cpu_idle: 0, cpu_total: 0, net_rx: 0, net_tx: 0 };
+const _sysHist  = { cpu: [], ram: [], net: [] };
+const HIST_MAX  = 30;
+
+function _pushHist(key, val) {
+  _sysHist[key].push(val);
+  if (_sysHist[key].length > HIST_MAX) _sysHist[key].shift();
+}
+
+function _fmtBytes(bytes) {
+  if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(1) + ' GB/s';
+  if (bytes >= 1048576)    return (bytes / 1048576).toFixed(1) + ' MB/s';
+  if (bytes >= 1024)       return (bytes / 1024).toFixed(0) + ' KB/s';
+  return bytes + ' B/s';
+}
+
+function refreshSysinfo() {
+  let buf = '';
+  cockpit.spawn(['freeraid', 'sysinfo'], { superuser: 'require' })
+    .stream(d => { buf += d; })
+    .then(() => {
+      let d;
+      try { d = JSON.parse(buf.trim()); } catch(_) { return; }
+
+      // CPU %
+      const idleDelta  = d.cpu_idle  - _sysPrev.cpu_idle;
+      const totalDelta = d.cpu_total - _sysPrev.cpu_total;
+      const cpuPct = totalDelta > 0 ? Math.round(100 * (1 - idleDelta / totalDelta)) : 0;
+
+      // Net bytes/s
+      const rxDelta = d.net_rx - _sysPrev.net_rx;
+      const txDelta = d.net_tx - _sysPrev.net_tx;
+      const netBps  = rxDelta + txDelta; // combined, per 4s interval → /4 for per-sec
+      const netPct  = Math.min(100, netBps / 4 / 1250000 * 100); // scale to ~100Mbps
+
+      // RAM %
+      const ramPct = d.mem_total > 0
+        ? Math.round(100 * (d.mem_total - d.mem_available) / d.mem_total)
+        : 0;
+
+      // Only push history after first sample (prev was 0)
+      if (_sysPrev.cpu_total > 0) {
+        _pushHist('cpu', cpuPct);
+        _pushHist('ram', ramPct);
+        _pushHist('net', netPct);
+        document.getElementById('cpu-pct').textContent = cpuPct + '%';
+        document.getElementById('ram-pct').textContent = ramPct + '%';
+        const ramUsed = ((d.mem_total - d.mem_available) / 1048576).toFixed(1);
+        const ramTotal = (d.mem_total / 1048576).toFixed(1);
+        document.getElementById('ram-pct').textContent = ramPct + '% (' + ramUsed + '/' + ramTotal + ' GB)';
+        document.getElementById('net-val').textContent =
+          '↓' + _fmtBytes(Math.round(rxDelta / 4)) + '  ↑' + _fmtBytes(Math.round(txDelta / 4));
+        _drawSparkline('cpu-chart', _sysHist.cpu, '#7c9ef8');
+        _drawSparkline('ram-chart', _sysHist.ram, '#5dba7d');
+        _drawSparkline('net-chart', _sysHist.net, '#e8a44a');
+      }
+
+      // System info (update every poll, not just after first delta)
+      if (d.hostname) {
+        const el = id => document.getElementById(id);
+        if (el('si-hostname')) el('si-hostname').textContent = d.hostname;
+        if (el('si-cpu'))      el('si-cpu').textContent = d.cpu_model + ' (' + d.cpu_cores + ' cores)';
+        if (el('si-kernel'))   el('si-kernel').textContent = d.kernel;
+        if (el('si-uptime') && d.uptime) {
+          const s = d.uptime;
+          const days  = Math.floor(s / 86400);
+          const hours = Math.floor((s % 86400) / 3600);
+          const mins  = Math.floor((s % 3600) / 60);
+          el('si-uptime').textContent = days > 0
+            ? `${days}d ${hours}h ${mins}m`
+            : hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
+        }
+      }
+
+      _sysPrev.cpu_idle  = d.cpu_idle;
+      _sysPrev.cpu_total = d.cpu_total;
+      _sysPrev.net_rx    = d.net_rx;
+      _sysPrev.net_tx    = d.net_tx;
+    })
+    .catch(() => {});
+}
+
+function _drawSparkline(canvasId, data, color) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  if (data.length < 2) return;
+
+  const max = 100;
+  const step = w / (HIST_MAX - 1);
+
+  ctx.beginPath();
+  data.forEach((val, i) => {
+    const x = i * step;
+    const y = h - (val / max) * (h - 4) - 2;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  // Fill under line
+  ctx.lineTo((data.length - 1) * step, h);
+  ctx.lineTo(0, h);
+  ctx.closePath();
+  ctx.fillStyle = color + '33';
+  ctx.fill();
+
+  // Line
+  ctx.beginPath();
+  data.forEach((val, i) => {
+    const x = i * step;
+    const y = h - (val / max) * (h - 4) - 2;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+}
+
 window.addEventListener('load', () => {
   if (typeof cockpit === 'undefined') initFallback();
   refreshStatus();
   setInterval(refreshStatus, 8000);
+  refreshSysinfo();
+  setInterval(refreshSysinfo, 4000);
   // Skip update check if we just finished an update (flag set before reload)
   if (!sessionStorage.getItem('justUpdated')) {
     doCheckUpdate();
@@ -159,9 +281,82 @@ function applyStatus(data) {
 
 function usagePct(pctStr) { return parseInt(pctStr) || 0; }
 
+// Tracks in-progress replacements: { slot: { pid, interval } }
+const _replaceJobs = {};
+
 function driveCard(drive, type) {
-  const mounted = drive.mounted, present = drive.present, enabled = drive.enabled !== false;
-  const pct     = usagePct(drive.pct);
+  const mounted  = drive.mounted, present = drive.present, enabled = drive.enabled !== false;
+  const status   = drive.status || (present ? (mounted ? 'healthy' : 'unmounted') : 'missing');
+  const stopped  = arrayState === 'stopped';
+  const pct      = usagePct(drive.pct);
+
+  // Rebuilding state (replacement job running)
+  if (_replaceJobs[drive.slot]) {
+    return `<div class="drive-card type-${type} rebuilding">
+      <div class="drive-header">
+        <span class="drive-status-dot dot-yellow rebuilding-pulse"></span>
+        <span class="drive-slot">${drive.slot}</span>
+        <span class="drive-type-badge">${type === 'parity' ? 'Parity' : type === 'cache' ? 'Cache' : 'Data'}</span>
+      </div>
+      <div class="drive-device">${drive.device}</div>
+      <div class="drive-label" style="color:var(--yellow)">Rebuilding from parity...</div>
+      <div class="rebuild-progress-bar"><div class="rebuild-progress-fill"></div></div>
+    </div>`;
+  }
+
+  // Missing drive — show replacement UI (works whether stopped or running)
+  if (status === 'missing' && type === 'data') {
+    const selectId = `replace-sel-${drive.slot}`;
+    const btnLabel = stopped ? 'Assign & Rebuild' : 'Replace';
+    const note = stopped
+      ? 'Array will start in degraded mode to rebuild this drive from parity.'
+      : 'Array running in degraded mode. Files on this drive unavailable until replaced.';
+    return `<div class="drive-card type-${type} missing">
+      <div class="drive-header">
+        <span class="drive-status-dot dot-red"></span>
+        <span class="drive-slot">${drive.slot}</span>
+        <span class="drive-type-badge">Data</span>
+        <span class="drive-missing-badge">MISSING</span>
+      </div>
+      <div class="drive-label" style="color:var(--red)">Drive not detected</div>
+      <div class="replace-controls">
+        <select id="${selectId}" class="replace-select">
+          <option value="">Select replacement drive...</option>
+        </select>
+        <button class="btn btn-danger btn-sm" onclick="startReplace('${drive.slot}', '${selectId}')">${btnLabel}</button>
+      </div>
+      <div class="replace-note">${note}</div>
+    </div>`;
+  }
+
+  // Healthy/unmounted drive when stopped — show reassign option
+  if (stopped && present && type === 'data') {
+    const selectId = `reassign-sel-${drive.slot}`;
+    const pct2 = usagePct(drive.pct);
+    const barClass = pct2 >= 90 ? 'danger' : pct2 >= 75 ? 'high' : '';
+    const usageHtml2 = mounted && drive.used
+      ? `<div class="usage-bar-wrap">
+           <div class="usage-bar-bg"><div class="usage-bar-fill ${barClass}" style="width:${pct2}%"></div></div>
+           <div class="usage-stats"><span>${drive.used} used</span><span>${drive.free} free</span></div>
+         </div>`
+      : '';
+    return `<div class="drive-card type-${type}">
+      <div class="drive-header">
+        <span class="drive-status-dot dot-grey"></span>
+        <span class="drive-slot">${drive.slot}</span>
+        <span class="drive-type-badge">Data</span>
+      </div>
+      <div class="drive-device">${drive.device}</div>
+      <div class="drive-label">${drive.label}${drive.size ? ' · ' + drive.size.trim() : ''}</div>
+      ${usageHtml2}
+      <div class="replace-controls" style="margin-top:8px">
+        <select id="${selectId}" class="replace-select">
+          <option value="">Reassign drive...</option>
+        </select>
+        <button class="btn btn-sm btn-secondary" onclick="startReassign('${drive.slot}', '${selectId}')">Change</button>
+      </div>
+    </div>`;
+  }
 
   let dotClass  = present ? (enabled ? (mounted ? 'dot-green' : 'dot-yellow') : 'dot-grey') : 'dot-red';
   let cardClass = `drive-card type-${type}${!enabled ? ' disabled' : ''}${!present ? ' missing' : ''}`;
@@ -178,11 +373,21 @@ function driveCard(drive, type) {
   }
 
   const typeLabel = type === 'parity' ? 'Parity' : type === 'cache' ? 'Cache' : 'Data';
+
+  let tempHtml = '';
+  if (drive.temp) {
+    const t = parseInt(drive.temp);
+    const tempColor = t >= 55 ? 'var(--red)' : t >= 45 ? 'var(--yellow)' : 'var(--green)';
+    tempHtml = `<span class="drive-temp" style="color:${tempColor}">${t}°C</span>`;
+  }
+
   return `<div class="${cardClass}">
     <div class="drive-header">
       <span class="drive-status-dot ${dotClass}"></span>
       <span class="drive-slot">${drive.slot}</span>
       <span class="drive-type-badge">${typeLabel}</span>
+      ${tempHtml}
+      <button class="btn-smart-details" onclick="openSmartModal('${drive.device}','${drive.slot}')" title="SMART Details">⚙</button>
     </div>
     <div class="drive-device">${drive.device}</div>
     <div class="drive-label">${drive.label}${drive.size ? ' · ' + drive.size.trim() : ''}</div>
@@ -191,12 +396,240 @@ function driveCard(drive, type) {
 }
 
 function renderDrives(data) {
-  const grid = document.getElementById('drive-grid');
+  const grid    = document.getElementById('drive-grid');
+  const stopped = arrayState === 'stopped';
   let html = '';
   (data.parity || []).forEach(d => { html += driveCard(d, 'parity'); });
   (data.disks  || []).forEach(d => { html += driveCard(d, 'data'); });
   (data.cache  || []).forEach(d => { html += driveCard(d, 'cache'); });
   grid.innerHTML = html || '<div class="loading-msg">No drives configured.</div>';
+
+  // When stopped, also show unassigned drives inline so they can be assigned
+  const needsDropdowns = stopped ||
+    (data.disks || []).some(d => (d.status === 'missing') && !_replaceJobs[d.slot]);
+  if (needsDropdowns) populateAllDropdowns(data);
+}
+
+// Populate all .replace-select dropdowns (replace + reassign), and append unassigned drive cards
+function populateAllDropdowns(data) {
+  cockpit.spawn(['freeraid', 'disks-scan'], { superuser: 'require', err: 'out' })
+    .then(out => {
+      let drives;
+      try { drives = JSON.parse(out.trim()); } catch(e) { return; }
+      const unassigned = drives.filter(d => !d.assigned && d.device !== '/dev/fd0' && d.name !== 'fd0');
+
+      document.querySelectorAll('.replace-select').forEach(sel => {
+        const current = sel.value;
+        sel.innerHTML = sel.id.startsWith('reassign')
+          ? '<option value="">Reassign drive...</option>'
+          : '<option value="">Select replacement drive...</option>';
+        unassigned.forEach(d => {
+          const opt = document.createElement('option');
+          opt.value = d.device;
+          opt.textContent = `${d.device} — ${d.size} ${d.type} ${d.model || 'Unknown'}`;
+          sel.appendChild(opt);
+        });
+        if (current) sel.value = current;
+      });
+
+      // If stopped, append unassigned drive cards to the grid
+      if (arrayState === 'stopped' && unassigned.length) {
+        const grid = document.getElementById('drive-grid');
+        const existingUnassigned = grid.querySelectorAll('.drive-card.unassigned-drive');
+        existingUnassigned.forEach(el => el.remove());
+
+        unassigned.forEach(d => {
+          const div = document.createElement('div');
+          div.className = 'drive-card unassigned-drive';
+          div.innerHTML = `
+            <div class="drive-header">
+              <span class="drive-status-dot dot-grey"></span>
+              <span class="drive-slot" style="color:var(--text-muted)">Unassigned</span>
+              <span class="drive-type-badge">${d.type}</span>
+            </div>
+            <div class="drive-device">${d.device}</div>
+            <div class="drive-label">${d.model || 'Unknown'} · ${d.size}${d.has_fs ? ' · <span style="color:var(--yellow)">' + d.has_fs + '</span>' : ''}</div>
+            <div class="replace-controls" style="margin-top:8px">
+              <button class="btn btn-sm btn-primary" onclick="openAssignModal('${d.device}')">Add to Array</button>
+            </div>`;
+          grid.appendChild(div);
+        });
+      }
+    })
+    .catch(() => {});
+}
+
+
+function startReplace(slot, selectId) {
+  const sel = document.getElementById(selectId);
+  if (!sel || !sel.value) { showAlert('warn', 'Select a replacement drive first.'); return; }
+  const dev = sel.value;
+  if (!confirm(`Replace ${slot} with ${dev}?\n\nThis will FORMAT ${dev} and rebuild data from parity. This cannot be undone.`)) return;
+
+  log('warn', `Starting drive replacement: ${slot} → ${dev}`);
+
+  const doReplace = () => {
+    cockpit.spawn(['freeraid', 'replace-disk-bg', slot, dev], { superuser: 'require', err: 'out' })
+      .then(out => {
+        let info;
+        try { info = JSON.parse(out.trim().split('\n').pop()); } catch(e) { info = {}; }
+        _replaceJobs[slot] = { pid: info.pid };
+        refreshStatus();
+        _replaceJobs[slot].interval = setInterval(() => pollReplaceStatus(slot), 10000);
+        showAlert('info', `Rebuilding ${slot} from parity — this may take a long time.`);
+      })
+      .catch(err => { log('error', `Replace failed: ${err}`); showAlert('error', `Replace failed: ${err}`); });
+  };
+
+  // If array is stopped, start it in degraded mode first so parity + other drives are mounted
+  if (arrayState === 'stopped') {
+    log('cmd', 'Starting array in degraded mode for rebuild...');
+    cockpit.spawn(['freeraid', 'start'], { superuser: 'require', err: 'out' })
+      .stream(line => log('info', line.trim()))
+      .then(() => { refreshStatus(); doReplace(); })
+      .catch(err => { log('error', String(err)); showAlert('error', 'Failed to start array: ' + err); });
+  } else {
+    doReplace();
+  }
+}
+
+function startReassign(slot, selectId) {
+  const sel = document.getElementById(selectId);
+  if (!sel || !sel.value) return;
+  const dev = sel.value;
+  if (!confirm(`Reassign ${slot} to ${dev}?\n\nThis only updates the config — the drive will be formatted when the array starts if it has no filesystem.`)) return;
+  runCmd(['disks-unassign', dev], 'log-panel')
+    .then(() => runCmd(['disks-assign', dev, 'array', slot], 'log-panel'))
+    .then(() => { refreshStatus(); showAlert('success', `${slot} reassigned to ${dev}.`); })
+    .catch(err => { log('error', String(err)); showAlert('error', String(err)); });
+}
+
+function pollReplaceStatus(slot) {
+  cockpit.spawn(['freeraid', 'replace-disk-status', slot], { superuser: 'require', err: 'out' })
+    .then(out => {
+      let status;
+      try { status = JSON.parse(out.trim()); } catch(e) { return; }
+      if (!status.running) {
+        clearInterval(_replaceJobs[slot].interval);
+        delete _replaceJobs[slot];
+        if (status.exit === 0 || status.exit === null) {
+          showAlert('success', `Drive ${slot} successfully replaced and rebuilt.`);
+          log('success', `Replace complete for ${slot}`);
+        } else {
+          showAlert('error', `Replace job for ${slot} finished with errors. Check the log panel.`);
+          log('error', `Replace job for ${slot} exited with code ${status.exit}`);
+          if (status.log) log('info', status.log);
+        }
+        refreshStatus();
+      }
+    })
+    .catch(() => {});
+}
+
+// ── SMART modal ───────────────────────────────────────────────────────────────
+
+function openSmartModal(device, slot) {
+  const backdrop = document.getElementById('smart-modal-backdrop');
+  const body     = document.getElementById('smart-modal-body');
+  const title    = document.getElementById('smart-modal-title');
+  title.textContent = `SMART — ${slot} (${device})`;
+  body.innerHTML = '<div class="loading-msg">Loading SMART data...</div>';
+  backdrop.classList.remove('hidden');
+
+  cockpit.spawn(['freeraid', 'smart', device], { superuser: 'require', err: 'out' })
+    .then(out => {
+      let d;
+      try { d = JSON.parse(out.trim()); } catch(e) { body.innerHTML = `<div class="smart-error">Failed to parse SMART data.</div>`; return; }
+      if (d.error) { body.innerHTML = `<div class="smart-error">SMART not available: ${d.error}</div>`; return; }
+      body.innerHTML = renderSmartModal(d, device);
+    })
+    .catch(err => { body.innerHTML = `<div class="smart-error">${err}</div>`; });
+}
+
+function closeSmartModal() {
+  document.getElementById('smart-modal-backdrop').classList.add('hidden');
+}
+
+function renderSmartModal(d, device) {
+  const fmtHours = h => h == null ? '—' : h >= 8760 ? `${(h/8760).toFixed(1)} yrs` : h >= 24 ? `${Math.floor(h/24)} days` : `${h} hrs`;
+  const fmtBytes = b => b >= 1e12 ? `${(b/1e12).toFixed(1)} TB` : b >= 1e9 ? `${(b/1e9).toFixed(1)} GB` : b >= 1e6 ? `${(b/1e6).toFixed(1)} MB` : `${b} B`;
+
+  const passed = d.smart_passed;
+  const healthColor = passed === true ? 'var(--green)' : passed === false ? 'var(--red)' : 'var(--text-muted)';
+  const healthText  = passed === true ? 'PASSED' : passed === false ? 'FAILED' : 'UNKNOWN';
+
+  const warn = (d.reallocated_sectors > 0) || (d.pending_sectors > 0) || (d.uncorrectable > 0);
+
+  let html = `
+    <div class="smart-summary">
+      <div class="smart-health" style="color:${healthColor}">${healthText}</div>
+      <div class="smart-meta-grid">
+        <div class="smart-meta-item"><span class="smart-meta-label">Model</span><span class="smart-meta-val">${d.model || '—'}</span></div>
+        <div class="smart-meta-item"><span class="smart-meta-label">Serial</span><span class="smart-meta-val">${d.serial || '—'}</span></div>
+        <div class="smart-meta-item"><span class="smart-meta-label">Firmware</span><span class="smart-meta-val">${d.firmware || '—'}</span></div>
+        <div class="smart-meta-item"><span class="smart-meta-label">Capacity</span><span class="smart-meta-val">${d.capacity_bytes ? fmtBytes(d.capacity_bytes) : '—'}</span></div>
+        <div class="smart-meta-item"><span class="smart-meta-label">Type</span><span class="smart-meta-val">${d.rotation_rate === 0 ? 'SSD' : d.rotation_rate > 0 ? `HDD (${d.rotation_rate} RPM)` : '—'}</span></div>
+        <div class="smart-meta-item"><span class="smart-meta-label">Temperature</span><span class="smart-meta-val" style="color:${d.temp >= 55 ? 'var(--red)' : d.temp >= 45 ? 'var(--yellow)' : 'var(--green)'}">${d.temp != null ? d.temp + '°C' : '—'}</span></div>
+        <div class="smart-meta-item"><span class="smart-meta-label">Power-On Time</span><span class="smart-meta-val">${fmtHours(d.power_on_hours)}</span></div>
+        <div class="smart-meta-item"><span class="smart-meta-label">Power Cycles</span><span class="smart-meta-val">${d.power_cycles ?? '—'}</span></div>
+        <div class="smart-meta-item"><span class="smart-meta-label" style="color:${d.reallocated_sectors > 0 ? 'var(--red)' : ''}">Reallocated Sectors</span><span class="smart-meta-val" style="color:${d.reallocated_sectors > 0 ? 'var(--red)' : 'var(--green)'}">${d.reallocated_sectors ?? '—'}</span></div>
+        <div class="smart-meta-item"><span class="smart-meta-label" style="color:${d.pending_sectors > 0 ? 'var(--yellow)' : ''}">Pending Sectors</span><span class="smart-meta-val" style="color:${d.pending_sectors > 0 ? 'var(--yellow)' : 'var(--green)'}">${d.pending_sectors ?? '—'}</span></div>
+        <div class="smart-meta-item"><span class="smart-meta-label" style="color:${d.uncorrectable > 0 ? 'var(--red)' : ''}">Uncorrectable</span><span class="smart-meta-val" style="color:${d.uncorrectable > 0 ? 'var(--red)' : 'var(--green)'}">${d.uncorrectable ?? '—'}</span></div>
+      </div>
+    </div>`;
+
+  // NVMe health block
+  if (d.nvme_health) {
+    const n = d.nvme_health;
+    html += `<div class="smart-section-title">NVMe Health</div>
+    <div class="smart-meta-grid">
+      <div class="smart-meta-item"><span class="smart-meta-label">Critical Warnings</span><span class="smart-meta-val" style="color:${n.critical_warning ? 'var(--red)' : 'var(--green)'}">${n.critical_warning || 0}</span></div>
+      <div class="smart-meta-item"><span class="smart-meta-label">Media Errors</span><span class="smart-meta-val" style="color:${n.media_errors > 0 ? 'var(--red)' : 'var(--green)'}">${n.media_errors ?? '—'}</span></div>
+      <div class="smart-meta-item"><span class="smart-meta-label">% Life Used</span><span class="smart-meta-val" style="color:${n.percentage_used >= 90 ? 'var(--red)' : n.percentage_used >= 70 ? 'var(--yellow)' : 'var(--green)'}">${n.percentage_used ?? '—'}%</span></div>
+    </div>`;
+  }
+
+  // ATA attribute table
+  if (d.attributes && d.attributes.length) {
+    html += `<div class="smart-section-title">Attributes</div>
+    <table class="smart-attr-table">
+      <thead><tr><th>ID</th><th>Attribute</th><th>Value</th><th>Worst</th><th>Thresh</th><th>Raw</th></tr></thead>
+      <tbody>`;
+    d.attributes.forEach(a => {
+      const rowClass = a.flags.failed ? 'smart-attr-fail' : '';
+      html += `<tr class="${rowClass}"><td>${a.id}</td><td>${a.name}</td><td>${a.value}</td><td>${a.worst}</td><td>${a.thresh}</td><td>${a.raw}</td></tr>`;
+    });
+    html += `</tbody></table>`;
+  }
+
+  // Self-test history
+  if (d.self_tests && d.self_tests.length) {
+    html += `<div class="smart-section-title">Recent Self-Tests</div>
+    <table class="smart-attr-table">
+      <thead><tr><th>#</th><th>Type</th><th>Status</th><th>Hours</th></tr></thead>
+      <tbody>`;
+    d.self_tests.forEach(t => {
+      const ok = (t.status || '').toLowerCase().includes('completed without');
+      html += `<tr><td>${t.num}</td><td>${t.type}</td><td style="color:${ok ? 'var(--green)' : 'var(--yellow)'}">${t.status}</td><td>${t.remaining ?? '—'}</td></tr>`;
+    });
+    html += `</tbody></table>`;
+  }
+
+  html += `<div class="smart-actions">
+    <button class="btn btn-secondary btn-sm" onclick="runSmartTest('${device}','short')">Run Short Test</button>
+    <button class="btn btn-ghost btn-sm" onclick="runSmartTest('${device}','long')">Run Long Test</button>
+  </div>`;
+
+  return html;
+}
+
+function runSmartTest(device, type) {
+  const body = document.getElementById('smart-modal-body');
+  cockpit.spawn(['freeraid', 'smart-test', device, type], { superuser: 'require', err: 'out' })
+    .then(() => {
+      showAlert('success', `${type} self-test started on ${device}. Reopen SMART details in a few minutes to see results.`);
+    })
+    .catch(err => showAlert('error', String(err)));
 }
 
 // ── Array actions ─────────────────────────────────────────────────────────────
@@ -223,8 +656,39 @@ function runSync() {
     .finally(() => { opRunning = false; setButtonsDisabled(false); });
 }
 
+function runScrub() {
+  if (opRunning) return;
+  if (!confirm('Run a full parity check now? This may take a while.')) return;
+  opRunning = true;
+  setButtonsDisabled(true);
+  log('cmd', 'Running parity check (scrub)...');
+  runCmd(['scrub'], 'log-panel')
+    .then(() => refreshStatus())
+    .catch(err => log('error', String(err)))
+    .finally(() => { opRunning = false; setButtonsDisabled(false); });
+}
+
+function editHostname() {
+  const current = document.getElementById('si-hostname').textContent;
+  const name = prompt('Enter new hostname:', current);
+  if (!name || name === current) return;
+  cockpit.spawn(['freeraid', 'set-hostname', name], { superuser: 'require' })
+    .then(() => { document.getElementById('si-hostname').textContent = name; })
+    .catch(err => alert('Failed: ' + err));
+}
+
+function sysReboot() {
+  if (!confirm('Reboot this system?')) return;
+  cockpit.spawn(['systemctl', 'reboot'], { superuser: 'require' }).catch(() => {});
+}
+
+function sysShutdown() {
+  if (!confirm('Shut down this system?')) return;
+  cockpit.spawn(['systemctl', 'poweroff'], { superuser: 'require' }).catch(() => {});
+}
+
 function setButtonsDisabled(d) {
-  ['btn-start-stop', 'btn-sync'].forEach(id => {
+  ['btn-start-stop', 'btn-sync', 'btn-scrub'].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.disabled = d;
   });
@@ -607,6 +1071,285 @@ function doUnraidImport() {
 function clearDockerLog() { document.getElementById('docker-log-panel').innerHTML = ''; }
 const dklog = (level, text) => appendLog('docker-log-panel', level, text);
 
+// ── App Browser ───────────────────────────────────────────────────────────────
+
+let _appBrowserOpen = false;
+let _appBrowserLoaded = false;
+let _appSearchTimer = null;
+
+function toggleAppBrowser() {
+  const panel = document.getElementById('app-browser-panel');
+  _appBrowserOpen = !_appBrowserOpen;
+  panel.classList.toggle('hidden', !_appBrowserOpen);
+  if (_appBrowserOpen && !_appBrowserLoaded) {
+    loadAppBrowser();
+  }
+}
+
+function loadAppBrowser() {
+  const grid = document.getElementById('app-grid');
+  grid.innerHTML = '<div class="loading-msg">Loading app library...</div>';
+
+  // Check if feed is cached
+  cockpit.spawn(['freeraid', 'apps-search', '', '50'], { superuser: 'require', err: 'out' })
+    .then(out => {
+      let apps;
+      try { apps = JSON.parse(out.trim()); } catch(e) {
+        // Feed not cached yet
+        grid.innerHTML = `<div class="app-feed-empty">
+          <div style="font-size:28px;margin-bottom:8px">📦</div>
+          <div style="font-weight:600;margin-bottom:4px">App feed not downloaded yet</div>
+          <div style="color:var(--text-muted);font-size:12px;margin-bottom:12px">Click "Update Feed" to download 3000+ community apps</div>
+          <button class="btn btn-primary" onclick="refreshAppFeed()">Download App Feed</button>
+        </div>`;
+        return;
+      }
+      _appBrowserLoaded = true;
+      renderAppGrid(apps);
+      loadAppCategories();
+    })
+    .catch(() => {
+      grid.innerHTML = '<div class="app-feed-empty">Failed to load apps. Try clicking "Update Feed".</div>';
+    });
+}
+
+function loadAppCategories() {
+  cockpit.spawn(['freeraid', 'apps-categories'], { superuser: 'require', err: 'out' })
+    .then(out => {
+      let cats;
+      try { cats = JSON.parse(out.trim()); } catch(e) { return; }
+      const sel = document.getElementById('app-category-filter');
+      cats.forEach(c => {
+        const opt = document.createElement('option');
+        opt.value = c; opt.textContent = c;
+        sel.appendChild(opt);
+      });
+    })
+    .catch(() => {});
+}
+
+function searchApps() {
+  clearTimeout(_appSearchTimer);
+  _appSearchTimer = setTimeout(() => {
+    const q   = document.getElementById('app-search-input').value.trim();
+    const cat = document.getElementById('app-category-filter').value;
+    const grid = document.getElementById('app-grid');
+    grid.innerHTML = '<div class="loading-msg">Searching...</div>';
+    const args = ['apps-search', q || '', '80'];
+    cockpit.spawn(['freeraid', ...args], { superuser: 'require', err: 'out' })
+      .then(out => {
+        let apps;
+        try { apps = JSON.parse(out.trim()); } catch(e) { grid.innerHTML = '<div class="loading-msg">No results.</div>'; return; }
+        if (cat) apps = apps.filter(a => (a.categories || []).some(c => c === cat));
+        renderAppGrid(apps);
+      })
+      .catch(() => { grid.innerHTML = '<div class="loading-msg">Search failed.</div>'; });
+  }, 300);
+}
+
+function renderAppGrid(apps) {
+  const grid = document.getElementById('app-grid');
+  if (!apps.length) { grid.innerHTML = '<div class="loading-msg">No apps found.</div>'; return; }
+  grid.innerHTML = apps.map(a => {
+    const icon = a.icon
+      ? `<img src="${a.icon}" class="app-icon" onerror="this.style.display='none'">`
+      : `<div class="app-icon-placeholder">${(a.name||'?')[0]}</div>`;
+    const cats = (a.categories || []).slice(0,2).map(c =>
+      `<span class="app-cat-badge">${c.split(':').pop()}</span>`).join('');
+    const dl = a.downloads > 1000 ? `${(a.downloads/1000).toFixed(0)}k` : (a.downloads || '');
+    return `<div class="app-card" onclick="openAppInstall('${encodeURIComponent(a.name)}')">
+      <div class="app-card-icon">${icon}</div>
+      <div class="app-card-body">
+        <div class="app-card-name">${a.name}</div>
+        <div class="app-card-desc">${a.overview || ''}</div>
+        <div class="app-card-footer">${cats}${dl ? `<span class="app-dl-count">↓${dl}</span>` : ''}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function refreshAppFeed() {
+  const btn  = document.getElementById('app-feed-btn');
+  const grid = document.getElementById('app-grid');
+  btn.disabled = true;
+  btn.textContent = 'Updating...';
+  grid.innerHTML = '<div class="loading-msg">Downloading app feed (~10MB)...</div>';
+  cockpit.spawn(['freeraid', 'apps-fetch'], { superuser: 'require', err: 'out' })
+    .then(() => {
+      _appBrowserLoaded = false;
+      loadAppBrowser();
+      loadAppCategories();
+      showAlert('success', 'App feed updated.');
+    })
+    .catch(err => showAlert('error', 'Feed update failed: ' + err))
+    .finally(() => { btn.disabled = false; btn.textContent = 'Update Feed'; });
+}
+
+let _usedPorts = new Set();
+
+function openAppInstall(encodedName) {
+  const name = decodeURIComponent(encodedName);
+  const backdrop = document.getElementById('app-install-backdrop');
+  const body     = document.getElementById('app-install-body');
+  const title    = document.getElementById('app-install-title');
+  const iconEl   = document.getElementById('app-install-icon');
+  title.textContent = name;
+  body.innerHTML = '<div class="loading-msg">Loading...</div>';
+  backdrop.classList.remove('hidden');
+
+  // Fetch app data and used ports in parallel
+  Promise.all([
+    cockpit.spawn(['freeraid', 'apps-get', name], { superuser: 'require', err: 'out' }),
+    cockpit.spawn(['freeraid', 'ports-used'], { superuser: 'require', err: 'out' })
+  ]).then(([appOut, portsOut]) => {
+    let app;
+    try { app = JSON.parse(appOut.trim()); } catch(e) { body.innerHTML = '<div class="loading-msg">Failed to load app.</div>'; return; }
+    if (app.error) { body.innerHTML = `<div class="loading-msg">${app.error}</div>`; return; }
+
+    try { _usedPorts = new Set(JSON.parse(portsOut.trim())); } catch(e) { _usedPorts = new Set(); }
+
+    iconEl.src = app.icon || '';
+    body.innerHTML = renderInstallForm(app);
+  }).catch(err => { body.innerHTML = `<div class="loading-msg">${err}</div>`; });
+}
+
+function closeAppInstall() {
+  document.getElementById('app-install-backdrop').classList.add('hidden');
+}
+
+function renderInstallForm(app) {
+  const cfg = app.config || [];
+  const ports = cfg.filter(c => c.type === 'Port');
+  const paths = cfg.filter(c => c.type === 'Path');
+  const vars  = cfg.filter(c => c.type === 'Variable' || c.type === 'env');
+  const other = cfg.filter(c => !['Port','Path','Variable','env'].includes(c.type));
+
+  const nextFreePort = (start) => {
+    let p = parseInt(start) || 8080;
+    while (_usedPorts.has(p)) p++;
+    return p;
+  };
+
+  const fieldHtml = (label, items) => {
+    if (!items.length) return '';
+    return `<div class="install-group-title">${label}</div>` +
+      items.map(c => {
+        let val = c.default || '';
+        let conflict = false;
+        let suggestion = '';
+        if (c.type === 'Port' && val) {
+          const portNum = parseInt(val);
+          if (_usedPorts.has(portNum)) {
+            conflict = true;
+            const suggested = nextFreePort(portNum + 1);
+            suggestion = suggested;
+            val = String(suggested);
+          }
+        }
+        const conflictHtml = conflict
+          ? `<div class="port-conflict">⚠ Port ${c.default} in use — auto-set to ${suggestion}</div>`
+          : '';
+        return `
+        <div class="install-field">
+          <label class="install-label">${c.name || c.target}${c.required ? ' <span style="color:var(--red)">*</span>' : ''}</label>
+          ${c.desc ? `<div class="install-desc">${c.desc}</div>` : ''}
+          ${conflictHtml}
+          <input type="${c.mask ? 'password' : 'text'}" class="install-input${conflict ? ' port-conflict-input' : ''}"
+            data-target="${c.target}" data-type="${c.type}"
+            value="${val}" placeholder="${c.default || ''}">
+        </div>`;
+      }).join('');
+  };
+
+  const safeName = app.name.replace(/'/g, "\\'");
+  const defaultNet = app.network || 'bridge';
+
+  return `
+    <div class="install-overview">${app.overview || ''}</div>
+    <div class="install-meta">
+      <span><strong>Image:</strong> ${app.image}</span>
+      ${app.webui ? `<span><strong>Web UI:</strong> ${app.webui}</span>` : ''}
+    </div>
+    <div id="install-form">
+      ${fieldHtml('Ports', ports)}
+      ${fieldHtml('Paths / Volumes', paths)}
+      ${fieldHtml('Environment Variables', vars)}
+      ${fieldHtml('Other', other)}
+      <div class="install-group-title">Network</div>
+      <div class="install-field">
+        <label class="install-label">Network Type</label>
+        <select class="install-input install-select" data-type="freeraid.network" data-target="network"
+          onchange="onNetworkTypeChange(this)">
+          <option value="bridge"${defaultNet==='bridge'?' selected':''}>Bridge (NAT + port mapping)</option>
+          <option value="host"${defaultNet==='host'?' selected':''}>Host (share host network)</option>
+          <option value="custom">Custom (assign own IP)</option>
+        </select>
+      </div>
+      <div class="install-field" id="custom-network-fields" style="display:none">
+        <label class="install-label">Network Name</label>
+        <div class="install-desc">Name of an existing Docker network (e.g. <code>freeraid-br</code>)</div>
+        <input type="text" class="install-input" data-type="freeraid.network" data-target="network"
+          id="custom-network-name" placeholder="freeraid-br">
+        <label class="install-label" style="margin-top:8px">IP Address <span style="color:var(--text-muted);font-weight:400">(optional)</span></label>
+        <input type="text" class="install-input" data-type="freeraid.network_ip" data-target="network_ip"
+          id="custom-network-ip" placeholder="192.168.1.200">
+      </div>
+    </div>
+    <div class="install-actions">
+      <button class="btn btn-primary" onclick="doInstallApp('${safeName}')">Install</button>
+      <button class="btn btn-secondary" onclick="doInstallApp('${safeName}', false)">Install (don't start)</button>
+      <button class="btn btn-ghost" onclick="closeAppInstall()">Cancel</button>
+    </div>`;
+}
+
+function onNetworkTypeChange(sel) {
+  const custom = document.getElementById('custom-network-fields');
+  if (!custom) return;
+  custom.style.display = sel.value === 'custom' ? '' : 'none';
+}
+
+function doInstallApp(name, autoStart = true) {
+  const form = document.getElementById('install-form');
+  const inputs = form.querySelectorAll('.install-input');
+
+  // Build config — for network, use custom fields if "custom" is selected, else use the select value
+  const netSel = form.querySelector('select[data-type="freeraid.network"]');
+  const isCustomNet = netSel && netSel.value === 'custom';
+  const config = [];
+  const seen = new Set();
+  for (const inp of inputs) {
+    const t = inp.dataset.type;
+    const tgt = inp.dataset.target;
+    if (!t) continue;
+    // Skip the dropdown when custom mode is active (custom text input takes precedence)
+    if (isCustomNet && inp.tagName === 'SELECT' && t === 'freeraid.network') continue;
+    // Skip custom fields when not in custom mode
+    if (!isCustomNet && inp.id === 'custom-network-name') continue;
+    if (!isCustomNet && inp.id === 'custom-network-ip') continue;
+    config.push({ type: t, target: tgt, value: inp.value });
+  }
+
+  closeAppInstall();
+  dklog('cmd', `Installing ${name}...`);
+
+  cockpit.spawn(['freeraid', 'apps-install', name, JSON.stringify(config)], { superuser: 'require', err: 'out' })
+    .then(out => {
+      let result;
+      try { result = JSON.parse(out.trim().split('\n').pop()); } catch(e) { result = {}; }
+      if (result.error) { dklog('error', result.error); showAlert('error', result.error); return; }
+      dklog('success', `${name} installed as ${result.slug}`);
+      if (autoStart) {
+        dklog('cmd', `Starting ${result.slug}...`);
+        return cockpit.spawn(['freeraid', 'docker-start', result.slug], { superuser: 'require', err: 'out' })
+          .then(() => { dklog('success', `${name} started.`); refreshDocker(); showAlert('success', `${name} installed and started.`); })
+          .catch(err => { dklog('error', String(err)); showAlert('error', `Install ok but start failed: ${err}`); refreshDocker(); });
+      }
+      refreshDocker();
+      showAlert('success', `${name} installed. Start it from the Containers list.`);
+    })
+    .catch(err => { dklog('error', String(err)); showAlert('error', String(err)); });
+}
+
 function refreshDocker() {
   const el = document.getElementById('docker-container-list');
   el.innerHTML = '<div class="loading-msg">Loading...</div>';
@@ -626,8 +1369,18 @@ function refreshDocker() {
 }
 
 let _dockerSelection = new Set();
+let _dockerContainers = [];
+
+// Close context menu when clicking outside of it
+document.addEventListener('click', (e) => {
+  const m = document.getElementById('docker-ctx-menu');
+  if (m && !e.target.closest('#docker-ctx-menu') && !e.target.closest('.btn-ctx-menu')) {
+    m.remove();
+  }
+});
 
 function renderDocker(containers) {
+  _dockerContainers = containers;
   const el = document.getElementById('docker-container-list');
 
   const running = containers.filter(c => c.state === 'running').length;
@@ -639,8 +1392,7 @@ function renderDocker(containers) {
   selectAllWrap.style.display = containers.length ? '' : 'none';
 
   if (!containers.length) {
-    el.innerHTML = '<div class="loading-msg">No compose files found in /etc/freeraid/compose/. ' +
-      'Import from Unraid or add .docker-compose.yml files manually.</div>';
+    el.innerHTML = '<div class="loading-msg">No containers installed yet. Use the App Browser above to add apps.</div>';
     return;
   }
 
@@ -655,21 +1407,115 @@ function renderDocker(containers) {
       ? `<button class="btn btn-sm btn-danger" onclick="dockerStop('${nameSafe}')">Stop</button>`
       : `<button class="btn btn-sm btn-primary" onclick="dockerStart('${nameSafe}')">Start</button>`;
 
+    // Ports display
+    let portsHtml = '';
+    if (isRunning && c.ports && c.ports.length) {
+      portsHtml = `<div class="docker-ports">${c.ports.map(p =>
+        `<span class="docker-port-badge">${p.host}→${p.container}</span>`
+      ).join('')}</div>`;
+    }
+
+    // IP display — show host IP since Docker ports are forwarded to the host
+    const ipHtml = isRunning && c.ports && c.ports.length
+      ? `<div class="docker-ip">${window.location.hostname}</div>` : '';
+
     return `<div class="docker-card${isRunning ? ' running' : ''}" id="dcard-${c.name}">
       <input type="checkbox" class="docker-checkbox" ${checked}
         onchange="dockerSelectToggle('${nameSafe}', this.checked)">
       <div class="docker-header">
         <span class="drive-status-dot ${dotClass}"></span>
         <span class="docker-name">${c.name}</span>
+        <button class="btn-ctx-menu" onclick="event.stopPropagation(); openDockerMenu(event, '${nameSafe}')">⋮</button>
       </div>
       <div class="docker-image">${c.image}</div>
       <div class="docker-state" style="color:${stateColor}">${stateLabel}</div>
+      ${ipHtml}
+      ${portsHtml}
       <div class="docker-actions">
         ${toggleBtn}
         <button class="btn btn-sm btn-ghost" onclick="dockerLogs('${nameSafe}')">Logs</button>
       </div>
     </div>`;
   }).join('');
+}
+
+function openDockerMenu(event, name) {
+  const existing = document.getElementById('docker-ctx-menu');
+  if (existing) existing.remove();
+
+  const c = _dockerContainers.find(x => x.name === name);
+  if (!c) return;
+
+  const isRunning = c.state === 'running';
+  const hasWebUI  = c.webui && c.webui.trim();
+
+  const menu = document.createElement('div');
+  menu.id = 'docker-ctx-menu';
+  menu.className = 'ctx-menu';
+
+  const items = [];
+  if (hasWebUI)  items.push(`<div class="ctx-item ctx-item-primary" onclick="dockerOpenWebUI('${name}')">🌐 Open Web UI</div>`);
+  if (isRunning) items.push(`<div class="ctx-item" onclick="dockerTerminalCmd('${name}')">⬛ Terminal</div>`);
+  items.push(`<div class="ctx-item" onclick="dockerEdit('${name}')">✎ Edit</div>`);
+  items.push(`<div class="ctx-item" onclick="dockerLogs('${name}')">📋 Logs</div>`);
+  items.push(`<div class="ctx-sep"></div>`);
+  if (isRunning) items.push(`<div class="ctx-item" onclick="dockerStop('${name}')">⏹ Stop</div>`);
+  else           items.push(`<div class="ctx-item" onclick="dockerStart('${name}')">▶ Start</div>`);
+  items.push(`<div class="ctx-item ctx-item-danger" onclick="dockerDeleteOne('${name}')">🗑 Delete</div>`);
+
+  menu.innerHTML = items.join('');
+
+  // Position near the button (fixed positioning — no scroll offset needed)
+  const rect = event.target.getBoundingClientRect();
+  const menuW = 190;
+  let left = rect.right - menuW;
+  let top  = rect.bottom + 4;
+  // Keep within viewport
+  if (left < 4) left = 4;
+  if (top + 250 > window.innerHeight) top = rect.top - 250;
+  menu.style.top  = top + 'px';
+  menu.style.left = left + 'px';
+  document.body.appendChild(menu);
+}
+
+function dockerOpenWebUI(name) {
+  const c = _dockerContainers.find(x => x.name === name);
+  if (!c || !c.webui) return;
+  // Replace [IP] with the host's IP (ports are forwarded from the host, not the internal Docker bridge IP)
+  const ip = window.location.hostname;
+  let url = c.webui.replace('[IP]', ip).replace(/\[PORT:(\d+)\]/g, '$1');
+  if (!url.startsWith('http')) url = 'http://' + url;
+  window.open(url, '_blank');
+}
+
+function dockerTerminalCmd(name) {
+  const cmd = `docker exec -it ${name} /bin/sh\n`;
+  // Navigate to Cockpit terminal and pre-fill the command
+  cockpit.jump('/system/terminal');
+  // Give terminal a moment to load then send the command via clipboard fallback
+  setTimeout(() => {
+    navigator.clipboard.writeText(cmd.trim()).catch(() => {});
+  }, 500);
+}
+
+function dockerEdit(name) {
+  // Re-open install form using the stored app name label, or slug
+  const c = _dockerContainers.find(x => x.name === name);
+  const appName = (c && c.webui) ? name : name; // use slug as fallback
+  openAppInstall(encodeURIComponent(appName));
+}
+
+function dockerDeleteOne(name) {
+  if (!confirm(`Delete ${name}?\n\nThis removes the compose file. Container data is NOT deleted.`)) return;
+  const c = _dockerContainers.find(x => x.name === name);
+  const nameSafe = name;
+  const stopFirst = c && c.state === 'running'
+    ? cockpit.spawn(['freeraid', 'docker-stop', nameSafe], { superuser: 'require', err: 'out' })
+    : Promise.resolve();
+  stopFirst.then(() =>
+    cockpit.spawn(['freeraid', 'docker-delete', nameSafe], { superuser: 'require', err: 'out' })
+  ).then(() => { dklog('success', `${name} deleted.`); refreshDocker(); })
+   .catch(err => dklog('error', String(err)));
 }
 
 function dockerSelectToggle(name, checked) {

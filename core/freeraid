@@ -27,6 +27,17 @@ error()   { echo -e "${RED}ERROR:${NC} $*" >&2; log "ERROR: $*"; }
 die()     { error "$*"; exit 1; }
 require() { command -v "$1" &>/dev/null || die "Required tool not found: $1 — run: freeraid install-deps"; }
 
+# Use docker compose v2 if available, fall back to docker-compose v1
+docker_compose() {
+    if docker compose version &>/dev/null 2>&1; then
+        docker compose "$@"
+    elif command -v docker-compose &>/dev/null; then
+        docker-compose "$@"
+    else
+        die "Neither 'docker compose' nor 'docker-compose' found — run: freeraid install-deps"
+    fi
+}
+
 # ── Config helpers ──────────────────────────────────────────────────────────────
 
 cfg() { jq -r "$1" "$CONFIG_FILE" 2>/dev/null; }
@@ -80,6 +91,45 @@ generate_snapraid_conf() {
     echo "$conf"
 }
 
+# ── Helpers ──────────────────────────────────────────────────────────────────────
+
+get_disk_temp() {
+    local dev="$1"
+    [ -b "$dev" ] || { echo ""; return; }
+    local temp
+    temp=$(smartctl -j -x "$dev" 2>/dev/null | jq -r '.temperature.current // empty' 2>/dev/null || true)
+    echo "${temp:-}"
+}
+
+get_disk_uuid() {
+    local dev="$1"
+    [ -b "$dev" ] || { echo ""; return; }
+    blkid -s UUID -o value "$dev" 2>/dev/null || echo ""
+}
+
+get_disk_serial() {
+    local dev="$1"
+    [ -b "$dev" ] || { echo ""; return; }
+    lsblk -dn -o SERIAL "$dev" 2>/dev/null | tr -d '[:space:]' || echo ""
+}
+
+find_dev_by_uuid() {
+    local uuid="$1"
+    [ -z "$uuid" ] && { echo ""; return; }
+    blkid -l -t "UUID=$uuid" -o device 2>/dev/null || echo ""
+}
+
+# Returns the snapraid ID (d1, d2, ...) for a given slot name
+get_snapraid_id_for_slot() {
+    local target_slot="$1"
+    local idx=1
+    while IFS= read -r slot; do
+        [ "$slot" = "$target_slot" ] && { echo "d${idx}"; return; }
+        idx=$((idx + 1))
+    done < <(jq -r '.array.disks[] | select(.enabled==true) | .slot' "$CONFIG_FILE")
+    echo ""
+}
+
 # ── Array commands ───────────────────────────────────────────────────────────────
 
 cmd_status_json() {
@@ -103,47 +153,70 @@ cmd_status_json() {
     local parity_json="["
     local first=true
     while IFS=' ' read -r slot dev mnt fstype label; do
-        local present=false size="" synced=false
+        local present=false size="" synced=false temp=""
         [ -b "$dev" ] && present=true
         $present && size=$(lsblk -dn -o SIZE "$dev" 2>/dev/null || echo "?")
+        $present && temp=$(get_disk_temp "$dev")
         mountpoint -q "$mnt" 2>/dev/null && synced=true
         $first || parity_json+=","
         first=false
-        parity_json+="{\"slot\":\"$slot\",\"device\":\"$dev\",\"mountpoint\":\"$mnt\",\"size\":\"$size\",\"present\":$present,\"mounted\":$synced,\"label\":\"$label\"}"
+        parity_json+="{\"slot\":\"$slot\",\"device\":\"$dev\",\"mountpoint\":\"$mnt\",\"size\":\"$size\",\"present\":$present,\"mounted\":$synced,\"label\":\"$label\",\"temp\":\"$temp\"}"
     done < <(jq -r '.array.parity[] | .slot + " " + .device + " " + .mountpoint + " " + .fstype + " " + .label' "$CONFIG_FILE")
     parity_json+="]"
 
     # Data drives JSON
     local disks_json="["
     first=true
-    while IFS=' ' read -r slot dev mnt enabled label; do
-        local present=false size="" mounted=false used="" free="" pct=""
-        [ -b "$dev" ] && present=true
-        $present && size=$(lsblk -dn -o SIZE "$dev" 2>/dev/null || echo "?")
-        mountpoint -q "$mnt" 2>/dev/null && mounted=true
-        if $mounted; then
-            read -r used free pct < <(df -h "$mnt" 2>/dev/null | awk 'NR==2{print $3,$4,$5}' || echo "? ? ?")
+    while IFS=$'\t' read -r slot dev mnt enabled label uuid; do
+        local present=false size="" mounted=false used="" free="" pct="" temp="" status="missing" actual_dev="$dev" serial=""
+        if [ -b "$dev" ]; then
+            present=true
+            actual_dev="$dev"
+        elif [ -n "$uuid" ]; then
+            local found_dev
+            found_dev=$(find_dev_by_uuid "$uuid")
+            if [ -b "$found_dev" ]; then
+                present=true
+                actual_dev="$found_dev"
+                # Silently update config with corrected device path
+                jq --arg s "$slot" --arg d "$found_dev" \
+                   '(.array.disks[] | select(.slot==$s)).device = $d' \
+                   "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+            fi
+        fi
+        if $present; then
+            size=$(lsblk -dn -o SIZE "$actual_dev" 2>/dev/null || echo "?")
+            temp=$(get_disk_temp "$actual_dev")
+            serial=$(get_disk_serial "$actual_dev")
+            if mountpoint -q "$mnt" 2>/dev/null; then
+                mounted=true
+                read -r used free pct < <(df -h "$mnt" 2>/dev/null | awk 'NR==2{print $3,$4,$5}' || echo "? ? ?")
+                status="healthy"
+            else
+                status="unmounted"
+            fi
         fi
         $first || disks_json+=","
         first=false
-        disks_json+="{\"slot\":\"$slot\",\"device\":\"$dev\",\"mountpoint\":\"$mnt\",\"enabled\":$enabled,\"present\":$present,\"mounted\":$mounted,\"size\":\"$size\",\"used\":\"$used\",\"free\":\"$free\",\"pct\":\"$pct\",\"label\":\"$label\"}"
-    done < <(jq -r '.array.disks[] | .slot + " " + .device + " " + .mountpoint + " " + (.enabled|tostring) + " " + .label' "$CONFIG_FILE")
+        disks_json+="{\"slot\":\"$slot\",\"device\":\"$actual_dev\",\"mountpoint\":\"$mnt\",\"enabled\":$enabled,\"present\":$present,\"mounted\":$mounted,\"size\":\"$size\",\"used\":\"$used\",\"free\":\"$free\",\"pct\":\"$pct\",\"label\":\"$label\",\"temp\":\"$temp\",\"status\":\"$status\",\"uuid\":\"$uuid\",\"serial\":\"$serial\"}"
+    done < <(jq -r '.array.disks[] | [.slot, .device, .mountpoint, (.enabled|tostring), .label, (.uuid // "")] | join("\t")' "$CONFIG_FILE")
     disks_json+="]"
 
     # Cache drives JSON
     local cache_json="["
     first=true
     while IFS=' ' read -r slot dev mnt enabled label; do
-        local present=false size="" mounted=false used="" free="" pct=""
+        local present=false size="" mounted=false used="" free="" pct="" temp=""
         [ -b "$dev" ] && present=true
         $present && size=$(lsblk -dn -o SIZE "$dev" 2>/dev/null || echo "?")
+        $present && temp=$(get_disk_temp "$dev")
         mountpoint -q "$mnt" 2>/dev/null && mounted=true
         if $mounted; then
             read -r used free pct < <(df -h "$mnt" 2>/dev/null | awk 'NR==2{print $3,$4,$5}' || echo "? ? ?")
         fi
         $first || cache_json+=","
         first=false
-        cache_json+="{\"slot\":\"$slot\",\"device\":\"$dev\",\"mountpoint\":\"$mnt\",\"enabled\":$enabled,\"present\":$present,\"mounted\":$mounted,\"size\":\"$size\",\"used\":\"$used\",\"free\":\"$free\",\"pct\":\"$pct\",\"label\":\"$label\"}"
+        cache_json+="{\"slot\":\"$slot\",\"device\":\"$dev\",\"mountpoint\":\"$mnt\",\"enabled\":$enabled,\"present\":$present,\"mounted\":$mounted,\"size\":\"$size\",\"used\":\"$used\",\"free\":\"$free\",\"pct\":\"$pct\",\"label\":\"$label\",\"temp\":\"$temp\"}"
     done < <(jq -r '.array.cache[] | .slot + " " + .device + " " + .mountpoint + " " + (.enabled|tostring) + " " + .label' "$CONFIG_FILE")
     cache_json+="]"
 
@@ -268,31 +341,55 @@ cmd_start() {
     done < <(cfg_parity_mountpoints)
 
     # Format + mount each enabled data disk
-    while IFS=' ' read -r dev mnt fstype; do
-        if [ ! -b "$dev" ]; then
-            warn "Device $dev not found, skipping"
+    local degraded=false
+    while IFS=' ' read -r slot dev mnt fstype uuid; do
+        local actual_dev="$dev"
+        if [ ! -b "$actual_dev" ]; then
+            # Try to find the drive by UUID if it was renumbered
+            if [ -n "$uuid" ]; then
+                local found_dev
+                found_dev=$(find_dev_by_uuid "$uuid")
+                if [ -b "$found_dev" ]; then
+                    info "Drive $slot found at $found_dev (was $dev), updating config"
+                    actual_dev="$found_dev"
+                    jq --arg s "$slot" --arg d "$found_dev" \
+                       '(.array.disks[] | select(.slot==$s)).device = $d' \
+                       "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+                fi
+            fi
+        fi
+        if [ ! -b "$actual_dev" ]; then
+            warn "Drive $slot ($dev) not found — starting in degraded mode without this disk"
+            degraded=true
             continue
         fi
 
         mkdir -p "$mnt"
 
-        if ! blkid "$dev" &>/dev/null; then
-            info "Formatting $dev as $fstype..."
+        if ! blkid "$actual_dev" &>/dev/null; then
+            info "Formatting $actual_dev as $fstype..."
             case "$fstype" in
-                xfs)  mkfs.xfs -f -L "$(basename "$mnt")" "$dev" ;;
-                ext4) mkfs.ext4 -F -L "$(basename "$mnt")" "$dev" ;;
-                btrfs) mkfs.btrfs -f -L "$(basename "$mnt")" "$dev" ;;
+                xfs)  mkfs.xfs -f -L "$(basename "$mnt")" "$actual_dev" ;;
+                ext4) mkfs.ext4 -F -L "$(basename "$mnt")" "$actual_dev" ;;
+                btrfs) mkfs.btrfs -f -L "$(basename "$mnt")" "$actual_dev" ;;
                 *) die "Unknown fstype: $fstype" ;;
             esac
+            # Store UUID after formatting
+            local new_uuid; new_uuid=$(get_disk_uuid "$actual_dev")
+            local new_serial; new_serial=$(get_disk_serial "$actual_dev")
+            [ -n "$new_uuid" ] && jq --arg s "$slot" --arg u "$new_uuid" --arg sr "$new_serial" \
+               '(.array.disks[] | select(.slot==$s)) |= . + {"uuid":$u,"serial":$sr}' \
+               "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
         fi
 
         if ! mountpoint -q "$mnt"; then
-            info "Mounting $dev → $mnt"
-            mount "$dev" "$mnt" || die "Failed to mount $dev"
+            info "Mounting $actual_dev → $mnt"
+            mount "$actual_dev" "$mnt" || { warn "Failed to mount $actual_dev — skipping (degraded)"; degraded=true; continue; }
         else
             info "$mnt already mounted"
         fi
-    done < <(cfg_array_disks_enabled)
+    done < <(jq -r '.array.disks[] | select(.enabled==true) | .slot + " " + .device + " " + .mountpoint + " " + .fstype + " " + (.uuid // "")' "$CONFIG_FILE")
+    $degraded && warn "Array starting in DEGRADED mode — one or more drives missing"
 
     # Mount cache
     local cache_dev cache_mnt cache_fs
@@ -731,13 +828,255 @@ PYEOF
     info "Done. Run 'freeraid shares-apply' to activate via Samba."
 }
 
+APPFEED_CACHE="/etc/freeraid/appfeed.json"
+APPFEED_URL="https://raw.githubusercontent.com/Squidly271/AppFeed/master/applicationFeed.json"
+
+cmd_apps_fetch() {
+    require curl
+    require python3
+    info "Fetching Community App feed..."
+    local tmp; tmp=$(mktemp /tmp/freeraid-appfeed-XXXXXX.json)
+    curl -fsSL "$APPFEED_URL" -o "$tmp" || die "Failed to download app feed"
+    info "Processing feed..."
+    mkdir -p "$(dirname "$APPFEED_CACHE")"
+    python3 - "$tmp" "$APPFEED_CACHE" <<'PYEOF'
+import sys, json
+
+raw = json.load(open(sys.argv[1]))
+apps = raw.get('applist', [])
+
+out = []
+for a in apps:
+    if a.get('Plugin'):
+        continue
+    repo = a.get('Repository', '')
+    if not repo:
+        continue
+    # Normalize Config to flat list
+    cfg = a.get('Config', []) or []
+    if isinstance(cfg, dict):
+        cfg = [cfg]
+    clean_cfg = []
+    for c in cfg:
+        attrs = c.get('@attributes', {}) if isinstance(c, dict) else {}
+        clean_cfg.append({
+            'name':     attrs.get('Name', ''),
+            'type':     attrs.get('Type', ''),
+            'target':   attrs.get('Target', ''),
+            'default':  attrs.get('Default', c.get('value', '') if isinstance(c, dict) else ''),
+            'mode':     attrs.get('Mode', 'rw'),
+            'desc':     attrs.get('Description', ''),
+            'required': attrs.get('Required', 'false') == 'true',
+            'mask':     attrs.get('Mask', 'false') == 'true',
+        })
+    out.append({
+        'name':       a.get('Name', ''),
+        'image':      repo,
+        'registry':   a.get('Registry', ''),
+        'network':    a.get('Network', 'bridge'),
+        'webui':      a.get('WebUI', ''),
+        'overview':   a.get('Overview', ''),
+        'icon':       a.get('Icon', ''),
+        'categories': a.get('CategoryList', []),
+        'downloads':  a.get('downloads', 0),
+        'stars':      a.get('stars', 0),
+        'search':     ' '.join(filter(None, [
+            a.get('Name',''), a.get('Overview','')[:100],
+            a.get('ExtraSearchTerms',''),
+            ' '.join(a.get('CategoryList', []))
+        ])).lower(),
+        'config':     clean_cfg,
+    })
+
+out.sort(key=lambda x: -(x.get('downloads') or 0))
+json.dump(out, open(sys.argv[2], 'w'))
+print(f"Cached {len(out)} apps to {sys.argv[2]}")
+PYEOF
+    rm -f "$tmp"
+    info "App feed ready. $(jq 'length' "$APPFEED_CACHE") apps available."
+}
+
+cmd_apps_search() {
+    local query="${1:-}" limit="${2:-50}"
+    [ -f "$APPFEED_CACHE" ] || die "App feed not cached. Run: freeraid apps-fetch"
+    python3 - "$APPFEED_CACHE" "$query" "$limit" <<'PYEOF'
+import sys, json, re
+
+apps  = json.load(open(sys.argv[1]))
+query = sys.argv[2].lower().strip()
+limit = int(sys.argv[3])
+
+if query:
+    terms = query.split()
+    def score(a):
+        s = a.get('search', '')
+        n = a.get('name', '').lower()
+        return sum(2 if t in n else (1 if t in s else 0) for t in terms)
+    results = [a for a in apps if score(a) > 0]
+    results.sort(key=lambda a: -score(a))
+else:
+    results = apps
+
+out = []
+for a in results[:limit]:
+    out.append({
+        'name':       a['name'],
+        'image':      a['image'],
+        'overview':   a['overview'][:120] + ('…' if len(a.get('overview','')) > 120 else ''),
+        'icon':       a['icon'],
+        'categories': a['categories'][:3],
+        'downloads':  a.get('downloads', 0),
+        'stars':      a.get('stars', 0),
+    })
+
+print(json.dumps(out))
+PYEOF
+}
+
+cmd_apps_get() {
+    local name="${1:-}"
+    [ -z "$name" ] && die "Usage: freeraid apps-get <name>"
+    [ -f "$APPFEED_CACHE" ] || die "App feed not cached. Run: freeraid apps-fetch"
+    python3 -c "
+import sys, json
+apps = json.load(open('$APPFEED_CACHE'))
+name = sys.argv[1]
+for a in apps:
+    if a['name'].lower() == name.lower():
+        print(json.dumps(a))
+        sys.exit(0)
+print(json.dumps({'error': 'App not found: ' + name}))
+" "$name"
+}
+
+cmd_apps_install() {
+    local name="${1:-}" config_json="${2:-[]}"
+    [ -z "$name" ] && die "Usage: freeraid apps-install <name> [config-json]"
+    [ -f "$APPFEED_CACHE" ] || die "App feed not cached. Run: freeraid apps-fetch"
+
+    python3 - "$APPFEED_CACHE" "$name" "$config_json" "$COMPOSE_DIR" <<'PYEOF'
+import sys, json, os, re
+
+apps       = json.load(open(sys.argv[1]))
+name       = sys.argv[2]
+user_cfg   = json.loads(sys.argv[3])   # list of {type, target, value}
+compose_dir = sys.argv[4]
+
+app = next((a for a in apps if a['name'].lower() == name.lower()), None)
+if not app:
+    print(json.dumps({'error': f'App not found: {name}'}))
+    sys.exit(1)
+
+# Extract special freeraid.* entries from user config before merging
+network_entry = next((c for c in user_cfg if c.get('type') == 'freeraid.network'), None)
+network_ip_entry = next((c for c in user_cfg if c.get('type') == 'freeraid.network_ip'), None)
+plain_cfg = [c for c in user_cfg if c.get('type') not in ('freeraid.network', 'freeraid.network_ip')]
+
+# Merge user config values into template config
+cfg_map = {c['target']: c['value'] for c in plain_cfg}
+resolved = []
+for c in app.get('config', []):
+    val = cfg_map.get(c['target'], c.get('default', ''))
+    # Remap Unraid default appdata paths to FreeRAID paths
+    if c.get('type','').lower() == 'path' and isinstance(val, str):
+        val = val.replace('/mnt/user/appdata/', '/mnt/freeraid/appdata/')
+        val = val.replace('/mnt/user/', '/mnt/freeraid/')
+    resolved.append({**c, 'value': val})
+
+# Build compose
+slug = re.sub(r'[^a-z0-9_-]', '-', name.lower()).strip('-')
+image = app['image']
+# Network: prefer user override, then app default, then bridge
+network = (network_entry['value'] if network_entry else None) or app.get('network', 'bridge')
+network_ip = network_ip_entry['value'] if network_ip_entry else ''
+
+is_host_network = network.lower() == 'host'
+# For custom networks (not bridge/host/none) we use 'networks:' block instead of network_mode
+is_custom_network = network.lower() not in ('bridge', 'host', 'none', '')
+
+ports, volumes, env, devices = [], [], [], []
+for c in resolved:
+    t = c.get('type','').lower()
+    val = c.get('value') or c.get('default','')
+    target = c.get('target','')
+    mode = c.get('mode','rw')
+    if not target:
+        continue
+    if t == 'port' and val and not is_host_network:
+        proto = mode.lower() if mode.lower() in ('tcp','udp') else 'tcp'
+        host_port = val
+        ports.append(f'      - "{host_port}:{target}/{proto}"')
+    elif t == 'path' and val:
+        volumes.append(f'      - "{val}:{target}:{mode}"')
+    elif t in ('variable', 'env') and target:
+        env.append(f'      - {target}={val}')
+    elif t == 'device' and val:
+        devices.append(f'      - {val}:{target}')
+
+lines = [
+    f'services:',
+    f'  {slug}:',
+    f'    image: {image}',
+    f'    container_name: {slug}',
+    f'    restart: unless-stopped',
+]
+if is_custom_network:
+    # Use networks: block so container joins the named network with optional static IP
+    lines.append(f'    networks:')
+    lines.append(f'      {network}:')
+    if network_ip:
+        lines.append(f'        ipv4_address: {network_ip}')
+    lines.append(f'networks:')
+    lines.append(f'  {network}:')
+    lines.append(f'    external: true')
+elif network and network.lower() not in ('none',''):
+    lines.append(f'    network_mode: {network}')
+if ports:
+    lines.append('    ports:')
+    lines.extend(ports)
+if volumes:
+    lines.append('    volumes:')
+    lines.extend(volumes)
+if env:
+    lines.append('    environment:')
+    lines.extend(env)
+if devices:
+    lines.append('    devices:')
+    lines.extend(devices)
+# Store metadata as labels for runtime retrieval
+webui = app.get('webui', '')
+lines.append('    labels:')
+lines.append(f'      - "freeraid.name={name}"')
+if webui:
+    lines.append(f'      - "freeraid.webui={webui}"')
+
+compose = '\n'.join(lines) + '\n'
+os.makedirs(compose_dir, exist_ok=True)
+out_path = os.path.join(compose_dir, f'{slug}.docker-compose.yml')
+with open(out_path, 'w') as f:
+    f.write(compose)
+
+print(json.dumps({'ok': True, 'slug': slug, 'path': out_path, 'compose': compose}))
+PYEOF
+}
+
+cmd_apps_categories() {
+    [ -f "$APPFEED_CACHE" ] || die "App feed not cached. Run: freeraid apps-fetch"
+    python3 -c "
+import json
+from collections import Counter
+apps = json.load(open('$APPFEED_CACHE'))
+cats = Counter(c for a in apps for c in a.get('categories',[]))
+print(json.dumps(sorted(cats.keys())))
+"
+}
+
 cmd_docker_list() {
     if [ ! -d "$COMPOSE_DIR" ]; then
         echo "[]"
         return 0
     fi
 
-    # Get running container names
     local running
     running=$(docker ps --format '{{.Names}}' 2>/dev/null || echo "")
 
@@ -750,23 +1089,100 @@ cmd_docker_list() {
         local name="${basename%.docker-compose.yml}"
 
         local image container_name
-        image=$(jq -r '(.services | to_entries[0].value.image) // "unknown"' "$f" 2>/dev/null || echo "unknown")
-        container_name=$(jq -r '(.services | to_entries[0].value.container_name) // ""' "$f" 2>/dev/null || echo "")
+        image=$(python3 -c "
+import sys
+try:
+    import json
+    d = json.load(open('$f'))
+    svcs = d.get('services', {})
+    svc = next(iter(svcs.values()), {})
+    print(svc.get('image','unknown'))
+except: print('unknown')
+" 2>/dev/null || echo "unknown")
+        container_name=$(python3 -c "
+import sys
+try:
+    import json
+    d = json.load(open('$f'))
+    svcs = d.get('services', {})
+    svc = next(iter(svcs.values()), {})
+    print(svc.get('container_name', list(svcs.keys())[0] if svcs else ''))
+except: print('')
+" 2>/dev/null || echo "")
         [ -z "$container_name" ] && container_name="$name"
 
-        local state="stopped"
+        local state="stopped" ports="[]" ip='""' webui='""' app_name_label='""'
+
         if echo "$running" | grep -qxF "$container_name" 2>/dev/null; then
             state="running"
+            # Get ports: "0.0.0.0:8096->8096/tcp" format
+            local raw_ports
+            raw_ports=$(docker port "$container_name" 2>/dev/null || echo "")
+            ports=$(echo "$raw_ports" | python3 -c "
+import sys, json
+lines = [l.strip() for l in sys.stdin if l.strip()]
+out = []
+for l in lines:
+    # e.g. '8096/tcp -> 0.0.0.0:8096'
+    parts = l.split(' -> ')
+    if len(parts) == 2:
+        container_side = parts[0].strip()
+        host_side = parts[1].strip()
+        host_port = host_side.split(':')[-1] if ':' in host_side else host_side
+        out.append({'host': host_port, 'container': container_side})
+print(json.dumps(out))
+" 2>/dev/null || echo "[]")
+            ip=$(docker inspect "$container_name" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null | tr -d '\n' | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null || echo '""')
+            webui=$(docker inspect "$container_name" --format '{{index .Config.Labels "freeraid.webui"}}' 2>/dev/null | tr -d '\n' | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null || echo '""')
+            app_name_label=$(docker inspect "$container_name" --format '{{index .Config.Labels "freeraid.name"}}' 2>/dev/null | tr -d '\n' | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null || echo '""')
         fi
+
+        # Fall back to label from compose file if not running
+        if [ "$webui" = '""' ] || [ "$webui" = '"null"' ]; then
+            webui=$(python3 -c "
+import json
+try:
+    d = json.load(open('$f'))
+    svcs = d.get('services',{})
+    svc = next(iter(svcs.values()),{})
+    labels = svc.get('labels',[])
+    if isinstance(labels, list):
+        for l in labels:
+            if l.startswith('freeraid.webui='):
+                print(json.dumps(l.split('=',1)[1])); exit()
+    elif isinstance(labels, dict):
+        v = labels.get('freeraid.webui','')
+        if v: print(json.dumps(v)); exit()
+    print('\"\"')
+except: print('\"\"')
+" 2>/dev/null || echo '""')
+        fi
+
+        local image_j; image_j=$(python3 -c "import json; print(json.dumps('$image'))" 2>/dev/null || echo "\"$image\"")
 
         $first || result+=","
         first=false
-        result+=$(printf '{"name":"%s","container_name":"%s","image":"%s","state":"%s"}' \
-            "$name" "$container_name" "$image" "$state")
+        result+="{\"name\":\"$name\",\"container_name\":\"$container_name\",\"image\":${image_j},\"state\":\"$state\",\"ports\":${ports},\"ip\":${ip},\"webui\":${webui}}"
     done
 
     result+="]"
     echo "$result"
+}
+
+cmd_ports_used() {
+    # Returns JSON array of port numbers currently in use (docker + system)
+    {
+        docker ps --format '{{.Ports}}' 2>/dev/null | grep -oP '\d+\.\d+\.\d+\.\d+:\K\d+(?=->)' || true
+        ss -tlnp 2>/dev/null | awk 'NR>1{print $4}' | grep -oP ':\K[0-9]+$' || true
+    } | sort -u | python3 -c "
+import sys, json
+ports = []
+for line in sys.stdin:
+    line = line.strip()
+    if line.isdigit():
+        ports.append(int(line))
+print(json.dumps(sorted(set(ports))))
+"
 }
 
 cmd_docker_start() {
@@ -776,7 +1192,7 @@ cmd_docker_start() {
     [ -f "$f" ] || die "No compose file found for: $name"
     require docker
     info "Starting $name..."
-    docker compose -f "$f" up -d
+    docker_compose -f "$f" up -d
     info "$name started."
 }
 
@@ -787,7 +1203,7 @@ cmd_docker_stop() {
     [ -f "$f" ] || die "No compose file found for: $name"
     require docker
     info "Stopping $name..."
-    docker compose -f "$f" down
+    docker_compose -f "$f" down
     info "$name stopped."
 }
 
@@ -797,7 +1213,7 @@ cmd_docker_logs() {
     local f="${COMPOSE_DIR}/${name}.docker-compose.yml"
     [ -f "$f" ] || die "No compose file found for: $name"
     require docker
-    docker compose -f "$f" logs --tail=100 --no-color 2>&1 || true
+    docker_compose -f "$f" logs --tail=100 --no-color 2>&1 || true
 }
 
 cmd_docker_delete() {
@@ -813,17 +1229,28 @@ cmd_install_deps() {
     info "Installing FreeRAID dependencies..."
     apt-get update -qq
     apt-get install -y \
-        mergerfs \
-        snapraid \
-        jq \
-        xfsprogs \
-        btrfs-progs \
-        samba \
-        nfs-kernel-server \
-        docker.io \
-        docker-compose-plugin \
-        cockpit \
+        mergerfs snapraid jq xfsprogs btrfs-progs \
+        samba nfs-kernel-server cockpit \
+        curl ca-certificates gnupg \
+        smartmontools \
         2>&1 | grep -E '(Setting up|already|Error)' || true
+
+    # Docker — try official repo first, fall back to distro package
+    if ! command -v docker &>/dev/null; then
+        info "Installing Docker..."
+        if curl -fsSL https://get.docker.com | sh 2>/dev/null; then
+            info "Docker installed via official script"
+        else
+            apt-get install -y docker.io docker-compose 2>&1 | grep -E '(Setting up|already|Error)' || true
+        fi
+    fi
+
+    # Ensure docker-compose is available (v1 fallback if v2 plugin missing)
+    if ! docker compose version &>/dev/null 2>&1 && ! command -v docker-compose &>/dev/null; then
+        apt-get install -y docker-compose 2>&1 | grep -E '(Setting up|already|Error)' || true
+    fi
+
+    systemctl enable --now docker 2>/dev/null || true
     info "All dependencies installed."
 }
 
@@ -979,10 +1406,299 @@ ${BOLD}CONFIG${NC}
 EOF
 }
 
+cmd_smart() {
+    local dev="${1:-}"
+    [ -z "$dev" ] && die "Usage: freeraid smart <device>"
+    [ -b "$dev" ] || die "Device $dev not found"
+    require smartctl
+
+    local raw
+    raw=$(smartctl -j -x "$dev" 2>/dev/null || true)
+    [ -z "$raw" ] && { echo '{"error":"smartctl returned no data"}'; return; }
+
+    # Parse key fields with jq, provide safe defaults for missing fields
+    echo "$raw" | jq '{
+        device:            (.device.name // ""),
+        type:              (.device.type // ""),
+        model:             (.model_name // .model_family // "Unknown"),
+        serial:            (.serial_number // ""),
+        firmware:          (.firmware_version // ""),
+        capacity_bytes:    (.user_capacity.bytes // 0),
+        rotation_rate:     (.rotation_rate // 0),
+        smart_supported:   (.smart_support.available // false),
+        smart_enabled:     (.smart_support.enabled // false),
+        smart_passed:      (.smart_status.passed // null),
+        temp:              (.temperature.current // null),
+        temp_max:          (.temperature.drive_trip // null),
+        power_on_hours:    (.power_on_hours.hours // null),
+        power_cycles:      (.power_cycle_count // null),
+        reallocated_sectors: (
+            .ata_smart_attributes.table[]?
+            | select(.id == 5) | .raw.value
+        ) // null,
+        pending_sectors: (
+            .ata_smart_attributes.table[]?
+            | select(.id == 197) | .raw.value
+        ) // null,
+        uncorrectable: (
+            .ata_smart_attributes.table[]?
+            | select(.id == 198) | .raw.value
+        ) // null,
+        attributes: (
+            [.ata_smart_attributes.table[]? | {
+                id:    .id,
+                name:  .name,
+                value: .value,
+                worst: .worst,
+                thresh:.thresh,
+                raw:   .raw.string,
+                flags: {
+                    prefailure: .flags.prefailure,
+                    updated:    .flags.updated_online,
+                    failed:     (.value < .thresh)
+                }
+            }]
+        ),
+        nvme_health: (
+            if .nvme_smart_health_information_log then {
+                critical_warning:     .nvme_smart_health_information_log.critical_warning,
+                media_errors:         .nvme_smart_health_information_log.media_errors,
+                num_err_log_entries:  .nvme_smart_health_information_log.num_err_log_entries,
+                percentage_used:      .nvme_smart_health_information_log.percentage_used,
+                data_units_read:      .nvme_smart_health_information_log.data_units_read,
+                data_units_written:   .nvme_smart_health_information_log.data_units_written
+            } else null end
+        ),
+        self_tests: (
+            [.ata_smart_self_test_log.standard.table[]? | {
+                num:    .num,
+                type:   .type.string,
+                status: .status.string,
+                remaining: .lifetime_hours
+            }] | .[0:5]
+        )
+    } // {"error":"parse failed"}'
+}
+
+cmd_smart_test() {
+    local dev="${1:-}" type="${2:-short}"
+    [ -z "$dev" ] && die "Usage: freeraid smart-test <device> [short|long|conveyance]"
+    [ -b "$dev" ] || die "Device $dev not found"
+    require smartctl
+    info "Starting $type self-test on $dev..."
+    smartctl -t "$type" "$dev" && info "Self-test started. Check results with: freeraid smart $dev" \
+        || die "Failed to start self-test"
+}
+
+cmd_replace_disk() {
+    local slot="${1:-}" new_dev="${2:-}"
+    [ -z "$slot" ] || [ -z "$new_dev" ] && die "Usage: freeraid replace-disk <slot> <device>"
+    [ -b "$new_dev" ] || die "Device $new_dev not found"
+
+    # Confirm slot exists in config
+    local mnt fstype
+    mnt=$(jq -r --arg s "$slot" '.array.disks[] | select(.slot==$s) | .mountpoint' "$CONFIG_FILE")
+    fstype=$(jq -r --arg s "$slot" '.array.disks[] | select(.slot==$s) | .fstype' "$CONFIG_FILE")
+    [ -z "$mnt" ] || [ "$mnt" = "null" ] && die "Slot $slot not found in config"
+
+    # Get snapraid ID for this slot
+    local snapraid_id
+    snapraid_id=$(get_snapraid_id_for_slot "$slot")
+    [ -z "$snapraid_id" ] && die "Could not determine snapraid ID for $slot"
+
+    info "Replacing $slot with $new_dev (snapraid $snapraid_id)..."
+
+    # Format new drive
+    mkdir -p "$mnt"
+    info "Formatting $new_dev as $fstype..."
+    case "$fstype" in
+        xfs)  mkfs.xfs -f -L "$slot" "$new_dev" ;;
+        ext4) mkfs.ext4 -F -L "$slot" "$new_dev" ;;
+        btrfs) mkfs.btrfs -f -L "$slot" "$new_dev" ;;
+        *) die "Unknown fstype: $fstype" ;;
+    esac
+
+    # Get new UUID and serial
+    local new_uuid new_serial
+    new_uuid=$(get_disk_uuid "$new_dev")
+    new_serial=$(get_disk_serial "$new_dev")
+
+    # Mount new drive at slot mountpoint
+    if mountpoint -q "$mnt" 2>/dev/null; then
+        info "Unmounting existing $mnt"
+        umount "$mnt" || umount -l "$mnt"
+    fi
+    info "Mounting $new_dev → $mnt"
+    mount "$new_dev" "$mnt" || die "Failed to mount $new_dev"
+
+    # Update config
+    jq --arg s "$slot" --arg dev "$new_dev" --arg uuid "$new_uuid" --arg serial "$new_serial" \
+       '(.array.disks[] | select(.slot==$s)) |= . + {"device":$dev,"uuid":$uuid,"serial":$serial}' \
+       "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+
+    # Regenerate snapraid config
+    generate_snapraid_conf > "$SNAPRAID_CONF"
+
+    # Recover data from parity
+    info "Recovering data for $slot ($snapraid_id) from parity — this may take a long time..."
+    snapraid -c "$SNAPRAID_CONF" fix -e -d "$snapraid_id" \
+        && info "Data recovery complete for $slot" \
+        || { warn "Fix reported errors — some files may not be recoverable. Check snapraid output."; }
+
+    # Update parity to reflect restored drive
+    info "Updating parity..."
+    snapraid -c "$SNAPRAID_CONF" sync \
+        && info "Parity updated. Drive $slot fully restored." \
+        || warn "Sync failed — run 'freeraid sync' manually to update parity"
+}
+
+cmd_replace_disk_bg() {
+    local slot="${1:-}" new_dev="${2:-}"
+    [ -z "$slot" ] || [ -z "$new_dev" ] && die "Usage: freeraid replace-disk-bg <slot> <device>"
+    local run_dir="/var/run/freeraid"
+    mkdir -p "$run_dir"
+    local pid_file="$run_dir/replace-${slot}.pid"
+    local log_file="/var/log/freeraid-replace-${slot}.log"
+    local status_file="$run_dir/replace-${slot}.status"
+
+    # Check if already running
+    if [ -f "$pid_file" ]; then
+        local old_pid; old_pid=$(cat "$pid_file")
+        if kill -0 "$old_pid" 2>/dev/null; then
+            die "Replace job already running for $slot (pid $old_pid)"
+        fi
+    fi
+
+    echo "running" > "$status_file"
+    nohup bash -c "
+        /usr/local/bin/freeraid replace-disk '$slot' '$new_dev' >> '$log_file' 2>&1
+        echo \$? > '$status_file'
+    " > /dev/null 2>&1 &
+    echo $! > "$pid_file"
+    info "Replace job started in background (pid $!). Log: $log_file"
+    printf '{"pid":%d,"log":"%s","status_file":"%s"}\n' "$!" "$log_file" "$status_file"
+}
+
+cmd_replace_disk_status() {
+    local slot="${1:-}"
+    [ -z "$slot" ] && die "Usage: freeraid replace-disk-status <slot>"
+    local run_dir="/var/run/freeraid"
+    local pid_file="$run_dir/replace-${slot}.pid"
+    local log_file="/var/log/freeraid-replace-${slot}.log"
+    local status_file="$run_dir/replace-${slot}.status"
+
+    if [ ! -f "$pid_file" ]; then
+        printf '{"running":false,"exit":null,"log":""}\n'
+        return
+    fi
+
+    local pid; pid=$(cat "$pid_file")
+    local running=false exit_code="null" last_lines=""
+
+    if kill -0 "$pid" 2>/dev/null; then
+        running=true
+    else
+        local raw_status
+        raw_status=$(cat "$status_file" 2>/dev/null || echo "")
+        [[ "$raw_status" =~ ^[0-9]+$ ]] && exit_code="$raw_status"
+    fi
+
+    [ -f "$log_file" ] && last_lines=$(tail -5 "$log_file" 2>/dev/null | jq -Rs .)
+
+    printf '{"running":%s,"exit":%s,"log":%s}\n' \
+        "$running" "$exit_code" "${last_lines:-\"\"}"
+}
+
+# Scan all currently-mounted drives and update UUIDs/serials in config
+cmd_registry_sync() {
+    info "Syncing drive registry (UUID/serial) from currently-mounted drives..."
+    local updated=0
+
+    while IFS=' ' read -r slot dev mnt; do
+        [ -b "$dev" ] || continue
+        local uuid serial
+        uuid=$(get_disk_uuid "$dev")
+        serial=$(get_disk_serial "$dev")
+        [ -z "$uuid" ] && continue
+        jq --arg s "$slot" --arg u "$uuid" --arg sr "$serial" \
+           '(.array.disks[] | select(.slot==$s)) |= . + {"uuid":$u,"serial":$sr}' \
+           "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+        info "  $slot ($dev): uuid=$uuid serial=${serial:-unknown}"
+        updated=$((updated + 1))
+    done < <(jq -r '.array.disks[] | .slot + " " + .device + " " + .mountpoint' "$CONFIG_FILE")
+
+    # Also parity drives
+    while IFS=' ' read -r slot dev mnt; do
+        [ -b "$dev" ] || continue
+        local uuid serial
+        uuid=$(get_disk_uuid "$dev")
+        serial=$(get_disk_serial "$dev")
+        [ -z "$uuid" ] && continue
+        jq --arg s "$slot" --arg u "$uuid" --arg sr "$serial" \
+           '(.array.parity[] | select(.slot==$s)) |= . + {"uuid":$u,"serial":$sr}' \
+           "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+        info "  $slot ($dev): uuid=$uuid serial=${serial:-unknown}"
+        updated=$((updated + 1))
+    done < <(jq -r '.array.parity[] | .slot + " " + .device + " " + .mountpoint' "$CONFIG_FILE")
+
+    info "Registry updated for $updated drives."
+}
+
+cmd_set_hostname() {
+    local name="${1:-}"
+    [ -z "$name" ] && die "Usage: freeraid set-hostname <name>"
+    hostnamectl set-hostname "$name"
+    # Update /etc/hosts too
+    sed -i "s/127\.0\.1\.1.*/127.0.1.1\t$name/" /etc/hosts
+    info "Hostname set to: $name"
+}
+
 cmd_config() {
     echo "Config: $CONFIG_FILE"
     echo "────────────────────────────────────────────"
     cat "$CONFIG_FILE"
+}
+
+cmd_sysinfo() {
+    # CPU: read raw ticks from /proc/stat
+    local cpu_line
+    cpu_line=$(grep '^cpu ' /proc/stat)
+    local cpu_user cpu_nice cpu_system cpu_idle cpu_iowait cpu_irq cpu_softirq cpu_steal
+    read -r _ cpu_user cpu_nice cpu_system cpu_idle cpu_iowait cpu_irq cpu_softirq cpu_steal _ <<< "$cpu_line"
+    local cpu_idle_total=$(( cpu_idle + cpu_iowait ))
+    local cpu_total=$(( cpu_user + cpu_nice + cpu_system + cpu_idle + cpu_iowait + cpu_irq + cpu_softirq + cpu_steal ))
+
+    # Memory: from /proc/meminfo (kB)
+    local mem_total mem_available
+    mem_total=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
+    mem_available=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
+
+    # Network: sum RX/TX bytes across all non-loopback interfaces
+    local net_rx=0 net_tx=0
+    while IFS=': ' read -r iface rx_bytes rest; do
+        [[ "$iface" =~ ^lo ]] && continue
+        [[ -z "$iface" || -z "$rx_bytes" ]] && continue
+        net_rx=$(( net_rx + rx_bytes ))
+        local tx_bytes
+        tx_bytes=$(echo "$rest" | awk '{print $8}')
+        [[ "$tx_bytes" =~ ^[0-9]+$ ]] && net_tx=$(( net_tx + tx_bytes ))
+    done < <(awk 'NR>2{gsub(/^ +/,"",$0); print}' /proc/net/dev)
+
+    # System info
+    local hostname uptime_sec cpu_model cpu_cores kernel
+    hostname=$(cat /proc/sys/kernel/hostname 2>/dev/null || echo "unknown")
+    uptime_sec=$(awk '{print int($1)}' /proc/uptime 2>/dev/null || echo 0)
+    cpu_model=$(grep -m1 '^model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | sed 's/^ *//' || echo "unknown")
+    cpu_cores=$(grep -c '^processor' /proc/cpuinfo 2>/dev/null || echo 1)
+    kernel=$(uname -r 2>/dev/null || echo "unknown")
+
+    # Escape cpu_model for JSON
+    cpu_model="${cpu_model//\\/\\\\}"
+    cpu_model="${cpu_model//\"/\\\"}"
+
+    printf '{"cpu_idle":%d,"cpu_total":%d,"mem_total":%d,"mem_available":%d,"net_rx":%d,"net_tx":%d,"hostname":"%s","uptime":%d,"cpu_model":"%s","cpu_cores":%d,"kernel":"%s"}\n' \
+        "$cpu_idle_total" "$cpu_total" "$mem_total" "$mem_available" "$net_rx" "$net_tx" \
+        "$hostname" "$uptime_sec" "$cpu_model" "$cpu_cores" "$kernel"
 }
 
 # ── Dispatch ─────────────────────────────────────────────────────────────────────
@@ -1004,11 +1720,25 @@ case "${1:-help}" in
     shares-add)    cmd_shares_add "${2:-}" ;;
     shares-remove) cmd_shares_remove "${2:-}" ;;
     shares-import) cmd_shares_import "${2:-}" ;;
-    docker-list)   cmd_docker_list ;;
+    apps-fetch)        cmd_apps_fetch ;;
+    apps-search)       cmd_apps_search "${2:-}" "${3:-50}" ;;
+    apps-get)          cmd_apps_get "${2:-}" ;;
+    apps-install)      cmd_apps_install "${2:-}" "${3:-[]}" ;;
+    apps-categories)   cmd_apps_categories ;;
+    docker-list)       cmd_docker_list ;;
+    ports-used)        cmd_ports_used ;;
     docker-start)  cmd_docker_start "${2:-}" ;;
     docker-stop)   cmd_docker_stop "${2:-}" ;;
     docker-logs)   cmd_docker_logs "${2:-}" ;;
     docker-delete) cmd_docker_delete "${2:-}" ;;
+    smart)               cmd_smart "${2:-}" ;;
+    smart-test)          cmd_smart_test "${2:-}" "${3:-}" ;;
+    replace-disk)        cmd_replace_disk "${2:-}" "${3:-}" ;;
+    replace-disk-bg)     cmd_replace_disk_bg "${2:-}" "${3:-}" ;;
+    replace-disk-status) cmd_replace_disk_status "${2:-}" ;;
+    registry-sync)       cmd_registry_sync ;;
+    sysinfo)       cmd_sysinfo ;;
+    set-hostname)  cmd_set_hostname "${2:-}" ;;
     install-deps)  cmd_install_deps ;;
     config)        cmd_config ;;
     version)       cmd_version ;;

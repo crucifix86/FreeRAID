@@ -86,34 +86,44 @@ step "2/6" "Installing packages inside rootfs"
 cp /etc/resolv.conf "$ROOTFS/etc/resolv.conf"
 
 chroot "$ROOTFS" bash -s <<'CHROOT'
-set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+
+# Add non-free-firmware for NIC firmware (Intel, Realtek, etc.)
+grep -q non-free-firmware /etc/apt/sources.list || \
+    sed -i 's/^deb http.*bookworm main$/& contrib non-free-firmware/' /etc/apt/sources.list
 
 apt-get update -qq
 
 # Snapraid
-apt-get install -y -qq snapraid || {
-    # Not in main repos on all mirrors — try contrib
-    echo "deb http://deb.debian.org/debian bookworm contrib" >> /etc/apt/sources.list
-    apt-get update -qq
-    apt-get install -y -qq snapraid || echo "WARN: snapraid not installed, install manually"
-}
+apt-get install -y -qq snapraid || \
+    echo "WARN: snapraid not in repos — install manually after boot"
+
+# NIC firmware (covers Intel i210/i350, Realtek, Broadcom, etc.)
+apt-get install -y -qq firmware-linux-free \
+    firmware-realtek firmware-iwlwifi firmware-bnx2 2>/dev/null || true
 
 # MergerFS (download latest deb)
-MERGERFS_VER="2.40.2"
-MERGERFS_DEB="mergerfs_${MERGERFS_VER}.debian-bookworm_amd64.deb"
-MERGERFS_URL="https://github.com/trapexit/mergerfs/releases/download/${MERGERFS_VER}/${MERGERFS_DEB}"
-apt-get install -y -qq fuse
-curl -fsSL "$MERGERFS_URL" -o /tmp/mergerfs.deb
-dpkg -i /tmp/mergerfs.deb
-rm /tmp/mergerfs.deb
+if ! command -v mergerfs &>/dev/null; then
+    MERGERFS_VER="2.40.2"
+    MERGERFS_DEB="mergerfs_${MERGERFS_VER}.debian-bookworm_amd64.deb"
+    MERGERFS_URL="https://github.com/trapexit/mergerfs/releases/download/${MERGERFS_VER}/${MERGERFS_DEB}"
+    apt-get install -y -qq fuse
+    curl -fsSL "$MERGERFS_URL" -o /tmp/mergerfs.deb
+    dpkg -i /tmp/mergerfs.deb
+    rm /tmp/mergerfs.deb
+fi
 
 # Docker
-curl -fsSL https://get.docker.com | sh
-apt-get install -y -qq docker-compose-plugin
+if ! command -v docker &>/dev/null; then
+    curl -fsSL https://get.docker.com | sh
+fi
+apt-get install -y -qq docker-compose-plugin 2>/dev/null || true
+
+# systemd-resolved for DNS
+apt-get install -y -qq systemd-resolved
 
 # Cockpit
-apt-get install -y -qq cockpit cockpit-networkmanager cockpit-storaged 2>/dev/null || \
+apt-get install -y -qq cockpit cockpit-networkmanager 2>/dev/null || \
     apt-get install -y -qq cockpit
 
 apt-get clean
@@ -147,6 +157,71 @@ cp "$REPO_DIR/web/freeraid/manifest.json" \
 mkdir -p "$ROOTFS/etc/freeraid"
 cp "$REPO_DIR/VERSION" "$ROOTFS/etc/freeraid/VERSION"
 
+# First-boot import script
+cat > "$ROOTFS/usr/local/lib/freeraid/freeraid-firstboot" <<'FIRSTBOOT'
+#!/bin/bash
+# FreeRAID first-boot importer
+# Runs once on first boot if /boot/config/unraid-backup.zip exists.
+# Extracts the Unraid backup, imports shares + docker apps + network config,
+# and writes the result to /boot/config/freeraid.conf.json.
+
+BACKUP="/boot/config/unraid-backup.zip"
+FLAG="/boot/config/.unraid-imported"
+COMPOSE_DIR="/etc/freeraid/compose"
+
+[ -f "$BACKUP" ] || { echo "FreeRAID: no Unraid backup found, skipping first-boot import"; exit 0; }
+[ -f "$FLAG"   ] && { echo "FreeRAID: already imported, skipping"; exit 0; }
+
+echo ""
+echo "  ┌─────────────────────────────────────────────┐"
+echo "  │  FreeRAID: importing Unraid backup...        │"
+echo "  └─────────────────────────────────────────────┘"
+echo ""
+
+TMPDIR=$(mktemp -d /tmp/freeraid-firstboot-XXXXXX)
+trap "rm -rf '$TMPDIR'" EXIT
+
+echo "  Extracting backup..."
+unzip -q "$BACKUP" -d "$TMPDIR" 2>/dev/null || true
+
+# Find the config directory (contains disk.cfg or ident.cfg)
+CONFDIR=$(find "$TMPDIR" \( -name "disk.cfg" -o -name "ident.cfg" \) 2>/dev/null \
+    | head -1 | xargs dirname 2>/dev/null || echo "")
+[ -z "$CONFDIR" ] && CONFDIR=$(find "$TMPDIR" -type d -name "config" 2>/dev/null | head -1 || echo "")
+
+if [ -z "$CONFDIR" ] || [ ! -d "$CONFDIR" ]; then
+    echo "  ERROR: could not find Unraid config directory in backup"
+    echo "  Import skipped. Assign drives manually via the web UI."
+    exit 1
+fi
+
+echo "  Config directory: $CONFDIR"
+
+# Count what we found
+SHARES=$(ls "$CONFDIR/shares/"*.cfg 2>/dev/null | wc -l || echo 0)
+DOCKER=$(ls "$CONFDIR/plugins/dockerMan/templates-user/"*.xml 2>/dev/null | wc -l || echo 0)
+echo "  Found: $SHARES shares, $DOCKER Docker apps"
+
+# Run full importer — writes freeraid.conf.json + compose files
+mkdir -p "$COMPOSE_DIR"
+python3 /usr/local/lib/freeraid/unraid-import \
+    "$CONFDIR" \
+    --out /boot/config/freeraid.conf.json \
+    --compose-dir "$COMPOSE_DIR" \
+    && echo "  Import complete!" \
+    || { echo "  WARN: importer returned error — partial import may have succeeded"; }
+
+# Mark as done so we don't re-run on next boot
+date -Iseconds > "$FLAG"
+
+echo ""
+echo "  Unraid config imported. Your shares and Docker apps are ready."
+echo "  Assign your drives in the web UI, then start the array."
+echo ""
+FIRSTBOOT
+chmod +x "$ROOTFS/usr/local/lib/freeraid/freeraid-firstboot"
+ln -sf /usr/local/lib/freeraid/freeraid-firstboot "$ROOTFS/usr/local/bin/freeraid-firstboot"
+
 # Compose files dir
 mkdir -p "$ROOTFS/etc/freeraid/compose"
 cp "$REPO_DIR/compose/"*.docker-compose.yml "$ROOTFS/etc/freeraid/compose/" 2>/dev/null || true
@@ -160,8 +235,6 @@ step "4/6" "Configuring live system"
 FREERAID_VERSION=$(cat "$REPO_DIR/VERSION" | tr -d '[:space:]')
 
 chroot "$ROOTFS" bash -s <<CHROOT
-set -euo pipefail
-
 # Hostname
 echo "freeraid" > /etc/hostname
 echo "127.0.1.1  freeraid" >> /etc/hosts
@@ -199,11 +272,11 @@ MulticastDNS=yes
 RouteMetric=10
 NET
 
-systemctl enable systemd-networkd
-systemctl enable systemd-resolved
-systemctl enable ssh
-systemctl enable cockpit.socket
-systemctl enable docker
+systemctl enable systemd-networkd  || true
+systemctl enable systemd-resolved  || true
+systemctl enable ssh               || true
+systemctl enable cockpit.socket    || true
+systemctl enable docker            || true
 
 # FreeRAID array auto-start
 cat > /etc/systemd/system/freeraid-array.service <<'SVC'
@@ -245,8 +318,29 @@ Type=oneshot
 ExecStart=/usr/local/bin/freeraid sync
 SVC
 
-systemctl enable freeraid-array.service
-systemctl enable freeraid-sync.timer
+systemctl enable freeraid-array.service    || true
+systemctl enable freeraid-sync.timer       || true
+
+# First-boot import service (runs once if unraid-backup.zip is on the USB)
+cat > /etc/systemd/system/freeraid-firstboot.service <<'SVC'
+[Unit]
+Description=FreeRAID First Boot Import
+After=local-fs.target
+Before=freeraid-array.service
+ConditionPathExists=/boot/config/unraid-backup.zip
+ConditionPathExists=!/boot/config/.unraid-imported
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/freeraid-firstboot
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
+SVC
+systemctl enable freeraid-firstboot.service || true
 
 # Default FreeRAID config — will be overwritten by USB config/ on boot
 mkdir -p /boot/config
@@ -279,7 +373,7 @@ ExecStart=/bin/bash -c 'IP=\$(ip -4 route get 1.1.1.1 2>/dev/null | awk "{print 
 [Install]
 WantedBy=multi-user.target
 SVC
-systemctl enable freeraid-announce.service
+systemctl enable freeraid-announce.service || true
 
 # Write login banner (updated on first boot when IP is known)
 cat > /etc/issue <<'ISSUE'

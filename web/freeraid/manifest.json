@@ -1,11 +1,12 @@
 {
   "version": 1,
   "name": "freeraid",
-  "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';",
-  "tools": {
-    "freeraid": {
+  "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src * data: blob:;",
+  "menu": {
+    "index": {
       "label": "FreeRAID",
-      "path": "index.html"
+      "path": "index.html",
+      "order": 1
     }
   }
 }
