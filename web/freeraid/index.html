@@ -40,13 +40,8 @@
         <button class="sidebar-item" data-tab="plugins" onclick="switchTab('plugins')">
           <span class="si-icon">⊕</span> Plugins
         </button>
-
-        <div class="sidebar-section-label" style="margin-top:16px">Settings</div>
-        <button class="sidebar-item" onclick="openWebUIAccounts()">
-          <span class="si-icon">👤</span> WebUI Accounts ↗
-        </button>
         <button class="sidebar-item" data-tab="settings" onclick="switchTab('settings')">
-          <span class="si-icon">⚙</span> System & Updates
+          <span class="si-icon">⚙</span> Settings
         </button>
       </nav>
 
@@ -166,6 +161,20 @@
 
       <!-- ── SETTINGS TAB ── -->
       <div id="tab-settings" class="hidden">
+
+        <!-- WebUI Accounts -->
+        <div class="settings-section">
+          <h2 class="settings-section-title">WebUI Accounts</h2>
+          <div class="settings-card">
+            <div class="settings-row" style="align-items:center">
+              <div style="flex:1">
+                <div class="settings-label">Cockpit User Accounts</div>
+                <div class="settings-value" style="font-size:13px;margin-top:4px;color:var(--text-dim)">Manage accounts that can log in to this web interface</div>
+              </div>
+              <button class="btn btn-secondary" onclick="openWebUIAccounts()">Manage Accounts ↗</button>
+            </div>
+          </div>
+        </div>
 
         <!-- Updates -->
         <div class="settings-section">
