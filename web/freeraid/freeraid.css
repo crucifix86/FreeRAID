@@ -150,25 +150,30 @@ body {
   color: var(--text-dim);
 }
 
-/* ── Array Controls Panel (dashboard) ── */
+/* ── Automation row (array controls + schedules) ── */
+.automation-row {
+  display: grid;
+  grid-template-columns: 200px 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+@media (max-width: 900px) {
+  .automation-row { grid-template-columns: 1fr; }
+}
+
+/* ── Array Controls Panel ── */
 .array-controls-panel {
   background: var(--bg2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 24px 28px;
-  margin-bottom: 24px;
+  padding: 20px;
   display: flex;
-  align-items: center;
-  gap: 24px;
-  flex-wrap: wrap;
-}
-
-.array-status-row {
-  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .array-status-badge {
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 700;
   color: var(--text-dim);
 }
@@ -176,15 +181,50 @@ body {
 .array-status-badge.stopped { color: var(--yellow); }
 .array-status-badge.error   { color: var(--red); }
 
-.array-action-row {
+.array-action-stack {
   display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .array-btn {
   font-size: 14px;
   padding: 9px 20px;
+}
+
+/* ── Schedule panels ── */
+.schedule-panel {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+.schedule-title {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
+  margin: 0 0 14px;
+}
+.schedule-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.schedule-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 80px;
+}
+.schedule-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-dim);
 }
 
 .sidebar-nav {

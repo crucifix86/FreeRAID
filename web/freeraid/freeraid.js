@@ -150,6 +150,8 @@ window.addEventListener('load', () => {
   setInterval(refreshStatus, 8000);
   refreshSysinfo();
   setInterval(refreshSysinfo, 4000);
+  loadParitySchedule();
+  loadMoverStatus();
   // Skip update check if we just finished an update (flag set before reload)
   if (!sessionStorage.getItem('justUpdated')) {
     doCheckUpdate();
@@ -1574,6 +1576,70 @@ function doDisableSamba(name) {
   cockpit.spawn(['freeraid', 'users-disable-samba', name], { superuser: 'require', err: 'out' })
     .then(() => { showAlert('success', `Samba disabled for "${name}".`); refreshUsers(); })
     .catch(err => showAlert('error', String(err)));
+}
+
+// ── Parity Schedule ──────────────────────────────────────────────────────────
+
+function loadParitySchedule() {
+  cockpit.spawn(['freeraid', 'parity-get-schedule'], { superuser: 'require', err: 'out' })
+    .then(out => {
+      try {
+        const d = JSON.parse(out.trim().split('\n').pop());
+        document.getElementById('parity-freq').value = d.freq || 'weekly';
+        document.getElementById('parity-day').value  = d.day  || 'Sun';
+        document.getElementById('parity-time').value = d.time || '04:00';
+        onParityFreqChange();
+      } catch(e) {}
+    }).catch(() => {});
+}
+
+function onParityFreqChange() {
+  const freq = document.getElementById('parity-freq').value;
+  document.getElementById('parity-day-wrap').style.display = freq === 'weekly' ? '' : 'none';
+}
+
+function saveParitySchedule() {
+  const freq = document.getElementById('parity-freq').value;
+  const day  = document.getElementById('parity-day').value;
+  const time = document.getElementById('parity-time').value;
+  cockpit.spawn(['freeraid', 'parity-set-schedule', freq, day, time], { superuser: 'require', err: 'out' })
+    .then(() => showAlert('success', 'Parity check schedule saved.'))
+    .catch(err => showAlert('error', String(err)));
+}
+
+// ── Cache Mover ───────────────────────────────────────────────────────────────
+
+function loadMoverStatus() {
+  cockpit.spawn(['freeraid', 'mover-status'], { superuser: 'require', err: 'out' })
+    .then(out => {
+      try {
+        const d = JSON.parse(out.trim().split('\n').pop());
+        document.getElementById('mover-enabled').checked = d.enabled === true || d.enabled === 'true';
+        document.getElementById('mover-time').value      = d.time || '02:00';
+        document.getElementById('mover-last-run').textContent = d.last_run || 'never';
+      } catch(e) {}
+    }).catch(() => {});
+}
+
+function saveMoverSchedule() {
+  const enabled = document.getElementById('mover-enabled').checked;
+  const time    = document.getElementById('mover-time').value;
+  cockpit.spawn(['freeraid', 'mover-set-schedule', enabled ? 'true' : 'false', time], { superuser: 'require', err: 'out' })
+    .then(() => showAlert('success', `Mover ${enabled ? 'enabled' : 'disabled'} — runs daily at ${time}.`))
+    .catch(err => showAlert('error', String(err)));
+}
+
+function runMoverNow() {
+  appendLog('log-panel', 'cmd', 'Running cache mover...');
+  cockpit.spawn(['freeraid', 'mover-run'], { superuser: 'require', err: 'out' })
+    .then(out => {
+      try {
+        const d = JSON.parse(out.trim().split('\n').pop());
+        appendLog('log-panel', 'success', `Mover complete — ${d.shares_processed} share(s) processed.`);
+        loadMoverStatus();
+      } catch(e) { appendLog('log-panel', 'success', 'Mover complete.'); }
+    })
+    .catch(err => appendLog('log-panel', 'error', String(err)));
 }
 
 function setAnonAccess(enabled) {

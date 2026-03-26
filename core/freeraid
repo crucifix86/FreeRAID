@@ -2028,6 +2028,115 @@ cmd_config() {
     cat "$CONFIG_FILE"
 }
 
+cmd_mover_run() {
+    local cache_root="/mnt/cache"
+    local pool_root
+    pool_root=$(cfg '.array.pool_mountpoint // "/mnt/user"')
+    local log_file="/var/log/freeraid-mover.log"
+
+    mountpoint -q "$cache_root" || die "Cache not mounted at $cache_root"
+    mountpoint -q "$pool_root"  || die "Pool not mounted at $pool_root"
+
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Mover started" >> "$log_file"
+
+    local moved=0
+    while IFS= read -r share_name; do
+        local src="$cache_root/$share_name"
+        [ -d "$src" ] && [ "$(ls -A "$src" 2>/dev/null)" ] || continue
+        local dst="$pool_root/$share_name"
+        mkdir -p "$dst"
+        rsync -a --remove-source-files "$src/" "$dst/" && \
+            find "$src" -type d -empty -delete 2>/dev/null || true
+        moved=$((moved + 1))
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Moved: $share_name" >> "$log_file"
+    done < <(jq -r '.shares[].name' "$CONFIG_FILE" 2>/dev/null)
+
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Mover complete. Processed $moved share(s)." >> "$log_file"
+    echo "{\"ok\":true,\"shares_processed\":$moved}"
+}
+
+cmd_mover_status() {
+    local log_file="/var/log/freeraid-mover.log"
+    local last_run="never"
+    if [ -f "$log_file" ]; then
+        last_run=$(grep "Mover complete" "$log_file" | tail -1 | sed 's/\[//;s/\] Mover.*//' || echo "never")
+        [ -z "$last_run" ] && last_run="never"
+    fi
+    local enabled time
+    enabled=$(jq -r '.mover_schedule.enabled // false' "$CONFIG_FILE" 2>/dev/null || echo "false")
+    time=$(jq -r '.mover_schedule.time // "02:00"' "$CONFIG_FILE" 2>/dev/null || echo "02:00")
+    echo "{\"last_run\":\"$last_run\",\"enabled\":${enabled},\"time\":\"${time}\"}"
+}
+
+cmd_mover_set_schedule() {
+    local enabled="${1:-true}" time="${2:-02:00}"
+    local service="/etc/systemd/system/freeraid-mover.service"
+    local timer="/etc/systemd/system/freeraid-mover.timer"
+
+    cat > "$service" <<EOF
+[Unit]
+Description=FreeRAID Cache Mover
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/freeraid mover-run
+EOF
+
+    cat > "$timer" <<EOF
+[Unit]
+Description=FreeRAID Cache Mover
+
+[Timer]
+OnCalendar=*-*-* ${time}:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload
+    if [ "$enabled" = "true" ]; then
+        systemctl enable --now freeraid-mover.timer 2>/dev/null || true
+    else
+        systemctl disable --now freeraid-mover.timer 2>/dev/null || true
+    fi
+
+    jq --argjson e "$([ "$enabled" = "true" ] && echo true || echo false)" --arg t "$time" \
+       '.mover_schedule = {"enabled":$e,"time":$t}' \
+       "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+    echo "{\"ok\":true}"
+}
+
+cmd_parity_get_schedule() {
+    local freq day time
+    freq=$(jq -r '.parity_schedule.freq // "weekly"' "$CONFIG_FILE" 2>/dev/null || echo "weekly")
+    day=$(jq -r  '.parity_schedule.day  // "Sun"'    "$CONFIG_FILE" 2>/dev/null || echo "Sun")
+    time=$(jq -r '.parity_schedule.time // "04:00"'  "$CONFIG_FILE" 2>/dev/null || echo "04:00")
+    echo "{\"freq\":\"$freq\",\"day\":\"$day\",\"time\":\"$time\"}"
+}
+
+cmd_parity_set_schedule() {
+    local freq="${1:-weekly}" day="${2:-Sun}" time="${3:-04:00}"
+    local on_cal
+    case "$freq" in
+        daily)   on_cal="*-*-* ${time}:00" ;;
+        weekly)  on_cal="${day} *-*-* ${time}:00" ;;
+        monthly) on_cal="*-*-01 ${time}:00" ;;
+        *)       die "Unknown frequency: $freq (use daily/weekly/monthly)" ;;
+    esac
+
+    local timer="/etc/systemd/system/freeraid-scrub.timer"
+    [ -f "$timer" ] || die "Scrub timer not found at $timer"
+    sed -i "s|^OnCalendar=.*|OnCalendar=${on_cal}|" "$timer"
+    systemctl daemon-reload
+    systemctl restart freeraid-scrub.timer 2>/dev/null || true
+
+    jq --arg f "$freq" --arg d "$day" --arg t "$time" \
+       '.parity_schedule = {"freq":$f,"day":$d,"time":$t}' \
+       "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+    echo "{\"ok\":true,\"oncalendar\":\"${on_cal}\"}"
+}
+
 cmd_sysinfo() {
     # CPU: read raw ticks from /proc/stat
     local cpu_line
@@ -2122,6 +2231,11 @@ case "${1:-help}" in
     users-disable-samba)  cmd_users_disable_samba "${2:-}" ;;
     shares-get-anon)      cmd_shares_get_anon ;;
     shares-set-anon)      cmd_shares_set_anon "${2:-}" ;;
+    mover-run)            cmd_mover_run ;;
+    mover-status)         cmd_mover_status ;;
+    mover-set-schedule)   cmd_mover_set_schedule "${2:-}" "${3:-}" ;;
+    parity-get-schedule)  cmd_parity_get_schedule ;;
+    parity-set-schedule)  cmd_parity_set_schedule "${2:-}" "${3:-}" "${4:-}" ;;
     install-deps)  cmd_install_deps ;;
     config)        cmd_config ;;
     version)       cmd_version ;;

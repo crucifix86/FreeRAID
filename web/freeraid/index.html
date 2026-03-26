@@ -134,17 +134,70 @@
           </div>
         </section>
 
-        <!-- Array Controls -->
-        <section class="array-controls-panel">
-          <div class="array-status-row">
+        <!-- Array Controls + Automation -->
+        <div class="automation-row">
+
+          <!-- Array Controls -->
+          <section class="array-controls-panel">
             <div class="array-status-badge" id="array-badge">● Loading...</div>
-          </div>
-          <div class="array-action-row">
-            <button class="btn btn-primary array-btn" id="btn-start-stop" onclick="toggleArray()">Start Array</button>
-            <button class="btn btn-secondary array-btn" id="btn-sync" onclick="runSync()">Sync Parity</button>
-            <button class="btn btn-secondary array-btn" id="btn-scrub" onclick="runScrub()">Parity Check</button>
-          </div>
-        </section>
+            <div class="array-action-stack">
+              <button class="btn btn-primary array-btn" id="btn-start-stop" onclick="toggleArray()">Start Array</button>
+              <button class="btn btn-secondary array-btn" id="btn-sync" onclick="runSync()">Sync Parity</button>
+              <button class="btn btn-secondary array-btn" id="btn-scrub" onclick="runScrub()">Parity Check</button>
+            </div>
+          </section>
+
+          <!-- Parity Schedule -->
+          <section class="schedule-panel">
+            <h3 class="schedule-title">Parity Check Schedule</h3>
+            <div class="schedule-row">
+              <div class="schedule-field">
+                <label class="schedule-label">Frequency</label>
+                <select class="install-select" id="parity-freq" onchange="onParityFreqChange()">
+                  <option value="daily">Daily</option>
+                  <option value="weekly" selected>Weekly</option>
+                  <option value="monthly">Monthly</option>
+                </select>
+              </div>
+              <div class="schedule-field" id="parity-day-wrap">
+                <label class="schedule-label">Day</label>
+                <select class="install-select" id="parity-day">
+                  <option>Mon</option><option>Tue</option><option>Wed</option>
+                  <option>Thu</option><option>Fri</option><option>Sat</option>
+                  <option selected>Sun</option>
+                </select>
+              </div>
+              <div class="schedule-field">
+                <label class="schedule-label">Time</label>
+                <input type="time" class="install-input" id="parity-time" value="04:00">
+              </div>
+            </div>
+            <button class="btn btn-primary btn-sm" style="margin-top:12px" onclick="saveParitySchedule()">Save Schedule</button>
+          </section>
+
+          <!-- Cache Mover -->
+          <section class="schedule-panel" id="mover-panel">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+              <h3 class="schedule-title" style="margin:0">Cache Mover</h3>
+              <label class="toggle-switch">
+                <input type="checkbox" id="mover-enabled" onchange="saveMoverSchedule()">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div class="schedule-row">
+              <div class="schedule-field">
+                <label class="schedule-label">Run daily at</label>
+                <input type="time" class="install-input" id="mover-time" value="02:00" onchange="saveMoverSchedule()">
+              </div>
+              <div class="schedule-field" style="justify-content:flex-end">
+                <label class="schedule-label">Last run</label>
+                <span class="sysinfo-value" id="mover-last-run">—</span>
+              </div>
+            </div>
+            <button class="btn btn-secondary btn-sm" style="margin-top:12px" onclick="runMoverNow()">Run Mover Now</button>
+          </section>
+
+        </div>
 
         <!-- Log -->
         <section>
