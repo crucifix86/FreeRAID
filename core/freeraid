@@ -2179,6 +2179,23 @@ cmd_sysinfo() {
         "$hostname" "$uptime_sec" "$cpu_model" "$cpu_cores" "$kernel"
 }
 
+# ── Setup wizard ─────────────────────────────────────────────────────────────────
+
+cmd_setup_status() {
+    local complete has_disks disk_count
+    complete=$(jq -r '.setup_complete // false' "$CONFIG_FILE" 2>/dev/null || echo "false")
+    disk_count=$(jq -r '.array.disks | length' "$CONFIG_FILE" 2>/dev/null || echo "0")
+    has_disks="false"
+    [ "${disk_count:-0}" -gt 0 ] && has_disks="true"
+    echo "{\"setup_complete\": $complete, \"has_disks\": $has_disks}"
+}
+
+cmd_setup_complete() {
+    jq '.setup_complete = true' "$CONFIG_FILE" > /tmp/freeraid.conf.tmp \
+        && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+    info "Setup marked as complete."
+}
+
 # ── Dispatch ─────────────────────────────────────────────────────────────────────
 
 case "${1:-help}" in
@@ -2236,6 +2253,8 @@ case "${1:-help}" in
     mover-set-schedule)   cmd_mover_set_schedule "${2:-}" "${3:-}" ;;
     parity-get-schedule)  cmd_parity_get_schedule ;;
     parity-set-schedule)  cmd_parity_set_schedule "${2:-}" "${3:-}" "${4:-}" ;;
+    setup-status)         cmd_setup_status ;;
+    setup-complete)       cmd_setup_complete ;;
     install-deps)  cmd_install_deps ;;
     config)        cmd_config ;;
     version)       cmd_version ;;

@@ -8,6 +8,122 @@
   <link rel="stylesheet" href="xterm.css">
 </head>
 <body>
+  <!-- ── Setup Wizard Overlay ── -->
+  <div id="wizard-overlay" class="wizard-overlay hidden">
+    <div class="wizard-card">
+
+      <div class="wizard-steps" id="wizard-steps"></div>
+
+      <!-- Step 1: Welcome -->
+      <div class="wizard-body" id="wiz-step-1">
+        <div class="wizard-logo">FreeRAID</div>
+        <div class="wizard-title">Welcome to FreeRAID</div>
+        <div class="wizard-subtitle">Let's get your NAS set up. How would you like to start?</div>
+        <div class="wizard-choices">
+          <button class="wizard-choice-btn" onclick="wizChoose('fresh')">
+            <span class="wizard-choice-icon">🚀</span>
+            <div>
+              <div class="wizard-choice-title">Start Fresh</div>
+              <div class="wizard-choice-desc">New installation — assign drives and configure from scratch</div>
+            </div>
+          </button>
+          <button class="wizard-choice-btn" onclick="wizChoose('import')">
+            <span class="wizard-choice-icon">📦</span>
+            <div>
+              <div class="wizard-choice-title">Migrate from Unraid</div>
+              <div class="wizard-choice-desc">Import your shares and settings from an Unraid flash backup zip</div>
+            </div>
+          </button>
+        </div>
+        <div style="text-align:center;margin-top:20px">
+          <button class="btn btn-ghost btn-sm" onclick="wizSkip()">Skip setup wizard</button>
+        </div>
+      </div>
+
+      <!-- Step 2: Hostname & Network -->
+      <div class="wizard-body hidden" id="wiz-step-2">
+        <div class="wizard-title">Hostname &amp; Network</div>
+        <div class="wizard-subtitle">Configure how your server appears on the network.</div>
+        <div class="wiz-field">
+          <label class="install-label">Server Hostname</label>
+          <input type="text" class="install-input" id="wiz-hostname" placeholder="freeraid" style="max-width:280px">
+        </div>
+        <div class="wiz-field">
+          <label class="install-label">IP Configuration</label>
+          <div class="wiz-radio-group">
+            <label class="wiz-radio"><input type="radio" name="wiz-net-mode" value="dhcp" checked onchange="wizNetModeChange()"> DHCP — automatic, recommended</label>
+            <label class="wiz-radio"><input type="radio" name="wiz-net-mode" value="static" onchange="wizNetModeChange()"> Static IP</label>
+          </div>
+        </div>
+        <div id="wiz-static-fields" class="hidden">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:4px">
+            <div><label class="install-label">IP Address / CIDR</label><input type="text" class="install-input" id="wiz-ip" placeholder="192.168.1.100/24"></div>
+            <div><label class="install-label">Gateway</label><input type="text" class="install-input" id="wiz-gateway" placeholder="192.168.1.1"></div>
+            <div><label class="install-label">DNS</label><input type="text" class="install-input" id="wiz-dns" placeholder="8.8.8.8"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Step 3: Unraid Import (import path only) -->
+      <div class="wizard-body hidden" id="wiz-step-3">
+        <div class="wizard-title">Import from Unraid</div>
+        <div class="wizard-subtitle">Upload your Unraid flash backup zip. We'll import your shares and Docker apps.</div>
+        <div id="wiz-drop-zone" class="drop-zone"
+          onclick="document.getElementById('wiz-file-input').click()"
+          ondragover="event.preventDefault();this.classList.add('drop-zone-active')"
+          ondragleave="this.classList.remove('drop-zone-active')"
+          ondrop="event.preventDefault();this.classList.remove('drop-zone-active');wizHandleUploadFile(event.dataTransfer.files[0])">
+          <div class="drop-zone-icon">📦</div>
+          <div class="drop-zone-text">Drop Unraid backup zip here or <span class="drop-zone-link">browse</span></div>
+          <div class="drop-zone-hint">Accepts .zip flash backup or a config.zip</div>
+        </div>
+        <input type="file" id="wiz-file-input" accept=".zip" style="display:none" onchange="wizHandleUpload(this)">
+        <div id="wiz-import-preview" class="hidden" style="margin-top:16px">
+          <div class="settings-label" style="margin-bottom:8px">Found in backup:</div>
+          <div id="wiz-import-content"></div>
+          <div id="wiz-import-status" style="margin-top:8px;font-size:13px;color:var(--text-dim)"></div>
+        </div>
+        <div style="margin-top:16px;text-align:right">
+          <button class="btn btn-ghost btn-sm" onclick="wizNext()">Skip import →</button>
+        </div>
+      </div>
+
+      <!-- Step 4: Assign Drives -->
+      <div class="wizard-body hidden" id="wiz-step-4">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:16px">
+          <div>
+            <div class="wizard-title" style="margin-bottom:4px">Assign Drives</div>
+            <div class="wizard-subtitle" style="margin-bottom:0">Tell FreeRAID which drives are parity, array data, and cache.</div>
+          </div>
+          <button class="btn btn-sm btn-secondary" style="margin-top:4px" onclick="wizRescanDisks()">Rescan</button>
+        </div>
+        <div id="wiz-disk-list"><div class="loading-msg">Scanning...</div></div>
+        <div style="margin-top:10px;font-size:12px;color:var(--text-dim)">Changes apply immediately. Reassign anytime from the Disks tab.</div>
+      </div>
+
+      <!-- Step 5: Start Array -->
+      <div class="wizard-body hidden" id="wiz-step-5">
+        <div class="wizard-title">Start Array</div>
+        <div class="wizard-subtitle">Review your configuration and start the array for the first time.</div>
+        <div id="wiz-summary"></div>
+        <div id="wiz-start-log" class="log-panel" style="min-height:80px;margin-bottom:12px;display:none"></div>
+        <div id="wiz-done-msg" class="hidden" style="text-align:center;padding:32px 0">
+          <div style="font-size:48px;margin-bottom:16px">✅</div>
+          <div style="font-size:20px;font-weight:700;margin-bottom:8px">Setup Complete!</div>
+          <div style="color:var(--text-dim);font-size:14px">Your array is running. Create shares and install apps to get started.</div>
+        </div>
+      </div>
+
+      <!-- Navigation -->
+      <div class="wizard-nav">
+        <button class="btn btn-ghost" id="wiz-btn-back" onclick="wizBack()" style="display:none">Back</button>
+        <div style="flex:1"></div>
+        <button class="btn btn-primary" id="wiz-btn-next" onclick="wizNext()" style="display:none">Continue</button>
+      </div>
+
+    </div>
+  </div>
+
   <div id="app">
 
     <!-- ── Sidebar ── -->

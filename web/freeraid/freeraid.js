@@ -146,6 +146,7 @@ function _drawSparkline(canvasId, data, color) {
 
 window.addEventListener('load', () => {
   if (typeof cockpit === 'undefined') initFallback();
+  checkSetupStatus();
   refreshStatus();
   setInterval(refreshStatus, 8000);
   refreshSysinfo();
@@ -2043,4 +2044,377 @@ function doUpdate() {
       if (btnUpdate) btnUpdate.disabled = false;
       if (btnCheck)  btnCheck.disabled  = false;
     });
+}
+
+// ── Setup Wizard ─────────────────────────────────────────────────────────────
+
+let _wizStep = 1;
+let _wizPath = 'fresh'; // 'fresh' | 'import'
+let _wizConfDir = null;
+let _wizTmpDir  = null;
+
+const WIZ_STEPS_FRESH  = [1, 2, 4, 5];
+const WIZ_STEPS_IMPORT = [1, 2, 3, 4, 5];
+
+function checkSetupStatus() {
+  let buf = '';
+  cockpit.spawn(['freeraid', 'setup-status'], { superuser: 'require', err: 'ignore' })
+    .stream(d => { buf += d; })
+    .then(() => {
+      try {
+        const d = JSON.parse(buf.trim());
+        if (d.setup_complete) return;
+        // If disks already assigned (existing system), mark done silently
+        if (d.has_disks) {
+          cockpit.spawn(['freeraid', 'setup-complete'], { superuser: 'require' }).catch(() => {});
+          return;
+        }
+        showWizard();
+      } catch(e) { showWizard(); }
+    })
+    .catch(() => showWizard());
+}
+
+function showWizard() {
+  document.getElementById('wizard-overlay').classList.remove('hidden');
+  _wizRebuildDots();
+  wizGoToStep(1);
+  // Pre-fetch hostname
+  let buf = '';
+  cockpit.spawn(['freeraid', 'sysinfo'], { superuser: 'require', err: 'ignore' })
+    .stream(d => { buf += d; })
+    .then(() => {
+      try {
+        const d = JSON.parse(buf.trim());
+        if (d.hostname) document.getElementById('wiz-hostname').value = d.hostname;
+      } catch(e) {}
+    }).catch(() => {});
+}
+
+function wizSkip() {
+  if (!confirm('Skip setup? You can configure FreeRAID manually from the dashboard.')) return;
+  cockpit.spawn(['freeraid', 'setup-complete'], { superuser: 'require' }).catch(() => {});
+  document.getElementById('wizard-overlay').classList.add('hidden');
+}
+
+function wizChoose(path) {
+  _wizPath = path;
+  _wizRebuildDots();
+  const steps = path === 'import' ? WIZ_STEPS_IMPORT : WIZ_STEPS_FRESH;
+  wizGoToStep(steps[1]);
+}
+
+function _wizRebuildDots() {
+  const steps = _wizPath === 'import' ? WIZ_STEPS_IMPORT : WIZ_STEPS_FRESH;
+  const el = document.getElementById('wizard-steps');
+  el.innerHTML = '';
+  steps.forEach((s, i) => {
+    const curIdx = steps.indexOf(_wizStep);
+    const dot = document.createElement('div');
+    dot.className = 'wizard-step-dot' +
+      (s === _wizStep ? ' active' : (i < curIdx ? ' done' : ''));
+    dot.textContent = i + 1;
+    el.appendChild(dot);
+    if (i < steps.length - 1) {
+      const line = document.createElement('div');
+      line.className = 'wizard-step-line';
+      el.appendChild(line);
+    }
+  });
+}
+
+function wizGoToStep(step) {
+  _wizStep = step;
+  _wizRebuildDots();
+
+  [1,2,3,4,5].forEach(s => {
+    document.getElementById('wiz-step-' + s).classList.toggle('hidden', s !== step);
+  });
+
+  const steps = _wizPath === 'import' ? WIZ_STEPS_IMPORT : WIZ_STEPS_FRESH;
+  const idx   = steps.indexOf(step);
+  const backBtn = document.getElementById('wiz-btn-back');
+  const nextBtn = document.getElementById('wiz-btn-next');
+
+  backBtn.style.display = (step > 1 && idx > 0) ? '' : 'none';
+  backBtn.onclick = wizBack;
+
+  if (step === 1) {
+    nextBtn.style.display = 'none';
+  } else if (step === 5) {
+    nextBtn.textContent = 'Start Array';
+    nextBtn.style.display = '';
+    nextBtn.disabled = false;
+    nextBtn.onclick = wizStartArray;
+    wizBuildSummary();
+  } else {
+    nextBtn.textContent = 'Continue';
+    nextBtn.style.display = '';
+    nextBtn.disabled = false;
+    nextBtn.onclick = wizNext;
+  }
+
+  if (step === 4) wizRescanDisks();
+}
+
+function wizNext() {
+  const steps = _wizPath === 'import' ? WIZ_STEPS_IMPORT : WIZ_STEPS_FRESH;
+  const idx   = steps.indexOf(_wizStep);
+
+  // Validate step 2
+  if (_wizStep === 2) {
+    const hostname = document.getElementById('wiz-hostname').value.trim();
+    if (!hostname) { alert('Please enter a hostname.'); return; }
+
+    cockpit.spawn(['freeraid', 'set-hostname', hostname], { superuser: 'require' }).catch(() => {});
+
+    const mode = document.querySelector('input[name="wiz-net-mode"]:checked').value;
+    if (mode === 'static') {
+      const ip  = document.getElementById('wiz-ip').value.trim();
+      const gw  = document.getElementById('wiz-gateway').value.trim();
+      const dns = document.getElementById('wiz-dns').value.trim() || '8.8.8.8';
+      if (!ip || !gw) { alert('Please fill in IP Address and Gateway.'); return; }
+      let buf = '';
+      cockpit.spawn(['freeraid', 'network-info'], { superuser: 'require', err: 'ignore' })
+        .stream(d => { buf += d; })
+        .then(() => {
+          try {
+            const ifaces = JSON.parse(buf).interfaces;
+            if (ifaces && ifaces.length) {
+              cockpit.spawn(
+                ['freeraid', 'network-set', ifaces[0].name, 'static', ip, gw, dns],
+                { superuser: 'require' }
+              ).catch(() => {});
+            }
+          } catch(e) {}
+        }).catch(() => {});
+    }
+  }
+
+  if (idx < steps.length - 1) wizGoToStep(steps[idx + 1]);
+}
+
+function wizBack() {
+  const steps = _wizPath === 'import' ? WIZ_STEPS_IMPORT : WIZ_STEPS_FRESH;
+  const idx   = steps.indexOf(_wizStep);
+  if (idx > 0) wizGoToStep(steps[idx - 1]);
+}
+
+function wizNetModeChange() {
+  const mode = document.querySelector('input[name="wiz-net-mode"]:checked').value;
+  document.getElementById('wiz-static-fields').classList.toggle('hidden', mode !== 'static');
+}
+
+// Unraid import step
+function wizHandleUpload(input) {
+  if (!input.files || !input.files[0]) return;
+  wizHandleUploadFile(input.files[0]);
+}
+
+function wizHandleUploadFile(file) {
+  if (!file || !file.name.endsWith('.zip')) return;
+  const statusEl  = document.getElementById('wiz-import-status');
+  const previewEl = document.getElementById('wiz-import-content');
+  statusEl.textContent = 'Uploading...';
+  previewEl.innerHTML  = '';
+  document.getElementById('wiz-import-preview').classList.remove('hidden');
+
+  const reader = new FileReader();
+  reader.onload = e => {
+    const data    = new Uint8Array(e.target.result);
+    const tmpPath = `/tmp/unraid-wizard-${Date.now()}.zip`;
+
+    cockpit.file(tmpPath, { binary: true, superuser: 'require' })
+      .replace(data)
+      .then(() => {
+        statusEl.textContent = 'Scanning backup...';
+        let buf = '';
+        cockpit.spawn(['bash', '-c',
+          `TMPDIR=$(mktemp -d /tmp/unraid-wiz-XXXXXX) && ` +
+          `unzip -q "${tmpPath}" -d "$TMPDIR" 2>/dev/null || true; ` +
+          `CONFDIR=$(find "$TMPDIR" -name "disk.cfg" -o -name "ident.cfg" 2>/dev/null | head -1 | xargs dirname 2>/dev/null || echo ""); ` +
+          `if [ -z "$CONFDIR" ]; then CONFDIR=$(find "$TMPDIR" -type d -name "config" | head -1); fi; ` +
+          `SHARES=$(ls "$CONFDIR/shares/"*.cfg 2>/dev/null | wc -l || echo 0); ` +
+          `DOCKER=$(ls "$CONFDIR/plugins/dockerMan/templates-user/"*.xml 2>/dev/null | wc -l || echo 0); ` +
+          `HAS_NET=$([ -f "$CONFDIR/network.cfg" ] && echo 1 || echo 0); ` +
+          `echo "$TMPDIR|$CONFDIR|$SHARES|$DOCKER|$HAS_NET"`
+        ], { superuser: 'require' })
+          .stream(d => { buf += d; })
+          .then(() => {
+            const parts = buf.trim().split('|');
+            const [tmpdir, confdir, shares, docker, hasNet] = parts;
+            _wizTmpDir  = tmpdir  || null;
+            _wizConfDir = confdir || null;
+            if (!confdir) {
+              statusEl.textContent = 'Could not find Unraid config in zip. Continue to skip import.';
+              return;
+            }
+            previewEl.innerHTML = [
+              +shares  ? `<div class="preview-row"><span class="preview-count">${shares}</span> User shares</div>` : '',
+              +docker  ? `<div class="preview-row"><span class="preview-count">${docker}</span> Docker apps</div>` : '',
+              hasNet==='1' ? `<div class="preview-row"><span class="preview-count">✓</span> Network config</div>` : '',
+            ].filter(Boolean).join('') ||
+              '<div style="color:var(--text-dim);font-size:13px">Nothing recognizable found.</div>';
+            statusEl.textContent = 'Ready. Click Continue to import.';
+          })
+          .catch(() => { statusEl.textContent = 'Scan failed. Continue to skip.'; });
+      })
+      .catch(() => { statusEl.textContent = 'Upload failed.'; });
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+// Disk assignment in wizard
+function wizRescanDisks() {
+  const el = document.getElementById('wiz-disk-list');
+  if (!el) return;
+  el.innerHTML = '<div class="loading-msg">Scanning...</div>';
+  let buf = '';
+  cockpit.spawn(['freeraid', 'disks-scan'], { superuser: 'require', err: 'ignore' })
+    .stream(d => { buf += d; })
+    .then(() => {
+      try { renderWizardDisks(JSON.parse(buf.slice(buf.indexOf('[')))); }
+      catch(e) { el.innerHTML = '<div class="loading-msg">Scan failed.</div>'; }
+    })
+    .catch(() => { el.innerHTML = '<div class="loading-msg">Scan failed.</div>'; });
+}
+
+function renderWizardDisks(disks) {
+  const el = document.getElementById('wiz-disk-list');
+  if (!disks.length) {
+    el.innerHTML = '<div class="loading-msg">No disks detected. Check connections and rescan.</div>';
+    return;
+  }
+  el.innerHTML = disks.map(d => {
+    const opts = ['unassigned','array','parity','cache'].map(r =>
+      `<option value="${r}" ${(d.assigned ? d.role === r : r === 'unassigned') ? 'selected' : ''}>${
+        r === 'unassigned' ? '— Unassigned —' : r.charAt(0).toUpperCase() + r.slice(1)
+      }</option>`
+    ).join('');
+    const devSafe = d.device.replace(/'/g, "\\'");
+    return `<div class="wiz-disk-item">
+      <div class="wiz-disk-dev">${d.device}</div>
+      <div class="wiz-disk-info">
+        <div>${d.model || 'Unknown'}</div>
+        <div class="wiz-disk-model">${d.type || 'HDD'}${d.has_fs ? ' · ' + d.has_fs : ''}</div>
+      </div>
+      <div class="wiz-disk-size">${d.size}</div>
+      <select class="install-select" style="min-width:130px" onchange="wizAssignDisk('${devSafe}', this.value)">
+        ${opts}
+      </select>
+    </div>`;
+  }).join('');
+}
+
+function wizAssignDisk(dev, role) {
+  const cmd = role === 'unassigned'
+    ? ['freeraid', 'disks-unassign', dev]
+    : ['freeraid', 'disks-assign', dev, role];
+  cockpit.spawn(cmd, { superuser: 'require' }).catch(() => {});
+}
+
+function wizBuildSummary() {
+  const el = document.getElementById('wiz-summary');
+  let buf = '';
+  cockpit.spawn(['freeraid', 'disks-scan'], { superuser: 'require', err: 'ignore' })
+    .stream(d => { buf += d; })
+    .then(() => {
+      try {
+        const disks = JSON.parse(buf.slice(buf.indexOf('[')));
+        const a = disks.filter(d => d.assigned && d.role === 'array').length;
+        const p = disks.filter(d => d.assigned && d.role === 'parity').length;
+        const c = disks.filter(d => d.assigned && d.role === 'cache').length;
+        el.innerHTML = `
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px">
+            <div style="background:var(--bg3);padding:14px;border-radius:var(--radius);text-align:center">
+              <div style="font-size:28px;font-weight:700;color:var(--accent)">${a}</div>
+              <div style="font-size:12px;color:var(--text-dim);margin-top:4px">Array Disks</div>
+            </div>
+            <div style="background:var(--bg3);padding:14px;border-radius:var(--radius);text-align:center">
+              <div style="font-size:28px;font-weight:700;color:var(--yellow)">${p}</div>
+              <div style="font-size:12px;color:var(--text-dim);margin-top:4px">Parity</div>
+            </div>
+            <div style="background:var(--bg3);padding:14px;border-radius:var(--radius);text-align:center">
+              <div style="font-size:28px;font-weight:700;color:var(--blue)">${c}</div>
+              <div style="font-size:12px;color:var(--text-dim);margin-top:4px">Cache</div>
+            </div>
+          </div>
+          ${p === 0 ? '<div class="alert warning" style="margin-bottom:12px">No parity disk assigned — data will not be protected against drive failure.</div>' : ''}
+          ${a === 0 ? '<div class="alert error"   style="margin-bottom:12px">No array disks assigned — cannot start the array.</div>' : ''}
+        `;
+        document.getElementById('wiz-btn-next').disabled = (a === 0);
+      } catch(e) {}
+    });
+}
+
+function wizStartArray() {
+  const nextBtn = document.getElementById('wiz-btn-next');
+  const backBtn = document.getElementById('wiz-btn-back');
+  const logEl   = document.getElementById('wiz-start-log');
+
+  nextBtn.disabled = true;
+  backBtn.style.display = 'none';
+  logEl.style.display = '';
+  logEl.innerHTML = '';
+
+  function doImport() {
+    if (_wizPath !== 'import' || !_wizConfDir) return Promise.resolve();
+    return new Promise(resolve => {
+      cockpit.spawn(['freeraid', 'shares-import', _wizConfDir], { superuser: 'require', err: 'out' })
+        .stream(data => {
+          data.split('\n').filter(l => l.trim()).forEach(line => {
+            const p = document.createElement('p');
+            p.className = 'log-line log-info';
+            p.textContent = line.replace(/\x1b\[[0-9;]*m/g, '');
+            logEl.appendChild(p);
+          });
+        })
+        .then(() => resolve())
+        .catch(() => resolve());
+    });
+  }
+
+  doImport().then(() => {
+    cockpit.spawn(['freeraid', 'start'], { superuser: 'require', err: 'out' })
+      .stream(data => {
+        data.split('\n').filter(l => l.trim()).forEach(line => {
+          const p = document.createElement('p');
+          p.className = 'log-line log-info';
+          p.textContent = line.replace(/\x1b\[[0-9;]*m/g, '');
+          logEl.appendChild(p);
+          logEl.scrollTop = logEl.scrollHeight;
+        });
+      })
+      .then(() => {
+        if (_wizTmpDir) cockpit.spawn(['rm', '-rf', _wizTmpDir], { superuser: 'require' }).catch(() => {});
+        wizFinish();
+      })
+      .catch(err => {
+        const p = document.createElement('p');
+        p.className = 'log-line log-error';
+        p.textContent = 'Error: ' + String(err);
+        logEl.appendChild(p);
+        nextBtn.disabled = false;
+        nextBtn.textContent = 'Retry';
+        nextBtn.onclick = wizStartArray;
+        backBtn.style.display = '';
+      });
+  });
+}
+
+function wizFinish() {
+  cockpit.spawn(['freeraid', 'setup-complete'], { superuser: 'require' }).catch(() => {});
+  document.getElementById('wiz-summary').innerHTML = '';
+  document.getElementById('wiz-start-log').style.display = 'none';
+  document.getElementById('wiz-done-msg').classList.remove('hidden');
+
+  const nextBtn = document.getElementById('wiz-btn-next');
+  nextBtn.textContent = 'Go to Dashboard';
+  nextBtn.disabled = false;
+  nextBtn.onclick = () => {
+    document.getElementById('wizard-overlay').classList.add('hidden');
+    refreshStatus();
+    refreshSysinfo();
+  };
+  document.getElementById('wiz-btn-back').style.display = 'none';
 }

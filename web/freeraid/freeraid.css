@@ -1040,3 +1040,102 @@ body {
 }
 .toggle-switch input:checked + .toggle-slider { background: var(--accent); border-color: var(--accent); }
 .toggle-switch input:checked + .toggle-slider::before { transform: translateX(20px); background: #fff; }
+
+/* ── Setup Wizard ── */
+.wizard-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 11, 18, 0.93);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(4px);
+}
+.wizard-overlay.hidden { display: none; }
+
+.wizard-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  width: 680px;
+  max-width: 95vw;
+  max-height: 90vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.wizard-steps {
+  display: flex;
+  align-items: center;
+  padding: 28px 32px 0;
+}
+
+.wizard-step-dot {
+  width: 30px; height: 30px;
+  border-radius: 50%;
+  background: var(--bg3);
+  border: 2px solid var(--border);
+  color: var(--text-dim);
+  font-size: 12px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+  transition: all 0.2s;
+}
+.wizard-step-dot.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.wizard-step-dot.done   { background: var(--green);  border-color: var(--green);  color: #fff; }
+
+.wizard-step-line { flex: 1; height: 2px; background: var(--border); }
+
+.wizard-body { padding: 28px 32px; }
+
+.wizard-logo {
+  font-size: 26px; font-weight: 900;
+  color: var(--accent); letter-spacing: -1px;
+  margin-bottom: 14px;
+}
+
+.wizard-title   { font-size: 22px; font-weight: 700; margin-bottom: 8px; }
+.wizard-subtitle { color: var(--text-dim); font-size: 14px; margin-bottom: 24px; line-height: 1.5; }
+
+.wizard-choices { display: flex; flex-direction: column; gap: 12px; }
+
+.wizard-choice-btn {
+  display: flex; align-items: center; gap: 18px;
+  padding: 20px;
+  background: var(--bg3);
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer; text-align: left;
+  transition: border-color 0.15s, background 0.15s;
+  color: var(--text); width: 100%;
+}
+.wizard-choice-btn:hover { border-color: var(--accent); background: rgba(99,102,241,0.07); }
+.wizard-choice-icon  { font-size: 32px; flex-shrink: 0; }
+.wizard-choice-title { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+.wizard-choice-desc  { font-size: 13px; color: var(--text-dim); }
+
+.wizard-nav {
+  display: flex; align-items: center;
+  padding: 16px 32px 28px;
+  border-top: 1px solid var(--border);
+  gap: 8px; margin-top: auto;
+}
+
+.wiz-field       { margin-bottom: 16px; }
+.wiz-radio-group { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
+.wiz-radio       { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+
+.wiz-disk-item {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 14px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 8px;
+}
+.wiz-disk-dev   { font-family: monospace; font-weight: 600; min-width: 80px; }
+.wiz-disk-info  { flex: 1; min-width: 0; }
+.wiz-disk-model { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+.wiz-disk-size  { font-size: 13px; font-weight: 600; min-width: 56px; text-align: right; }
