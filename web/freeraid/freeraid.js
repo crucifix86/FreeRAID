@@ -2639,6 +2639,9 @@ function renderSpindown(drives) {
     `<option value="${o.value}">${o.label}</option>`
   ).join('');
 
+  const roleLabel = { array: 'Array', parity: 'Parity', cache: 'Cache' };
+  const roleColor = { array: 'var(--accent)', parity: 'var(--yellow)', cache: 'var(--blue)' };
+
   el.innerHTML = `
     <div class="spindown-grid">
       ${drives.map(d => {
@@ -2648,23 +2651,30 @@ function renderSpindown(drives) {
           : d.spindle === 'standby'
           ? `<span class="spindle-badge spindle-off">standby</span>`
           : '';
+        const roleBadge = d.role
+          ? `<span style="font-size:11px;font-weight:600;color:${roleColor[d.role] || 'var(--text-dim)'}">${roleLabel[d.role] || d.role}</span>`
+          : '';
+        const parityNote = d.role === 'parity' && d.value === 241
+          ? ` <span style="font-size:11px;color:var(--text-dim)">(default)</span>` : '';
         const selOpts = SPINDOWN_OPTIONS.map(o =>
           `<option value="${o.value}" ${o.value === d.value ? 'selected' : ''}>${o.label}</option>`
         ).join('');
         return `<div class="spindown-row">
           <div class="spindown-dev">${d.device}</div>
-          <div style="display:flex;align-items:center;gap:8px;flex:1">
-            ${spinBadge}
+          <div style="display:flex;align-items:center;gap:8px;min-width:90px">${roleBadge}</div>
+          <div style="display:flex;align-items:center;gap:8px;flex:1">${spinBadge}</div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <select class="install-select" style="min-width:200px"
+              onchange="setSpindown('${devSafe}', this.value)">
+              ${selOpts}
+            </select>${parityNote}
           </div>
-          <select class="install-select" style="min-width:220px"
-            onchange="setSpindown('${devSafe}', this.value)">
-            ${selOpts}
-          </select>
         </div>`;
       }).join('')}
     </div>
     <div style="margin-top:10px;font-size:12px;color:var(--text-dim)">
       Changes apply immediately and persist across reboots. Drives spin back up automatically when accessed.
+      Parity drives default to 30 minutes — they're only needed during sync, scrub, or rebuild.
     </div>`;
 }
 

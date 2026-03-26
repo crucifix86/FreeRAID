@@ -2211,25 +2211,45 @@ cmd_sysinfo() {
 # ── Disk spin-down ───────────────────────────────────────────────────────────────
 
 cmd_spindown_get() {
-    # Returns JSON: [{device, value, label, spindle_status}]
+    # Returns JSON: [{device, value, role, spindle}]
+    # Parity drives default to 241 (30 min) if not explicitly set — data/cache default to 0 (disabled)
     require hdparm
     local out="["
     local first=true
-    while IFS= read -r dev; do
+
+    # Build a set of parity devices for role detection
+    local parity_devs
+    parity_devs=$(jq -r '.array.parity[] | .device' "$CONFIG_FILE" 2>/dev/null || true)
+
+    while IFS='|' read -r dev role; do
         [ -b "$dev" ] || continue
+        local key; key=$(basename "$dev")
+
+        # Check if there's an explicit saved value
+        local has_saved
+        has_saved=$(jq -r --arg d "$key" 'if .spindown[$d] != null then "yes" else "no" end' "$CONFIG_FILE" 2>/dev/null || echo "no")
+
         local saved_val
-        saved_val=$(jq -r --arg d "$(basename "$dev")" '.spindown[$d] // 0' "$CONFIG_FILE" 2>/dev/null || echo "0")
+        if [ "$has_saved" = "yes" ]; then
+            saved_val=$(jq -r --arg d "$key" '.spindown[$d]' "$CONFIG_FILE" 2>/dev/null || echo "0")
+        elif [ "$role" = "parity" ]; then
+            saved_val=241  # 30 min default for parity
+        else
+            saved_val=0
+        fi
+
         local spindle="unknown"
         local hdparm_out; hdparm_out=$(hdparm -C "$dev" 2>&1 || true)
         local parsed; parsed=$(echo "$hdparm_out" | grep -oP '(?<=drive state is:  )[^\r\n]+' | head -1 | tr -d ' \r\n')
         [ -n "$parsed" ] && spindle="$parsed"
+
         $first || out+=","
-        out+="{\"device\":\"$dev\",\"value\":$saved_val,\"spindle\":\"$spindle\"}"
+        out+="{\"device\":\"$dev\",\"role\":\"$role\",\"value\":$saved_val,\"spindle\":\"$spindle\"}"
         first=false
     done < <(jq -r '
-        (.array.disks[]  | select(.enabled==true) | .device),
-        (.array.parity[] | .device),
-        (.array.cache[]  | select(.enabled==true) | .device)
+        (.array.disks[]  | select(.enabled==true) | .device + "|array"),
+        (.array.parity[] | .device + "|parity"),
+        (.array.cache[]  | select(.enabled==true) | .device + "|cache")
     ' "$CONFIG_FILE" 2>/dev/null | sort -u)
     out+="]"
     echo "$out"
@@ -2260,16 +2280,32 @@ cmd_spindown_set() {
 }
 
 cmd_spindown_apply() {
-    # Apply all saved spindown settings — called on array start
+    # Apply spindown settings on array start
+    # Uses saved value if set; parity drives default to 241 (30min) if never explicitly set
     command -v hdparm &>/dev/null || return 0
     local any=false
-    while IFS="=" read -r key val; do
-        # Find the full device path
-        local dev="/dev/$key"
+
+    while IFS='|' read -r dev role; do
         [ -b "$dev" ] || continue
-        [ "$val" -eq 0 ] && continue  # 0 = disabled, skip
+        local key; key=$(basename "$dev")
+        local has_saved
+        has_saved=$(jq -r --arg d "$key" 'if .spindown[$d] != null then "yes" else "no" end' "$CONFIG_FILE" 2>/dev/null || echo "no")
+        local val
+        if [ "$has_saved" = "yes" ]; then
+            val=$(jq -r --arg d "$key" '.spindown[$d]' "$CONFIG_FILE" 2>/dev/null || echo "0")
+        elif [ "$role" = "parity" ]; then
+            val=241
+        else
+            val=0
+        fi
+        [ "$val" -eq 0 ] && continue
         hdparm -S "$val" "$dev" &>/dev/null && any=true
-    done < <(jq -r '.spindown // {} | to_entries[] | .key + "=" + (.value | tostring)' "$CONFIG_FILE" 2>/dev/null)
+    done < <(jq -r '
+        (.array.disks[]  | select(.enabled==true) | .device + "|array"),
+        (.array.parity[] | .device + "|parity"),
+        (.array.cache[]  | select(.enabled==true) | .device + "|cache")
+    ' "$CONFIG_FILE" 2>/dev/null)
+
     $any && info "Spin-down settings applied."
     return 0
 }
