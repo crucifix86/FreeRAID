@@ -22,6 +22,16 @@ echo 1 > /proc/sys/net/ipv4/conf/"$TAP"/proxy_arp
 echo "==> Adding route: $VM_IP -> $TAP"
 ip route add "$VM_IP"/32 dev "$TAP"
 
+echo "==> Adding iptables rules for VM internet access"
+# Forward traffic between TAP and WiFi
+iptables -C FORWARD -i "$TAP" -o "$HOST_IF" -j ACCEPT 2>/dev/null || \
+    iptables -A FORWARD -i "$TAP" -o "$HOST_IF" -j ACCEPT
+iptables -C FORWARD -i "$HOST_IF" -o "$TAP" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
+    iptables -A FORWARD -i "$HOST_IF" -o "$TAP" -m state --state RELATED,ESTABLISHED -j ACCEPT
+# NAT so the VM's traffic exits via the host's IP
+iptables -t nat -C POSTROUTING -s "$VM_IP"/32 -o "$HOST_IF" -j MASQUERADE 2>/dev/null || \
+    iptables -t nat -A POSTROUTING -s "$VM_IP"/32 -o "$HOST_IF" -j MASQUERADE
+
 echo ""
 echo "Network ready. VM should use:"
 echo "  IP:      $VM_IP"
