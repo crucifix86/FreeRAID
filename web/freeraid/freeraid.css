@@ -1181,3 +1181,20 @@ body {
 .wiz-disk-info  { flex: 1; min-width: 0; }
 .wiz-disk-model { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
 .wiz-disk-size  { font-size: 13px; font-weight: 600; min-width: 56px; text-align: right; }
+
+/* ── Log viewer ── */
+.log-src-btn {
+  padding: 5px 14px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.log-src-btn:hover  { color: var(--text); border-color: var(--accent); }
+.log-src-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+.log-panel-tall { min-height: 500px; max-height: 70vh; }

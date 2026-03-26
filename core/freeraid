@@ -2205,6 +2205,22 @@ cmd_sysinfo() {
         "$hostname" "$uptime_sec" "$cpu_model" "$cpu_cores" "$kernel"
 }
 
+# ── Log viewer ───────────────────────────────────────────────────────────────────
+
+cmd_logs_get() {
+    local src="${1:-freeraid}" lines="${2:-500}"
+    case "$src" in
+        freeraid) tail -n "$lines" /var/log/freeraid.log 2>/dev/null || echo "(no freeraid log yet)" ;;
+        syslog)   tail -n "$lines" /var/log/syslog 2>/dev/null \
+                      || journalctl -n "$lines" --no-pager 2>/dev/null \
+                      || echo "(syslog not available)" ;;
+        kernel)   dmesg -T 2>/dev/null | tail -n "$lines" || dmesg | tail -n "$lines" ;;
+        samba)    tail -n "$lines" /var/log/samba/log.smbd 2>/dev/null \
+                      || echo "(no samba log yet)" ;;
+        *)        die "Unknown log source: $src" ;;
+    esac
+}
+
 # ── Setup wizard ─────────────────────────────────────────────────────────────────
 
 cmd_setup_status() {
@@ -2280,6 +2296,7 @@ case "${1:-help}" in
     mover-set-schedule)   cmd_mover_set_schedule "${2:-}" "${3:-}" ;;
     parity-get-schedule)  cmd_parity_get_schedule ;;
     parity-set-schedule)  cmd_parity_set_schedule "${2:-}" "${3:-}" "${4:-}" ;;
+    logs-get)             cmd_logs_get "${2:-}" "${3:-}" ;;
     setup-status)         cmd_setup_status ;;
     setup-complete)       cmd_setup_complete ;;
     install-deps)  cmd_install_deps ;;

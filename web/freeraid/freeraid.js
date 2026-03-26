@@ -178,7 +178,7 @@ function switchTab(name) {
   document.querySelectorAll('.sidebar-item[data-tab]').forEach(t => {
     t.classList.toggle('active', t.dataset.tab === name);
   });
-  ['dashboard','disks','settings','shares','docker','plugins','network','users'].forEach(t => {
+  ['dashboard','disks','settings','shares','docker','plugins','network','users','logs'].forEach(t => {
     document.getElementById('tab-'+t).classList.toggle('hidden', name !== t);
   });
   if (name === 'shares')  refreshShares();
@@ -186,6 +186,7 @@ function switchTab(name) {
   if (name === 'docker')  { refreshDocker(); refreshNetworks(); }
   if (name === 'network') refreshNetworkTab();
   if (name === 'users')   refreshUsers();
+  if (name === 'logs')    fetchLog();
 }
 
 // ── Logging ──────────────────────────────────────────────────────────────────
@@ -2535,4 +2536,64 @@ function wizFinish() {
     refreshSysinfo();
   };
   document.getElementById('wiz-btn-back').style.display = 'none';
+}
+
+// ── Log Viewer ────────────────────────────────────────────────────────────────
+
+let _logSrc      = 'freeraid';
+let _logTailInt  = null;
+
+function selectLogSrc(src, btn) {
+  _logSrc = src;
+  document.querySelectorAll('.log-src-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  fetchLog();
+}
+
+function fetchLog() {
+  const panel = document.getElementById('logs-view-panel');
+  if (!panel) return;
+  const lines = document.getElementById('log-lines-select').value;
+  panel.innerHTML = '<div class="loading-msg">Loading...</div>';
+
+  let buf = '';
+  cockpit.spawn(['freeraid', 'logs-get', _logSrc, lines], { superuser: 'require', err: 'out' })
+    .stream(d => { buf += d; })
+    .then(() => {
+      if (!buf.trim()) { panel.innerHTML = '<div class="loading-msg">No log entries found.</div>'; return; }
+      panel.innerHTML = '';
+      buf.split('\n').forEach(line => {
+        if (!line) return;
+        const p = document.createElement('p');
+        p.className = 'log-line ' + _logLineClass(line);
+        p.textContent = line;
+        panel.appendChild(p);
+      });
+      panel.scrollTop = panel.scrollHeight;
+    })
+    .catch(() => { panel.innerHTML = '<div class="loading-msg">Failed to load log.</div>'; });
+}
+
+function _logLineClass(line) {
+  const l = line.toLowerCase();
+  if (l.includes('error') || l.includes('fail') || l.includes('crit')) return 'log-error';
+  if (l.includes('warn'))  return 'log-warn';
+  if (l.includes('==>') || l.includes('success') || l.includes('started') || l.includes('active')) return 'log-success';
+  return 'log-info';
+}
+
+function clearLogsView() {
+  const panel = document.getElementById('logs-view-panel');
+  if (panel) panel.innerHTML = '';
+}
+
+function toggleLogTail() {
+  const on = document.getElementById('log-tail-toggle').checked;
+  if (on) {
+    fetchLog();
+    _logTailInt = setInterval(fetchLog, 5000);
+  } else {
+    clearInterval(_logTailInt);
+    _logTailInt = null;
+  }
 }

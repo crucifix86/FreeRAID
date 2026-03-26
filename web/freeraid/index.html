@@ -153,6 +153,9 @@
         <button class="sidebar-item" data-tab="docker" onclick="switchTab('docker')">
           <span class="si-icon">⬡</span> Docker
         </button>
+        <button class="sidebar-item" data-tab="logs" onclick="switchTab('logs')">
+          <span class="si-icon">≡</span> Logs
+        </button>
         <button class="sidebar-item" data-tab="plugins" onclick="switchTab('plugins')">
           <span class="si-icon">⊕</span> Plugins
         </button>
@@ -759,6 +762,44 @@
         </div>
 
       </div><!-- end docker -->
+
+      <!-- ── LOGS TAB ── -->
+      <div id="tab-logs" class="hidden">
+
+        <div class="settings-section">
+          <h2 class="settings-section-title">
+            System Logs
+            <div style="display:flex;gap:8px;align-items:center;margin-left:auto">
+              <label class="wiz-radio" style="font-size:12px;font-weight:400;text-transform:none;letter-spacing:0">
+                <input type="checkbox" id="log-tail-toggle" onchange="toggleLogTail()"> Live tail
+              </label>
+              <button class="btn btn-sm btn-ghost" onclick="clearLogsView()">Clear</button>
+            </div>
+          </h2>
+
+          <!-- Source selector -->
+          <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+            <button class="log-src-btn active" data-src="freeraid" onclick="selectLogSrc('freeraid', this)">FreeRAID Log</button>
+            <button class="log-src-btn" data-src="syslog" onclick="selectLogSrc('syslog', this)">Syslog</button>
+            <button class="log-src-btn" data-src="kernel" onclick="selectLogSrc('kernel', this)">Kernel (dmesg)</button>
+            <button class="log-src-btn" data-src="samba" onclick="selectLogSrc('samba', this)">Samba</button>
+            <div style="margin-left:auto;display:flex;align-items:center;gap:6px">
+              <label class="install-label" style="margin:0">Lines</label>
+              <select class="install-select" id="log-lines-select" onchange="fetchLog()" style="min-width:80px">
+                <option value="100">100</option>
+                <option value="250">250</option>
+                <option value="500" selected>500</option>
+                <option value="1000">1000</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="log-panel log-panel-tall" id="logs-view-panel">
+            <div class="loading-msg">Select a log source above.</div>
+          </div>
+        </div>
+
+      </div><!-- end logs -->
 
       <!-- ── PLUGINS TAB ── -->
       <div id="tab-plugins" class="hidden">
