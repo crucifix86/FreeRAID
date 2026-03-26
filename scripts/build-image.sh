@@ -151,7 +151,17 @@ cp "$REPO_DIR/web/freeraid/manifest.json" \
    "$REPO_DIR/web/freeraid/index.html" \
    "$REPO_DIR/web/freeraid/freeraid.css" \
    "$REPO_DIR/web/freeraid/freeraid.js" \
+   "$REPO_DIR/web/freeraid/terminal.html" \
+   "$REPO_DIR/web/freeraid/xterm.js" \
+   "$REPO_DIR/web/freeraid/xterm.css" \
+   "$REPO_DIR/web/freeraid/xterm-addon-fit.js" \
    "$ROOTFS/usr/share/cockpit/freeraid/"
+
+# Hide Cockpit chrome — FreeRAID owns the UI
+cp "$REPO_DIR/web/branding.css" "$ROOTFS/usr/share/cockpit/branding/debian/branding.css"
+
+# Custom login page (themed + remember-login)
+cp "$REPO_DIR/web/login.html" "$ROOTFS/usr/share/cockpit/static/login.html"
 
 # VERSION
 mkdir -p "$ROOTFS/etc/freeraid"
@@ -257,6 +267,29 @@ ProtocolHeader = X-Forwarded-Proto
 # Allow freeraid user without pam restrictions
 CONF
 [ -f /etc/cockpit/disallowed-users ] && sed -i '/^root$/d' /etc/cockpit/disallowed-users || true
+
+# Hide built-in Cockpit nav pages that FreeRAID replaces
+for pkg in networkmanager storaged packagekit apps; do
+    mkdir -p /usr/local/share/cockpit/$pkg
+    echo '{"hidden": true}' > /usr/local/share/cockpit/$pkg/manifest.json
+done
+
+# Hide entire Cockpit sidebar/chrome — FreeRAID owns the UI
+mkdir -p /usr/local/share/cockpit/branding-debian
+cat > /usr/local/share/cockpit/branding-debian/branding.css << 'BRANDEOF'
+/* FreeRAID — hide Cockpit chrome, FreeRAID owns the UI */
+#nav-system, #sidebar-toggle, #hosts-sel,
+.pf-c-page__sidebar, .ct-switcher, .header-actions, #nav-hosts {
+  display: none !important;
+}
+#content, .area-ct-content, .ct-page-fill, .pf-c-page__main {
+  margin-left: 0 !important;
+  padding-left: 0 !important;
+}
+#topnav, .pf-c-masthead, .ct-topbar {
+  display: none !important;
+}
+BRANDEOF
 
 # Network: DHCP on all interfaces via networkd
 mkdir -p /etc/systemd/network

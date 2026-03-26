@@ -1,0 +1,220 @@
+body.login-pf {
+    background: url("bg-plain.jpg") no-repeat 50% 0;
+    background-size: cover;
+    background-color: #0f1117;
+}
+
+#badge {
+    width: 80px;
+    height: 80px;
+    background-image: url("logo.png");
+    background-size: contain;
+    background-repeat: no-repeat;
+}
+
+#brand {
+    font-size: 18pt;
+    text-transform: uppercase;
+}
+
+#brand:before {
+    content: "${NAME}";
+}
+
+#index-brand:before {
+    content: "${NAME}";
+}
+
+/* ── FreeRAID: hide Cockpit chrome ── */
+#nav-system,
+#sidebar-toggle,
+#hosts-sel,
+.pf-c-page__sidebar,
+.ct-switcher,
+.header-actions,
+#nav-hosts,
+#topnav,
+.pf-c-masthead,
+.ct-topbar {
+  display: none !important;
+}
+#content,
+.area-ct-content,
+.ct-page-fill,
+.pf-c-page__main {
+  margin-left: 0 !important;
+  padding-left: 0 !important;
+}
+
+/* Collapse the Cockpit grid sidebar column so our iframe fills everything */
+.page { --nav-width: 0 !important; }
+.page .sidebar, .page .area-ct-subnav { display: none !important; }
+
+/* ── FreeRAID Login Page Theme ── */
+body.login-pf {
+  background: #0f1117 !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  min-height: 100vh !important;
+  grid-template-areas: none !important;
+  grid-template-columns: 1fr !important;
+  grid-template-rows: 1fr !important;
+  padding: 0 !important;
+}
+
+/* Hide the badge/logo image and recent-hosts panel */
+.login-pf #badge,
+#recent-hosts,
+.login-pf .details,
+#login-details {
+  display: none !important;
+}
+
+/* Center the main container card */
+.login-pf .container#main {
+  background: #1a1d27 !important;
+  border: 1px solid #2e3348 !important;
+  border-radius: 12px !important;
+  color: #e2e5f0 !important;
+  padding: 40px 44px !important;
+  width: 100% !important;
+  max-width: 420px !important;
+  box-shadow: 0 8px 40px rgba(0,0,0,0.5) !important;
+  margin: 0 auto !important;
+}
+
+/* FreeRAID brand title replacing the ${NAME} placeholder */
+.login-pf #brand {
+  font-size: 28px !important;
+  font-weight: 800 !important;
+  letter-spacing: -0.5px !important;
+  color: #6366f1 !important;
+  text-transform: none !important;
+  margin-bottom: 8px !important;
+  padding-bottom: 0 !important;
+}
+.login-pf #brand::before {
+  content: "FreeRAID" !important;
+}
+
+/* Subtitle under the brand */
+.login-pf #brand::after {
+  content: "Server Management";
+  display: block;
+  font-size: 13px;
+  font-weight: 400;
+  color: #7b82a0;
+  letter-spacing: 0;
+  margin-top: 2px;
+  margin-bottom: 20px;
+}
+
+/* Labels */
+.login-pf .container .control-label {
+  color: #7b82a0 !important;
+  font-size: 11px !important;
+  font-weight: 600 !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.5px !important;
+}
+
+/* Input fields */
+.login-pf .form-control[type=text],
+.login-pf .form-control[type=password] {
+  background: #232635 !important;
+  border: 1px solid #2e3348 !important;
+  border-bottom-color: #2e3348 !important;
+  border-radius: 6px !important;
+  color: #e2e5f0 !important;
+  padding: 8px 12px !important;
+  font-size: 14px !important;
+}
+.login-pf .form-control[type=text]:focus,
+.login-pf .form-control[type=password]:focus {
+  border-color: #6366f1 !important;
+  border-bottom-color: #6366f1 !important;
+  border-bottom-width: 1px !important;
+  outline: none !important;
+  box-shadow: 0 0 0 2px rgba(99,102,241,0.25) !important;
+  padding-bottom: 8px !important;
+}
+
+/* Password toggle button */
+.login-pf .pf-c-button.pf-m-control {
+  background: #232635 !important;
+  border: 1px solid #2e3348 !important;
+  border-left: none !important;
+  border-radius: 0 6px 6px 0 !important;
+  color: #7b82a0 !important;
+}
+.login-pf .pf-c-button.pf-m-control:hover {
+  color: #e2e5f0 !important;
+}
+.login-pf .password-with-toggle .form-control[type=password],
+.login-pf .password-with-toggle .form-control[type=text] {
+  border-radius: 6px 0 0 6px !important;
+}
+
+/* Remember me row */
+.login-pf .remember-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+.login-pf .remember-row input[type=checkbox] {
+  width: 15px;
+  height: 15px;
+  accent-color: #6366f1;
+  cursor: pointer;
+}
+.login-pf .remember-row label {
+  font-size: 12px;
+  color: #7b82a0;
+  cursor: pointer;
+  font-weight: 400;
+}
+
+/* Login button */
+.login-pf .pf-c-button.pf-m-primary.login-button {
+  background: #6366f1 !important;
+  border-color: #6366f1 !important;
+  border-radius: 6px !important;
+  font-size: 14px !important;
+  font-weight: 600 !important;
+  height: 42px !important;
+  margin-top: 8px !important;
+}
+.login-pf .pf-c-button.pf-m-primary.login-button:hover {
+  background: #4f46e5 !important;
+  border-color: #4f46e5 !important;
+}
+
+/* Error alert */
+.login-pf .pf-c-alert.pf-m-danger {
+  background: rgba(239,68,68,0.1) !important;
+  border-color: #ef4444 !important;
+  border-radius: 6px !important;
+  color: #e2e5f0 !important;
+}
+.login-pf .pf-c-alert.pf-m-danger > svg,
+.login-pf .pf-c-alert.pf-m-danger .pf-c-alert__title {
+  color: #ef4444 !important;
+}
+
+/* "Other options" link */
+.login-pf #option-group a,
+.login-pf a {
+  color: #6366f1 !important;
+  font-size: 12px !important;
+}
+.login-pf #option-group a:hover,
+.login-pf a:hover {
+  color: #818cf8 !important;
+}
+
+/* Dark overlay removed — we want clean dark bg */
+.pf-theme-dark .login-pf::after {
+  display: none !important;
+}

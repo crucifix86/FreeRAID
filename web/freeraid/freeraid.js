@@ -167,8 +167,12 @@ let currentVer  = null;
 
 // ── Tab switching ─────────────────────────────────────────────────────────────
 
+function openWebUIAccounts() {
+  window.open('/cockpit/@localhost/users/index.html', '_blank');
+}
+
 function switchTab(name) {
-  document.querySelectorAll('.tab').forEach(t => {
+  document.querySelectorAll('.sidebar-item[data-tab]').forEach(t => {
     t.classList.toggle('active', t.dataset.tab === name);
   });
   ['dashboard','disks','settings','shares','docker','plugins','network','users'].forEach(t => {
@@ -255,11 +259,11 @@ function applyStatus(data) {
 
   const badge = document.getElementById('array-badge');
   badge.textContent = arrayState === 'started' ? '●  Array Started' : '●  Array Stopped';
-  badge.className   = 'array-badge ' + (arrayState === 'started' ? 'started' : 'stopped');
+  badge.className   = 'array-status-badge ' + (arrayState === 'started' ? 'started' : 'stopped');
 
   const btn = document.getElementById('btn-start-stop');
   btn.textContent = arrayState === 'started' ? 'Stop Array' : 'Start Array';
-  btn.className   = 'btn ' + (arrayState === 'started' ? 'btn-danger' : 'btn-primary');
+  btn.className   = 'btn array-btn ' + (arrayState === 'started' ? 'btn-danger' : 'btn-primary');
 
   document.getElementById('array-total').textContent = data.array_total || '—';
   if (data.pool) {
@@ -677,6 +681,10 @@ function editHostname() {
   cockpit.spawn(['freeraid', 'set-hostname', name], { superuser: 'require' })
     .then(() => { document.getElementById('si-hostname').textContent = name; })
     .catch(err => alert('Failed: ' + err));
+}
+
+function sysLogout() {
+  cockpit.logout();
 }
 
 function sysReboot() {

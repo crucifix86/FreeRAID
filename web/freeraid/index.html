@@ -9,33 +9,55 @@
 </head>
 <body>
   <div id="app">
-    <header class="topbar">
-      <div class="topbar-left">
-        <span class="logo">FreeRAID</span>
-        <span class="version" id="version">v0.1.2</span>
-      </div>
-      <div class="topbar-right">
-        <span class="array-badge" id="array-badge">●  Loading...</span>
-        <button class="btn btn-primary" id="btn-start-stop" onclick="toggleArray()">Start Array</button>
-        <button class="btn btn-secondary" id="btn-sync" onclick="runSync()">Sync Parity</button>
-        <button class="btn btn-secondary" id="btn-scrub" onclick="runScrub()">Parity Check</button>
-        <button class="btn btn-ghost" onclick="sysReboot()">Reboot</button>
-        <button class="btn btn-ghost" onclick="sysShutdown()">Shutdown</button>
-      </div>
-    </header>
 
-    <!-- Tab bar -->
-    <nav class="tabbar">
-      <button class="tab active" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard</button>
-      <button class="tab" data-tab="settings" onclick="switchTab('settings')">Settings</button>
-      <button class="tab" data-tab="disks" onclick="switchTab('disks')">Disks</button>
-      <button class="tab" data-tab="shares" onclick="switchTab('shares')">Shares</button>
-      <button class="tab" data-tab="users" onclick="switchTab('users')">Users</button>
-      <button class="tab" data-tab="network" onclick="switchTab('network')">Network</button>
-      <button class="tab" data-tab="docker" onclick="switchTab('docker')">Docker</button>
-      <button class="tab" data-tab="plugins" onclick="switchTab('plugins')">Plugins</button>
-    </nav>
+    <!-- ── Sidebar ── -->
+    <aside class="sidebar">
+      <div class="sidebar-brand">
+        <span class="sidebar-logo">FreeRAID</span>
+        <span class="sidebar-version" id="version">—</span>
+      </div>
 
+      <nav class="sidebar-nav">
+        <div class="sidebar-section-label">Main</div>
+        <button class="sidebar-item active" data-tab="dashboard" onclick="switchTab('dashboard')">
+          <span class="si-icon">▦</span> Dashboard
+        </button>
+        <button class="sidebar-item" data-tab="disks" onclick="switchTab('disks')">
+          <span class="si-icon">⬡</span> Disks
+        </button>
+        <button class="sidebar-item" data-tab="shares" onclick="switchTab('shares')">
+          <span class="si-icon">⊟</span> Shares
+        </button>
+        <button class="sidebar-item" data-tab="users" onclick="switchTab('users')">
+          <span class="si-icon">◎</span> Share Users
+        </button>
+        <button class="sidebar-item" data-tab="network" onclick="switchTab('network')">
+          <span class="si-icon">⊞</span> Network
+        </button>
+        <button class="sidebar-item" data-tab="docker" onclick="switchTab('docker')">
+          <span class="si-icon">⬡</span> Docker
+        </button>
+        <button class="sidebar-item" data-tab="plugins" onclick="switchTab('plugins')">
+          <span class="si-icon">⊕</span> Plugins
+        </button>
+
+        <div class="sidebar-section-label" style="margin-top:16px">Settings</div>
+        <button class="sidebar-item" onclick="openWebUIAccounts()">
+          <span class="si-icon">👤</span> WebUI Accounts ↗
+        </button>
+        <button class="sidebar-item" data-tab="settings" onclick="switchTab('settings')">
+          <span class="si-icon">⚙</span> System & Updates
+        </button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <button class="sidebar-item sidebar-item-sm" onclick="sysLogout()">Log Out</button>
+        <button class="sidebar-item sidebar-item-sm" onclick="sysReboot()">Reboot</button>
+        <button class="sidebar-item sidebar-item-sm" onclick="sysShutdown()">Shutdown</button>
+      </div>
+    </aside>
+
+    <!-- ── Main content ── -->
     <div class="content">
 
       <!-- Update notification (shown on all tabs) -->
@@ -114,6 +136,18 @@
           <h2 class="section-title">Array Drives</h2>
           <div class="drive-grid" id="drive-grid">
             <div class="loading-msg">Loading drives...</div>
+          </div>
+        </section>
+
+        <!-- Array Controls -->
+        <section class="array-controls-panel">
+          <div class="array-status-row">
+            <div class="array-status-badge" id="array-badge">● Loading...</div>
+          </div>
+          <div class="array-action-row">
+            <button class="btn btn-primary array-btn" id="btn-start-stop" onclick="toggleArray()">Start Array</button>
+            <button class="btn btn-secondary array-btn" id="btn-sync" onclick="runSync()">Sync Parity</button>
+            <button class="btn btn-secondary array-btn" id="btn-scrub" onclick="runScrub()">Parity Check</button>
           </div>
         </section>
 
@@ -226,9 +260,12 @@
 
         <div class="settings-section">
           <h2 class="settings-section-title">
-            User Accounts
+            Share Users
             <button class="btn btn-sm btn-primary" style="margin-left:auto" onclick="toggleAddUser()">+ Add User</button>
           </h2>
+          <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px">
+            These accounts are for <strong>network share access</strong> (Samba/SMB). To manage web UI login accounts, use <strong>Accounts</strong> in the Cockpit sidebar.
+          </div>
 
           <div id="add-user-form" class="hidden settings-card" style="margin-bottom:12px">
             <div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:end">

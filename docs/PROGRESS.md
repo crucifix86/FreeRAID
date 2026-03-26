@@ -10,7 +10,7 @@ Built on Debian Linux + MergerFS + SnapRAID + Cockpit web UI.
 
 ---
 
-## Current Version: v0.3.0
+## Current Version: v0.4.0
 
 ---
 
@@ -92,14 +92,27 @@ Built on Debian Linux + MergerFS + SnapRAID + Cockpit web UI.
   reallocated/pending/uncorrectable sectors, full ATA attribute table, self-test history
 
 ### Web UI (Cockpit Plugin)
-- **Dashboard** — array start/stop, parity sync, live disk cards with usage bars,
-  array capacity, used/free, last sync time, operation log; SMART details per drive
+- **Sidebar layout** — FreeRAID owns the full UI; custom left sidebar replaces Cockpit nav
+  (Cockpit chrome, sidebar, and topbar all hidden via branding.css override)
+- **Dashboard** — array status + controls panel (Start/Stop, Sync Parity, Parity Check),
+  live disk cards with usage bars, array capacity, used/free, last sync time, operation log,
+  SMART details per drive; CPU/RAM/Network sparkline graphs
 - **Disks** — all detected drives, role assignment modal (Array/Parity/Cache),
   missing/rebuilding drive states, reassign when stopped
 - **Shares** — share list with badges, create form, Unraid zip uploader
-- **Docker** — container cards with ports/IP, context menu, app browser, install form
+- **Docker** — container cards with ports/IP, context menu, app browser, install form,
+  network type selector (Bridge/Host/Custom macvlan + static IP), Docker Networks panel,
+  per-container xterm.js terminals (open in new tab)
+- **Network** — hostname editor, per-interface DHCP/static IP config
+- **Share Users** — Samba user management (add, delete, set password)
 - **Settings** — version info, check for updates, Update Now with live log
 - **Plugins** — placeholder (coming soon)
+- **Sidebar footer** — Log Out, Reboot, Shutdown
+- **WebUI Accounts** — links to Cockpit's own user management (Settings section)
+
+### Login Page
+- Custom FreeRAID-themed login (dark, centered card, purple accent — matches the UI)
+- "Remember login" checkbox — saves credentials to localStorage, auto-fills on next visit
 
 ### Update System
 - `freeraid update` — fetch latest release tarball from GitHub, apply in place
@@ -195,11 +208,16 @@ FreeRAID/
 │   ├── create-usb.sh           ← writes live image to USB drive
 │   ├── install.sh              ← traditional Debian installer (alternative)
 │   └── release.sh              ← cut a GitHub release with component tarball
-├── web/freeraid/
-│   ├── manifest.json           ← Cockpit plugin registration
-│   ├── index.html              ← tab-based SPA
-│   ├── freeraid.css            ← dark theme UI
-│   └── freeraid.js             ← cockpit.spawn() API calls, UI logic
+├── web/
+│   ├── branding.css            ← hides Cockpit chrome (deployed to cockpit branding dir)
+│   ├── login.html              ← FreeRAID-themed login page with remember-login
+│   └── freeraid/
+│       ├── manifest.json       ← Cockpit plugin registration
+│       ├── index.html          ← sidebar SPA
+│       ├── freeraid.css        ← dark theme UI
+│       ├── freeraid.js         ← cockpit.spawn() API calls, UI logic
+│       ├── terminal.html       ← standalone xterm.js terminal (per-container)
+│       ├── xterm.js / xterm.css / xterm-addon-fit.js  ← bundled xterm 5.3.0
 ├── vm/
 │   ├── create-vm.sh            ← QEMU VM with 7 virtual disks
 │   ├── start-vm.sh             ← start VM (TAP networking, fallback to NAT)
@@ -254,6 +272,8 @@ Run `sudo vm/setup-vm-network.sh` once before starting the VM to set up TAP + pr
 | v0.2.1 | Multi-select delete for Docker containers |
 | v0.2.2 | Fix update flow — no stale "update available" after applying |
 | v0.3.0 | App browser (3000+ apps), Docker context menu, SMART data, drive recovery, degraded mode, VM gets own LAN IP |
+| v0.3.1 | Network tab, Share Users tab, per-container xterm.js terminals, Docker network type selector + macvlan panel |
+| v0.4.0 | Custom sidebar replaces Cockpit nav, FreeRAID login theme + remember login, array controls on dashboard, logout button |
 
 ---
 
@@ -266,11 +286,16 @@ Run `sudo vm/setup-vm-network.sh` once before starting the VM to set up TAP + pr
 - [x] Docker context menu — WebUI, Terminal, Edit, Logs, Delete
 - [x] Drive SMART data in UI — health, temp, attributes, self-test
 - [x] Drive recovery / degraded mode — replace failed drive, rebuild from parity
+- [x] User management — add Samba users, set passwords from UI
+- [x] Network settings tab (static IP, hostname from web UI)
+- [x] Custom sidebar — FreeRAID owns the full UI, Cockpit chrome hidden
+- [x] Per-container xterm.js terminals (open in new tab)
+- [x] Docker network type selector (Bridge / Host / Custom macvlan + static IP)
+- [x] Docker Networks panel — create/delete macvlan networks
+- [x] Custom login page — FreeRAID theme + remember login
 - [ ] First-boot Unraid import on live USB (auto-import from config/unraid-backup.zip)
 - [ ] First-boot wizard (hostname, network, disk assignment flow)
-- [ ] User management — add Samba users, set passwords from UI
 - [ ] NFS export configuration in UI
-- [ ] Network settings tab (set static IP, hostname from web UI)
 - [ ] Plugin system — real implementation
 
 ---
@@ -307,21 +332,25 @@ Features Unraid has that FreeRAID doesn't yet. Grouped by area.
 - [x] Install form with port conflict detection + auto-assignment
 - [x] Network type selector (Bridge / Host / Custom with static IP)
 - [x] Context menu — WebUI, Terminal, Edit, Logs, Delete
+- [x] Per-container xterm.js terminals in new browser tab
+- [x] Network type selector (Bridge / Host / Custom macvlan + static IP)
+- [x] Docker Networks panel — create/delete macvlan networks
 - [ ] Auto-update containers
-- [ ] Custom Docker networks UI (create macvlan/bridge networks)
 
 ### VMs
 - [ ] VM manager (KVM/QEMU) — create, start, stop, delete VMs from UI
 
 ### Users & Shares
-- [ ] User accounts with per-share permissions
+- [x] User management — add/delete Samba users, set passwords from UI
+- [ ] Per-share user permissions
 - [ ] Share-level passwords
 - [ ] Advanced NFS export options in UI
 
 ### Network & System
-- [ ] Network settings tab (static IP, hostname from UI)
+- [x] Network settings tab (static IP / DHCP, hostname from UI)
+- [x] Custom login page (FreeRAID themed + remember login)
 - [ ] UPS support (NUT integration)
-- [x] Web terminal — Cockpit terminal tab (via context menu)
+- [x] Web terminal — per-container xterm.js terminals in new tab
 - [ ] Tailscale / VPN built-in
 
 ### Plugins
