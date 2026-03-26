@@ -10,7 +10,7 @@ Built on Debian Linux + MergerFS + SnapRAID + Cockpit web UI.
 
 ---
 
-## Current Version: v0.2.2
+## Current Version: v0.3.0
 
 ---
 
@@ -33,15 +33,29 @@ Built on Debian Linux + MergerFS + SnapRAID + Cockpit web UI.
 - Guards: can't reassign while array is running
 
 ### Docker
-- `freeraid docker-list` — list all containers and running state (JSON)
+- `freeraid docker-list` — list containers with state, ports, host IP, WebUI URL (JSON)
 - `freeraid docker-start <name>` — start a container via docker compose
 - `freeraid docker-stop <name>` — stop a container via docker compose
 - `freeraid docker-logs <name>` — stream last 100 lines of container logs
 - `freeraid docker-delete <name>` — remove a compose file
-- Compose files stored at `/etc/freeraid/compose/` (JSON format, imported from Unraid templates)
-- Docker tab in web UI — running/stopped summary, per-container cards with Start/Stop/Logs
+- `freeraid ports-used` — JSON list of all in-use host ports (docker + ss)
+- Compose files stored at `/etc/freeraid/compose/` as `<name>.docker-compose.yml`
+- Container cards show host IP, mapped port badges, running state
+- Context menu (⋮): Open Web UI, Terminal (Cockpit), Edit, Logs, Delete
+- WebUI URL resolved from `window.location.hostname` (always correct regardless of IP changes)
 - Multi-select delete: checkboxes + "Select all" + bulk delete with confirmation
-  (stops running containers before removing compose files)
+
+### Community App Browser
+- `freeraid apps-fetch` — download Unraid Community Applications feed (~3000+ Docker apps)
+- `freeraid apps-search <query>` — search with relevance scoring
+- `freeraid apps-get <name>` — get full app JSON including config template
+- `freeraid apps-install <name> [config-json]` — generate docker-compose from template
+- `freeraid apps-categories` — list all categories
+- App browser in Docker tab: search, filter by category, app icons from GitHub/Docker Hub
+- Install form: auto port conflict detection, suggests next free port
+- Network type selector: Bridge (NAT) / Host (share host network) / Custom (named Docker network + optional static IP)
+- Install paths auto-remapped from `/mnt/user/` to `/mnt/freeraid/` on install
+- docker-compose v1/v2 fallback helper (`docker compose` → `docker-compose`)
 
 ### Shares
 - `freeraid shares-list` — JSON list of all shares
@@ -61,12 +75,29 @@ Built on Debian Linux + MergerFS + SnapRAID + Cockpit web UI.
   Cannot auto-map on migration. Users assign drives manually via Disks tab.
   This is intentional — drives get re-identified on the new system.
 
+### Drive Recovery & Degraded Mode
+- UUID-based drive tracking — drives are identified by UUID, survives `/dev/sdX` renumbering
+- Degraded mode — array starts with a missing drive, files on other disks remain accessible
+- `freeraid replace-disk <slot> <dev>` — format replacement, mount, run `snapraid fix`, re-sync
+- `freeraid replace-disk-bg <slot> <dev>` — same but backgrounded (PID + status file)
+- `freeraid replace-disk-status <slot>` — poll rebuild progress from UI
+- `freeraid registry-sync` — scan mounted drives, update UUID/serial in config
+- Dashboard: missing drive cards with Replace button, rebuilding progress bar
+- When array is stopped: reassign drives via dropdown, unassigned drive cards visible
+
+### SMART Data
+- `freeraid smart <dev>` — full SMART data via `smartctl -j -x` (health, temp, hours, attributes)
+- `freeraid smart-test <dev> <short|long|conveyance>` — trigger self-test
+- SMART modal on each drive card: health status, temperature, power-on hours,
+  reallocated/pending/uncorrectable sectors, full ATA attribute table, self-test history
+
 ### Web UI (Cockpit Plugin)
 - **Dashboard** — array start/stop, parity sync, live disk cards with usage bars,
-  array capacity, used/free, last sync time, operation log
-- **Disks** — all detected drives, role assignment modal (Array/Parity/Cache)
+  array capacity, used/free, last sync time, operation log; SMART details per drive
+- **Disks** — all detected drives, role assignment modal (Array/Parity/Cache),
+  missing/rebuilding drive states, reassign when stopped
 - **Shares** — share list with badges, create form, Unraid zip uploader
-- **Docker** — container list, running state, start/stop/logs, multi-select delete
+- **Docker** — container cards with ports/IP, context menu, app browser, install form
 - **Settings** — version info, check for updates, Update Now with live log
 - **Plugins** — placeholder (coming soon)
 
@@ -158,8 +189,7 @@ FreeRAID/
 │   └── freeraid.conf.json      ← config schema / default config
 ├── importer/
 │   └── unraid-import.py        ← Unraid config → FreeRAID converter
-├── compose/
-│   └── *.docker-compose.yml    ← imported Unraid Docker templates (65 apps)
+├── compose/                    ← user-installed app compose files (gitignored)
 ├── scripts/
 │   ├── build-image.sh          ← builds live OS squashfs + initrd
 │   ├── create-usb.sh           ← writes live image to USB drive
@@ -172,7 +202,10 @@ FreeRAID/
 │   └── freeraid.js             ← cockpit.spawn() API calls, UI logic
 ├── vm/
 │   ├── create-vm.sh            ← QEMU VM with 7 virtual disks
-│   └── start-vm.sh             ← start VM after install
+│   ├── start-vm.sh             ← start VM (TAP networking, fallback to NAT)
+│   ├── setup-vm-network.sh     ← TAP + proxy ARP: gives VM its own LAN IP
+│   ├── teardown-vm-network.sh  ← remove TAP interface
+│   └── vm-netplan.yaml         ← static IP config for inside the VM
 ├── build/                      ← gitignored, output of build-image.sh
 │   ├── vmlinuz
 │   ├── initrd.gz
@@ -193,12 +226,13 @@ QEMU VM on the dev machine with:
 - `vdf` 8G — parity
 - `vdg` 4G — cache
 
-Access:
+Access (with TAP networking active):
 ```bash
-ssh root@localhost -p 2222
+ssh root@192.168.1.150
 # Web UI:
-https://localhost:9090  (login: doug / freeraid)
+https://192.168.1.150:9090  (login: freeraid / freeraid)
 ```
+Run `sudo vm/setup-vm-network.sh` once before starting the VM to set up TAP + proxy ARP.
 
 ---
 
@@ -219,6 +253,7 @@ https://localhost:9090  (login: doug / freeraid)
 | v0.2.0 | Docker tab — list/start/stop/logs for compose-managed containers |
 | v0.2.1 | Multi-select delete for Docker containers |
 | v0.2.2 | Fix update flow — no stale "update available" after applying |
+| v0.3.0 | App browser (3000+ apps), Docker context menu, SMART data, drive recovery, degraded mode, VM gets own LAN IP |
 
 ---
 
@@ -227,9 +262,12 @@ https://localhost:9090  (login: doug / freeraid)
 - [x] Docker tab — list containers, start/stop/logs per app
 - [x] Multi-select delete for Docker containers
 - [x] Live USB — boots FreeRAID directly, no installer, headless-safe
+- [x] Community App Browser — install from 3000+ Unraid CA templates
+- [x] Docker context menu — WebUI, Terminal, Edit, Logs, Delete
+- [x] Drive SMART data in UI — health, temp, attributes, self-test
+- [x] Drive recovery / degraded mode — replace failed drive, rebuild from parity
 - [ ] First-boot Unraid import on live USB (auto-import from config/unraid-backup.zip)
 - [ ] First-boot wizard (hostname, network, disk assignment flow)
-- [ ] Drive health — SMART data per disk in UI
 - [ ] User management — add Samba users, set passwords from UI
 - [ ] NFS export configuration in UI
 - [ ] Network settings tab (set static IP, hostname from web UI)
@@ -243,12 +281,15 @@ Features Unraid has that FreeRAID doesn't yet. Grouped by area.
 
 ### Dashboard / Monitoring
 - [x] Disk temperatures (from SMART data)
+- [x] Full SMART data per disk — health, ATA attributes, self-test history
 - [ ] CPU / RAM / network usage graphs
 - [ ] Per-disk I/O stats
 - [ ] System log viewer in UI
 - [ ] Notifications — email/Telegram alerts for array events, drive warnings
 
 ### Storage
+- [x] Degraded mode — array stays up with a missing drive
+- [x] Drive replacement + parity rebuild from UI
 - [ ] Multiple storage pools
 - [ ] Per-share encryption
 - [ ] Turbo write mode (bypass parity during writes for speed)
@@ -256,15 +297,18 @@ Features Unraid has that FreeRAID doesn't yet. Grouped by area.
 - [ ] ZFS pool support
 
 ### Drives
-- [ ] Full SMART data per disk in UI
+- [x] Full SMART data per disk in UI
+- [x] UUID-based drive tracking (survives device renumbering)
 - [ ] Drive pre-clear utility
 - [ ] Disk spin-down / power management settings
 
 ### Docker
-- [ ] App browser — add new containers from templates/community apps
-- [ ] Visual editor for ports, env vars, volumes when adding a container
-- [ ] Custom Docker networks UI
+- [x] App browser — 3000+ apps from Unraid Community Applications feed
+- [x] Install form with port conflict detection + auto-assignment
+- [x] Network type selector (Bridge / Host / Custom with static IP)
+- [x] Context menu — WebUI, Terminal, Edit, Logs, Delete
 - [ ] Auto-update containers
+- [ ] Custom Docker networks UI (create macvlan/bridge networks)
 
 ### VMs
 - [ ] VM manager (KVM/QEMU) — create, start, stop, delete VMs from UI
@@ -277,7 +321,7 @@ Features Unraid has that FreeRAID doesn't yet. Grouped by area.
 ### Network & System
 - [ ] Network settings tab (static IP, hostname from UI)
 - [ ] UPS support (NUT integration)
-- [ ] Web terminal (browser-based shell)
+- [x] Web terminal — Cockpit terminal tab (via context menu)
 - [ ] Tailscale / VPN built-in
 
 ### Plugins
