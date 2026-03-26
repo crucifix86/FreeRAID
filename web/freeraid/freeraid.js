@@ -891,21 +891,139 @@ function renderShares(shares) {
   el.innerHTML = shares.map(s => {
     const smbBadge    = s.smb_enabled ? `<span class="badge badge-smb">SMB</span>` : '';
     const nfsBadge    = s.nfs_enabled ? `<span class="badge badge-nfs">NFS</span>` : '';
-    const secBadge    = (s.smb_security === 'public')
-      ? `<span class="badge badge-public">Public</span>`
-      : `<span class="badge badge-private">Private</span>`;
+    const sec         = s.smb_security || 'public';
+    const secLabel    = sec === 'public' ? 'Public' : sec === 'secure' ? 'Secure' : 'Private';
+    const secClass    = sec === 'public' ? 'badge-public' : 'badge-private';
+    const secBadge    = `<span class="badge ${secClass}">${secLabel}</span>`;
     const cacheBadge  = s.cache_mode ? `<span class="badge badge-cache">Cache: ${s.cache_mode}</span>` : '';
     const unraidBadge = s._imported_from_unraid ? `<span class="badge badge-unraid">Unraid</span>` : '';
     const nameSafe    = s.name.replace(/'/g, "\\'");
-    return `<div class="share-card">
+    const nameJson    = JSON.stringify(s.name);
+    return `<div class="share-card" id="share-card-${s.name}">
       <div class="share-name">${s.name}</div>
       <div class="share-path">${s.path}</div>
       <div class="share-badges">${smbBadge}${nfsBadge}${secBadge}${cacheBadge}${unraidBadge}</div>
       <div class="share-actions">
+        <button class="btn btn-sm btn-secondary" onclick="toggleSharePerms(${nameJson})">Permissions</button>
         <button class="btn btn-sm btn-ghost" onclick="removeShare('${nameSafe}')">Remove</button>
       </div>
-    </div>`;
+    </div>
+    <div class="share-perms-panel hidden" id="share-perms-${s.name}"></div>`;
   }).join('');
+}
+
+let _sharePermsCache = {}; // name → user list
+
+function toggleSharePerms(name) {
+  const panel = document.getElementById('share-perms-' + name);
+  if (!panel.classList.contains('hidden')) {
+    panel.classList.add('hidden');
+    return;
+  }
+  panel.innerHTML = '<div class="loading-msg" style="padding:12px">Loading...</div>';
+  panel.classList.remove('hidden');
+
+  // Load users and share data in parallel
+  let userBuf = '', shareBuf = '';
+  const p1 = new Promise(res => {
+    cockpit.spawn(['freeraid', 'users-list'], { superuser: 'require', err: 'ignore' })
+      .stream(d => { userBuf += d; }).then(res).catch(res);
+  });
+  const p2 = new Promise(res => {
+    cockpit.spawn(['freeraid', 'shares-list'], { superuser: 'require', err: 'ignore' })
+      .stream(d => { shareBuf += d; }).then(res).catch(res);
+  });
+
+  Promise.all([p1, p2]).then(() => {
+    let users = [], share = null;
+    try { users = JSON.parse(userBuf.slice(userBuf.indexOf('['))); } catch(e) {}
+    try {
+      const shares = JSON.parse(shareBuf.slice(shareBuf.indexOf('[')));
+      share = shares.find(s => s.name === name);
+    } catch(e) {}
+
+    if (!share) { panel.innerHTML = '<div style="padding:12px;color:var(--red)">Could not load share data.</div>'; return; }
+
+    const readList  = share.smb_read_list  || [];
+    const writeList = share.smb_write_list || [];
+    const sec       = share.smb_security   || 'public';
+    const nameJson  = JSON.stringify(name);
+
+    const userRows = users.filter(u => u.samba_enabled).map(u => `
+      <div class="perm-user-row">
+        <span class="perm-username">${u.name}</span>
+        <label class="perm-check-label">
+          <input type="checkbox" data-user="${u.name}" data-perm="read"
+            ${readList.includes(u.name) || writeList.includes(u.name) ? 'checked' : ''}>
+          Read
+        </label>
+        <label class="perm-check-label">
+          <input type="checkbox" data-user="${u.name}" data-perm="write"
+            ${writeList.includes(u.name) ? 'checked' : ''}>
+          Write
+        </label>
+      </div>`).join('');
+
+    panel.innerHTML = `
+      <div class="share-perms-body">
+        <div class="perms-row">
+          <div>
+            <label class="install-label">Access Level</label>
+            <select class="install-select" id="perms-sec-${name}" onchange="onPermsSecChange(${nameJson})" style="min-width:200px">
+              <option value="public"  ${sec==='public'  ? 'selected':''}>Public — anyone can access</option>
+              <option value="secure"  ${sec==='secure'  ? 'selected':''}>Secure — authenticated users only</option>
+              <option value="private" ${sec==='private' ? 'selected':''}>Private — specific users only</option>
+            </select>
+          </div>
+          <button class="btn btn-sm btn-primary" style="align-self:flex-end" onclick="saveSharePerms(${nameJson})">Save</button>
+        </div>
+        <div id="perms-users-${name}" class="${sec !== 'private' ? 'hidden' : ''}">
+          ${users.filter(u => u.samba_enabled).length === 0
+            ? '<div style="color:var(--text-dim);font-size:13px;margin-top:8px">No Samba users found. Add users in the Share Users tab first.</div>'
+            : `<div style="margin-top:12px">
+                <div class="perm-user-header">
+                  <span class="perm-username" style="font-weight:600">User</span>
+                  <span class="perm-check-label" style="font-weight:600">Read</span>
+                  <span class="perm-check-label" style="font-weight:600">Write</span>
+                </div>
+                ${userRows}
+              </div>`
+          }
+        </div>
+      </div>`;
+  });
+}
+
+function onPermsSecChange(name) {
+  const sec = document.getElementById('perms-sec-' + name).value;
+  document.getElementById('perms-users-' + name).classList.toggle('hidden', sec !== 'private');
+}
+
+function saveSharePerms(name) {
+  const sec = document.getElementById('perms-sec-' + name).value;
+
+  let readList = [], writeList = [];
+  if (sec === 'private') {
+    document.querySelectorAll(`#share-perms-${name} [data-perm="read"]:checked`).forEach(cb => {
+      readList.push(cb.dataset.user);
+    });
+    document.querySelectorAll(`#share-perms-${name} [data-perm="write"]:checked`).forEach(cb => {
+      writeList.push(cb.dataset.user);
+      if (!readList.includes(cb.dataset.user)) readList.push(cb.dataset.user);
+    });
+  }
+
+  const readJson  = JSON.stringify(readList);
+  const writeJson = JSON.stringify(writeList);
+
+  slog('cmd', `Setting permissions for ${name}: ${sec}`);
+  runCmd(['shares-set-perms', name, sec, readJson, writeJson], 'shares-log-panel')
+    .then(() => {
+      slog('success', `Permissions saved for ${name}.`);
+      document.getElementById('share-perms-' + name).classList.add('hidden');
+      refreshShares();
+    })
+    .catch(err => slog('error', String(err)));
 }
 
 function toggleAddShare() {

@@ -768,6 +768,32 @@ cmd_shares_remove() {
     info "Share '$name' removed. Run 'freeraid shares-apply' to apply."
 }
 
+cmd_shares_set_perms() {
+    # Usage: freeraid shares-set-perms <name> <security> <read_list_json> <write_list_json>
+    # security: public | secure | private
+    # read_list_json:  JSON array string e.g. '["alice","bob"]'
+    # write_list_json: JSON array string e.g. '["alice"]'
+    local name="${1:-}"
+    local security="${2:-public}"
+    local read_json="${3:-[]}"
+    local write_json="${4:-[]}"
+    [ -z "$name" ] && die "Usage: freeraid shares-set-perms <name> <security> <read_json> <write_json>"
+
+    local existing
+    existing=$(jq -r --arg n "$name" '.shares[] | select(.name==$n) | .name' "$CONFIG_FILE" 2>/dev/null || true)
+    [ -z "$existing" ] && die "Share '$name' not found"
+
+    jq --arg n "$name" \
+       --arg sec "$security" \
+       --argjson rl "$read_json" \
+       --argjson wl "$write_json" \
+       '(.shares[] | select(.name==$n)) |= . + {"smb_security":$sec,"smb_read_list":$rl,"smb_write_list":$wl}' \
+       "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+
+    cmd_shares_apply
+    info "Permissions updated for share '$name'."
+}
+
 cmd_shares_import() {
     # Import shares from a Unraid config directory
     local src="${1:-}"
@@ -2213,8 +2239,9 @@ case "${1:-help}" in
     shares-list)   cmd_shares_list ;;
     shares-apply)  cmd_shares_apply ;;
     shares-add)    cmd_shares_add "${2:-}" ;;
-    shares-remove) cmd_shares_remove "${2:-}" ;;
-    shares-import) cmd_shares_import "${2:-}" ;;
+    shares-remove)    cmd_shares_remove "${2:-}" ;;
+    shares-set-perms) cmd_shares_set_perms "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
+    shares-import)    cmd_shares_import "${2:-}" ;;
     apps-fetch)        cmd_apps_fetch ;;
     apps-search)       cmd_apps_search "${2:-}" "${3:-50}" ;;
     apps-get)          cmd_apps_get "${2:-}" ;;

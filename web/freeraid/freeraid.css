@@ -706,17 +706,59 @@ body {
 }
 .text-input:focus { border-color: var(--accent); }
 
+/* ── Share permissions panel ── */
+.share-perms-panel {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 var(--radius) var(--radius);
+  margin-bottom: 10px;
+}
+.share-perms-body { padding: 16px; }
+.perms-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.perm-user-header,
+.perm-user-row {
+  display: grid;
+  grid-template-columns: 1fr 80px 80px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.perm-user-header { color: var(--text-dim); font-size: 12px; padding-bottom: 8px; }
+.perm-user-row:last-child { border-bottom: none; }
+.perm-username  { font-size: 13px; }
+.perm-check-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
 /* ── Share cards ── */
 .share-card {
   background: var(--bg2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 16px;
-  margin-bottom: 10px;
+  margin-bottom: 0;
   display: flex;
   align-items: center;
   gap: 16px;
 }
+.share-card:has(+ .share-perms-panel:not(.hidden)) {
+  border-radius: var(--radius) var(--radius) 0 0;
+  border-bottom-color: var(--bg3);
+}
+.share-perms-panel.hidden + * ,
+.share-perms-panel:not(.hidden) + *,
+.share-perms-panel + .share-card { margin-top: 10px; }
 .share-card:hover { border-color: var(--accent); }
 
 .share-name  { font-weight: 600; font-size: 15px; min-width: 160px; }
