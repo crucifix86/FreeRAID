@@ -59,6 +59,8 @@ apt-get install -y \
     btrfs-progs \
     e2fsprogs \
     samba \
+    wsdd \
+    avahi-daemon \
     nfs-kernel-server \
     docker.io \
     docker-compose-plugin \

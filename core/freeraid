@@ -681,13 +681,16 @@ cmd_shares_apply() {
 
     info "Writing Samba config..."
 
+    local samba_anon
+    samba_anon=$(jq -r '.samba_anon // false' "$CONFIG_FILE" 2>/dev/null || echo "false")
+
     cat > "$smb_conf" <<SMBEOF
 [global]
    workgroup = WORKGROUP
    server string = FreeRAID
    netbios name = $(hostname)
    security = user
-   map to guest = bad user
+   map to guest = $([ "$samba_anon" = "true" ] && echo "bad user" || echo "never")
    dns proxy = no
    fruit:metadata = stream
    fruit:model = MacSamba
@@ -745,11 +748,16 @@ cmd_shares_add() {
     existing=$(jq -r --arg n "$name" '.shares[] | select(.name==$n) | .name' "$CONFIG_FILE" 2>/dev/null || true)
     [ -n "$existing" ] && die "Share '$name' already exists"
 
-    jq --arg name "$name" \
-       '.shares += [{"name":$name,"path":("/mnt/user/"+$name),"comment":"","smb_enabled":true,"smb_security":"public","smb_read_list":[],"smb_write_list":[],"nfs_enabled":false,"cache_mode":"yes","cache_pool":"cache","include_disks":[],"exclude_disks":[]}]' \
+    local pool_mnt
+    pool_mnt=$(cfg '.array.pool_mountpoint // "/mnt/freeraid"')
+
+    jq --arg name "$name" --arg path "${pool_mnt}/${name}" \
+       '.shares += [{"name":$name,"path":$path,"comment":"","smb_enabled":true,"smb_security":"public","smb_read_list":[],"smb_write_list":[],"nfs_enabled":false,"cache_mode":"yes","cache_pool":"cache","include_disks":[],"exclude_disks":[]}]' \
        "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
 
-    info "Share '$name' added. Run 'freeraid shares-apply' to activate."
+    mkdir -p "${pool_mnt}/${name}" 2>/dev/null || true
+    cmd_shares_apply
+    info "Share '$name' created and active."
 }
 
 cmd_shares_remove() {
@@ -1983,6 +1991,37 @@ cmd_users_setpassword() {
     echo "{\"ok\":true}"
 }
 
+cmd_users_enable_samba() {
+    local username="${1:-}" password="${2:-}"
+    [ -z "$username" ] || [ -z "$password" ] && die "Usage: freeraid users-enable-samba <username> <password>"
+    id "$username" &>/dev/null || die "User does not exist: $username"
+    printf '%s\n%s\n' "$password" "$password" | smbpasswd -a -s "$username" || die "Failed to add Samba user"
+    smbpasswd -e "$username" 2>/dev/null || true
+    echo "{\"ok\":true}"
+}
+
+cmd_users_disable_samba() {
+    local username="${1:-}"
+    [ -z "$username" ] && die "Usage: freeraid users-disable-samba <username>"
+    smbpasswd -x "$username" 2>/dev/null || true
+    echo "{\"ok\":true}"
+}
+
+cmd_shares_get_anon() {
+    local val
+    val=$(jq -r '.samba_anon // false' "$CONFIG_FILE" 2>/dev/null || echo "false")
+    echo "{\"anon\":${val}}"
+}
+
+cmd_shares_set_anon() {
+    local val="${1:-}"
+    [ "$val" = "true" ] || [ "$val" = "false" ] || die "Usage: freeraid shares-set-anon <true|false>"
+    jq --argjson v "$val" '.samba_anon = $v' "$CONFIG_FILE" > /tmp/freeraid.conf.tmp \
+        && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+    cmd_shares_apply
+    echo "{\"ok\":true,\"anon\":${val}}"
+}
+
 cmd_config() {
     echo "Config: $CONFIG_FILE"
     echo "────────────────────────────────────────────"
@@ -2075,10 +2114,14 @@ case "${1:-help}" in
     set-hostname)       cmd_set_hostname "${2:-}" ;;
     network-info)       cmd_network_info ;;
     network-set)        cmd_network_set "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" ;;
-    users-list)         cmd_users_list ;;
-    users-add)          cmd_users_add "${2:-}" "${3:-}" ;;
-    users-delete)       cmd_users_delete "${2:-}" ;;
-    users-setpassword)  cmd_users_setpassword "${2:-}" "${3:-}" ;;
+    users-list)           cmd_users_list ;;
+    users-add)            cmd_users_add "${2:-}" "${3:-}" ;;
+    users-delete)         cmd_users_delete "${2:-}" ;;
+    users-setpassword)    cmd_users_setpassword "${2:-}" "${3:-}" ;;
+    users-enable-samba)   cmd_users_enable_samba "${2:-}" "${3:-}" ;;
+    users-disable-samba)  cmd_users_disable_samba "${2:-}" ;;
+    shares-get-anon)      cmd_shares_get_anon ;;
+    shares-set-anon)      cmd_shares_set_anon "${2:-}" ;;
     install-deps)  cmd_install_deps ;;
     config)        cmd_config ;;
     version)       cmd_version ;;

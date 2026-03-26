@@ -933,11 +933,12 @@ function doAddShare() {
           .then(resolve).catch(reject);
       });
     })
+    .then(() => runCmd(['shares-apply'], 'shares-log-panel'))
     .then(() => {
       document.getElementById('new-share-name').value    = '';
       document.getElementById('new-share-comment').value = '';
       refreshShares();
-      slog('success', `Share "${name}" created.`);
+      slog('success', `Share "${name}" created and active.`);
     })
     .catch(err => slog('error', String(err)));
 }
@@ -1482,7 +1483,7 @@ function refreshUsers() {
       try { users = JSON.parse(out.trim().split('\n').pop()); } catch(e) { users = []; }
       const el = document.getElementById('user-list');
       if (!users.length) {
-        el.innerHTML = '<div style="font-size:13px;color:var(--text-muted);padding:12px 0">No user accounts yet. Add one above to enable share access.</div>';
+        el.innerHTML = '<div style="font-size:13px;color:var(--text-dim);padding:12px 0">No user accounts yet. Add one above to enable share access.</div>';
         return;
       }
       el.innerHTML = users.map(u => `
@@ -1490,15 +1491,31 @@ function refreshUsers() {
           <div class="user-avatar">${u.name[0].toUpperCase()}</div>
           <div class="user-info">
             <div class="user-name">${u.name}</div>
-            <div class="user-meta">UID ${u.uid} · ${u.samba ? '✓ Samba' : 'No Samba'} · ${u.home}</div>
+            <div class="user-meta">
+              UID ${u.uid} · ${u.home}
+              <span class="samba-badge ${u.samba ? 'samba-on' : 'samba-off'}">${u.samba ? '✓ Samba' : '✗ No Samba'}</span>
+            </div>
           </div>
           <div style="margin-left:auto;display:flex;gap:6px;align-items:center">
-            <button class="btn btn-sm btn-ghost" onclick="openChangePassword('${u.name}')">Change Password</button>
+            ${u.samba
+              ? `<button class="btn btn-sm btn-ghost" onclick="openChangePassword('${u.name}')">Change Password</button>
+                 <button class="btn btn-sm btn-secondary" onclick="doDisableSamba('${u.name}')">Disable Samba</button>`
+              : `<button class="btn btn-sm btn-primary" onclick="doEnableSamba('${u.name}')">Enable Samba</button>`
+            }
             <button class="btn btn-sm btn-danger" onclick="doDeleteUser('${u.name}')">Delete</button>
           </div>
         </div>`).join('');
     })
     .catch(err => { document.getElementById('user-list').innerHTML = `<div class="smart-error">${err}</div>`; });
+
+  // Load anon toggle state
+  cockpit.spawn(['freeraid', 'shares-get-anon'], { superuser: 'require', err: 'out' })
+    .then(out => {
+      try {
+        const d = JSON.parse(out.trim().split('\n').pop());
+        document.getElementById('anon-toggle').checked = d.anon === true || d.anon === 'true';
+      } catch(e) {}
+    }).catch(() => {});
 }
 
 function toggleAddUser() {
@@ -1540,6 +1557,29 @@ function openChangePassword(name) {
   cockpit.spawn(['freeraid', 'users-setpassword', name, pass], { superuser: 'require', err: 'out' })
     .then(() => showAlert('success', `Password updated for "${name}".`))
     .catch(err => showAlert('error', String(err)));
+}
+
+function doEnableSamba(name) {
+  const pass = prompt(`Set a Samba password for "${name}":`);
+  if (!pass) return;
+  const pass2 = prompt('Confirm password:');
+  if (pass !== pass2) { showAlert('error', 'Passwords do not match.'); return; }
+  cockpit.spawn(['freeraid', 'users-enable-samba', name, pass], { superuser: 'require', err: 'out' })
+    .then(() => { showAlert('success', `Samba enabled for "${name}".`); refreshUsers(); })
+    .catch(err => showAlert('error', String(err)));
+}
+
+function doDisableSamba(name) {
+  if (!confirm(`Remove Samba access for "${name}"?\nThey will no longer be able to connect to shares.`)) return;
+  cockpit.spawn(['freeraid', 'users-disable-samba', name], { superuser: 'require', err: 'out' })
+    .then(() => { showAlert('success', `Samba disabled for "${name}".`); refreshUsers(); })
+    .catch(err => showAlert('error', String(err)));
+}
+
+function setAnonAccess(enabled) {
+  cockpit.spawn(['freeraid', 'shares-set-anon', enabled ? 'true' : 'false'], { superuser: 'require', err: 'out' })
+    .then(() => showAlert('success', `Anonymous access ${enabled ? 'enabled' : 'disabled'}.`))
+    .catch(err => { showAlert('error', String(err)); refreshUsers(); }); // revert toggle on error
 }
 
 // ── Docker Networks ────────────────────────────────────────────────────────────

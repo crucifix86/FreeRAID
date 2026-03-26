@@ -32,6 +32,9 @@ iptables -C FORWARD -i "$HOST_IF" -o "$TAP" -m state --state RELATED,ESTABLISHED
 iptables -t nat -C POSTROUTING -s "$VM_IP"/32 -o "$HOST_IF" -j MASQUERADE 2>/dev/null || \
     iptables -t nat -A POSTROUTING -s "$VM_IP"/32 -o "$HOST_IF" -j MASQUERADE
 
+echo "==> Restarting avahi-daemon so it picks up $TAP for mDNS discovery"
+systemctl restart avahi-daemon 2>/dev/null || true
+
 echo ""
 echo "Network ready. VM should use:"
 echo "  IP:      $VM_IP"

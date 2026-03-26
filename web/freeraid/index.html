@@ -267,13 +267,32 @@
       <!-- ── USERS TAB ── -->
       <div id="tab-users" class="hidden">
 
+        <!-- Anonymous access toggle -->
+        <div class="settings-section">
+          <h2 class="settings-section-title">Guest Access</h2>
+          <div class="settings-card">
+            <div class="settings-row" style="align-items:center">
+              <div style="flex:1">
+                <div class="settings-label">Allow Anonymous Logins</div>
+                <div class="settings-value" style="font-size:13px;margin-top:4px;color:var(--text-dim)">
+                  When enabled, unauthenticated users can access shares marked as public
+                </div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="anon-toggle" onchange="setAnonAccess(this.checked)">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+          </div>
+        </div>
+
         <div class="settings-section">
           <h2 class="settings-section-title">
             Share Users
             <button class="btn btn-sm btn-primary" style="margin-left:auto" onclick="toggleAddUser()">+ Add User</button>
           </h2>
-          <div style="font-size:12px;color:var(--text-muted);margin-bottom:12px">
-            These accounts are for <strong>network share access</strong> (Samba/SMB). To manage web UI login accounts, use <strong>Accounts</strong> in the Cockpit sidebar.
+          <div style="font-size:12px;color:var(--text-dim);margin-bottom:12px">
+            These accounts are for <strong>network share access</strong> (Samba/SMB). To manage web UI login accounts, go to Settings → WebUI Accounts.
           </div>
 
           <div id="add-user-form" class="hidden settings-card" style="margin-bottom:12px">

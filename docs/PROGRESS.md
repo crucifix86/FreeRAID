@@ -10,7 +10,7 @@ Built on Debian Linux + MergerFS + SnapRAID + Cockpit web UI.
 
 ---
 
-## Current Version: v0.4.0
+## Current Version: v0.4.1
 
 ---
 
@@ -113,6 +113,16 @@ Built on Debian Linux + MergerFS + SnapRAID + Cockpit web UI.
 ### Login Page
 - Custom FreeRAID-themed login (dark, centered card, purple accent — matches the UI)
 - "Remember login" checkbox — saves credentials to localStorage, auto-fills on next visit
+
+### Samba / Network Shares
+- Share creation auto-applies smb.conf and creates directory — no manual Apply step
+- Share path defaults to actual pool mountpoint (not hardcoded `/mnt/user/`)
+- Share Users tab: enable/disable Samba per-user with dedicated password
+- Guest access toggle: switches `map to guest` between `bad user` and `never`
+- `avahi-daemon` + SMB service file — advertises on LAN for Linux file manager discovery
+- `wsdd` — WS-Discovery daemon for network browser compatibility
+- Both installed and enabled on all install paths (build-image.sh + install.sh)
+- VM dev note: mDNS discovery limited by TAP networking; use `smb://192.168.1.150/` directly
 
 ### Update System
 - `freeraid update` — fetch latest release tarball from GitHub, apply in place
@@ -274,6 +284,7 @@ Run `sudo vm/setup-vm-network.sh` once before starting the VM to set up TAP + pr
 | v0.3.0 | App browser (3000+ apps), Docker context menu, SMART data, drive recovery, degraded mode, VM gets own LAN IP |
 | v0.3.1 | Network tab, Share Users tab, per-container xterm.js terminals, Docker network type selector + macvlan panel |
 | v0.4.0 | Custom sidebar replaces Cockpit nav, FreeRAID login theme + remember login, array controls on dashboard, logout button |
+| v0.4.1 | Samba shares working end-to-end, per-user Samba enable/disable, guest access toggle, avahi + wsdd network discovery |
 
 ---
 
@@ -293,6 +304,8 @@ Run `sudo vm/setup-vm-network.sh` once before starting the VM to set up TAP + pr
 - [x] Docker network type selector (Bridge / Host / Custom macvlan + static IP)
 - [x] Docker Networks panel — create/delete macvlan networks
 - [x] Custom login page — FreeRAID theme + remember login
+- [x] Samba shares working — create, apply, per-user access, guest toggle
+- [x] Network discovery — avahi (Linux) + wsdd installed out of the box
 - [ ] First-boot Unraid import on live USB (auto-import from config/unraid-backup.zip)
 - [ ] First-boot wizard (hostname, network, disk assignment flow)
 - [ ] NFS export configuration in UI

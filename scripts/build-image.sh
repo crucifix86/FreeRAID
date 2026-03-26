@@ -62,7 +62,7 @@ else
         --include=systemd,systemd-sysv,udev,kmod,iproute2,iputils-ping,\
 dnsutils,curl,wget,ca-certificates,openssh-server,sudo,\
 jq,xfsprogs,btrfs-progs,e2fsprogs,parted,hdparm,smartmontools,\
-samba,nfs-kernel-server,unzip,python3,\
+samba,wsdd,avahi-daemon,nfs-kernel-server,unzip,python3,\
 linux-image-amd64,busybox,initramfs-tools \
         bookworm \
         "$ROOTFS" \
@@ -162,6 +162,13 @@ cp "$REPO_DIR/web/branding.css" "$ROOTFS/usr/share/cockpit/branding/debian/brand
 
 # Custom login page (themed + remember-login)
 cp "$REPO_DIR/web/login.html" "$ROOTFS/usr/share/cockpit/static/login.html"
+
+# Avahi SMB advertisement (network discovery in Linux file managers)
+mkdir -p "$ROOTFS/etc/avahi/services"
+cp "$REPO_DIR/config/avahi-smb.service" "$ROOTFS/etc/avahi/services/smb.service"
+
+# wsdd workgroup config (no hardcoded interface — works on any hardware)
+echo 'WSDD_PARAMS="-w WORKGROUP"' > "$ROOTFS/etc/default/wsdd"
 
 # VERSION
 mkdir -p "$ROOTFS/etc/freeraid"
