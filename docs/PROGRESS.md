@@ -96,7 +96,8 @@ Built on Debian Linux + MergerFS + SnapRAID + Cockpit web UI.
   (Cockpit chrome, sidebar, and topbar all hidden via branding.css override)
 - **Dashboard** — array status + controls panel (Start/Stop, Sync Parity, Parity Check),
   live disk cards with usage bars, array capacity, used/free, last sync time, operation log,
-  SMART details per drive; CPU/RAM/Network sparkline graphs
+  SMART details per drive; CPU/RAM/Network sparkline graphs; automation row at bottom:
+  stacked array controls, parity check scheduler, cache mover panel
 - **Disks** — all detected drives, role assignment modal (Array/Parity/Cache),
   missing/rebuilding drive states, reassign when stopped
 - **Shares** — share list with badges, create form, Unraid zip uploader
@@ -284,7 +285,7 @@ Run `sudo vm/setup-vm-network.sh` once before starting the VM to set up TAP + pr
 | v0.3.0 | App browser (3000+ apps), Docker context menu, SMART data, drive recovery, degraded mode, VM gets own LAN IP |
 | v0.3.1 | Network tab, Share Users tab, per-container xterm.js terminals, Docker network type selector + macvlan panel |
 | v0.4.0 | Custom sidebar replaces Cockpit nav, FreeRAID login theme + remember login, array controls on dashboard, logout button |
-| v0.4.1 | Samba shares working end-to-end, per-user Samba enable/disable, guest access toggle, avahi + wsdd network discovery |
+| v0.4.1 | Samba shares working end-to-end, per-user Samba enable/disable, guest access toggle, avahi + wsdd network discovery, parity check scheduler, cache mover with systemd timer |
 
 ---
 
@@ -306,6 +307,8 @@ Run `sudo vm/setup-vm-network.sh` once before starting the VM to set up TAP + pr
 - [x] Custom login page — FreeRAID theme + remember login
 - [x] Samba shares working — create, apply, per-user access, guest toggle
 - [x] Network discovery — avahi (Linux) + wsdd installed out of the box
+- [x] Parity check scheduler — set frequency (daily/weekly/monthly), day, and time from UI
+- [x] Cache mover — manual Run Now button + automatic schedule via systemd timer
 - [ ] First-boot Unraid import on live USB (auto-import from config/unraid-backup.zip)
 - [ ] First-boot wizard (hostname, network, disk assignment flow)
 - [ ] NFS export configuration in UI
@@ -331,7 +334,8 @@ Features Unraid has that FreeRAID doesn't yet. Grouped by area.
 - [ ] Multiple storage pools
 - [ ] Per-share encryption
 - [ ] Turbo write mode (bypass parity during writes for speed)
-- [ ] File mover / balancer utility (redistribute files across array disks)
+- [x] Cache mover — moves files from cache to array pool, manual + scheduled
+- [ ] File balancer utility (redistribute files across array disks)
 - [ ] ZFS pool support
 
 ### Drives
