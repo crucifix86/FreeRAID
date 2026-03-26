@@ -10,7 +10,7 @@ Built on Debian Linux + MergerFS + SnapRAID + Cockpit web UI.
 
 ---
 
-## Current Version: v0.4.1
+## Current Version: v0.4.2
 
 ---
 
@@ -100,12 +100,13 @@ Built on Debian Linux + MergerFS + SnapRAID + Cockpit web UI.
   stacked array controls, parity check scheduler, cache mover panel
 - **Disks** — all detected drives, role assignment modal (Array/Parity/Cache),
   missing/rebuilding drive states, reassign when stopped
-- **Shares** — share list with badges, create form, Unraid zip uploader
+- **Shares** — share list with badges, create form, per-share permissions (Public/Secure/Private + user lists), Unraid zip uploader
 - **Docker** — container cards with ports/IP, context menu, app browser, install form,
   network type selector (Bridge/Host/Custom macvlan + static IP), Docker Networks panel,
   per-container xterm.js terminals (open in new tab)
 - **Network** — hostname editor, per-interface DHCP/static IP config
-- **Share Users** — Samba user management (add, delete, set password)
+- **Share Users** — Samba user management (add, delete, set password, enable/disable Samba per user)
+- **Logs** — log viewer with source picker (FreeRAID/Syslog/Kernel/Samba), live tail, line count selector
 - **Settings** — version info, check for updates, Update Now with live log
 - **Plugins** — placeholder (coming soon)
 - **Sidebar footer** — Log Out, Reboot, Shutdown
@@ -286,6 +287,7 @@ Run `sudo vm/setup-vm-network.sh` once before starting the VM to set up TAP + pr
 | v0.3.1 | Network tab, Share Users tab, per-container xterm.js terminals, Docker network type selector + macvlan panel |
 | v0.4.0 | Custom sidebar replaces Cockpit nav, FreeRAID login theme + remember login, array controls on dashboard, logout button |
 | v0.4.1 | Samba shares working end-to-end, per-user Samba enable/disable, guest access toggle, avahi + wsdd network discovery, parity check scheduler, cache mover with systemd timer |
+| v0.4.2 | First-boot setup wizard, per-share user permissions, system log viewer |
 
 ---
 
@@ -309,8 +311,10 @@ Run `sudo vm/setup-vm-network.sh` once before starting the VM to set up TAP + pr
 - [x] Network discovery — avahi (Linux) + wsdd installed out of the box
 - [x] Parity check scheduler — set frequency (daily/weekly/monthly), day, and time from UI
 - [x] Cache mover — manual Run Now button + automatic schedule via systemd timer
+- [x] First-boot setup wizard — Welcome, Hostname/Network, optional Unraid import, Assign Drives, Start Array
+- [x] Per-share user permissions — Public/Secure/Private, per-user Read/Write checkboxes
+- [x] System log viewer — FreeRAID, Syslog, Kernel, Samba logs with live tail mode
 - [ ] First-boot Unraid import on live USB (auto-import from config/unraid-backup.zip)
-- [ ] First-boot wizard (hostname, network, disk assignment flow)
 - [ ] NFS export configuration in UI
 - [ ] Plugin system — real implementation
 
@@ -325,7 +329,7 @@ Features Unraid has that FreeRAID doesn't yet. Grouped by area.
 - [x] Full SMART data per disk — health, ATA attributes, self-test history
 - [x] CPU / RAM / network usage graphs (sparklines, live polling)
 - [ ] Per-disk I/O stats
-- [ ] System log viewer in UI
+- [x] System log viewer — FreeRAID, Syslog, Kernel, Samba with live tail
 - [ ] Notifications — email/Telegram alerts for array events, drive warnings
 
 ### Storage
@@ -359,7 +363,7 @@ Features Unraid has that FreeRAID doesn't yet. Grouped by area.
 
 ### Users & Shares
 - [x] User management — add/delete Samba users, set passwords from UI
-- [ ] Per-share user permissions
+- [x] Per-share user permissions — Public/Secure/Private with per-user Read/Write lists
 - [ ] Share-level passwords
 - [ ] Advanced NFS export options in UI
 
