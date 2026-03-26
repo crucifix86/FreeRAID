@@ -1060,6 +1060,161 @@ print(json.dumps({'ok': True, 'slug': slug, 'path': out_path, 'compose': compose
 PYEOF
 }
 
+cmd_docker_get_config() {
+    local name="${1:-}"
+    [ -z "$name" ] && die "Usage: freeraid docker-get-config <name>"
+    local f="${COMPOSE_DIR}/${name}.docker-compose.yml"
+    [ -f "$f" ] || die "No compose file for: $name"
+
+    python3 - "$f" "$name" <<'PYEOF'
+import sys, json, re, os
+
+fpath = sys.argv[1]
+name  = sys.argv[2]
+
+try:
+    import yaml
+    data = yaml.safe_load(open(fpath).read())
+except ImportError:
+    # Manual minimal YAML parser for our predictable compose format
+    import re as _re
+    data = {'services': {}, 'networks': {}}
+    cur_svc = None
+    cur_key = None
+    svc_block = False
+    net_block = False
+    lines = open(fpath).readlines()
+    for line in lines:
+        stripped = line.rstrip()
+        indent = len(stripped) - len(stripped.lstrip())
+        val = stripped.strip()
+        if val == 'services:':
+            svc_block = True; net_block = False; continue
+        if val == 'networks:':
+            svc_block = False; net_block = True; continue
+        if svc_block and indent == 2 and val.endswith(':'):
+            cur_svc = val[:-1]
+            data['services'][cur_svc] = {'ports':[],'volumes':[],'environment':[],'labels':[]}
+        elif cur_svc and indent == 4:
+            m = _re.match(r'(\w[\w_-]*):\s*(.*)', val)
+            if m:
+                cur_key = m.group(1)
+                v = m.group(2)
+                if v:
+                    data['services'][cur_svc][cur_key] = v
+                else:
+                    data['services'][cur_svc].setdefault(cur_key, [])
+        elif cur_svc and indent == 6 and cur_key and isinstance(data['services'][cur_svc].get(cur_key), list):
+            data['services'][cur_svc][cur_key].append(val.lstrip('- ').strip('"\''))
+
+svc = data.get('services', {})
+svc_data = svc.get(name) or (list(svc.values())[0] if svc else {})
+
+image = svc_data.get('image', '')
+network_mode = svc_data.get('network_mode', 'bridge')
+network_name = network_mode
+network_ip = ''
+
+# Check for networks: block (custom network mode)
+svc_nets = svc_data.get('networks', {})
+if isinstance(svc_nets, dict) and svc_nets:
+    network_name = list(svc_nets.keys())[0]
+    net_cfg = svc_nets[network_name]
+    if isinstance(net_cfg, dict):
+        network_ip = net_cfg.get('ipv4_address', '')
+
+# Parse labels
+labels = {}
+for lbl in svc_data.get('labels', []):
+    s = str(lbl).strip('"\'')
+    if '=' in s:
+        k, v = s.split('=', 1)
+        labels[k] = v
+
+webui    = labels.get('freeraid.webui', '')
+app_name = labels.get('freeraid.name', name)
+
+# Build config items from current compose
+config = []
+for port in svc_data.get('ports', []):
+    s = str(port).strip('"\'')
+    m = re.match(r'(\d+):(\d+)(?:/(tcp|udp))?', s)
+    if m:
+        host_p, cont_p, proto = m.group(1), m.group(2), (m.group(3) or 'tcp')
+        config.append({'type':'Port','target':cont_p,'name':f'Port {cont_p}/{proto}','default':host_p,'mode':proto})
+
+for vol in svc_data.get('volumes', []):
+    s = str(vol).strip('"\'')
+    parts = s.split(':')
+    if len(parts) >= 2:
+        config.append({'type':'Path','target':parts[1],'name':parts[1],
+                       'default':parts[0],'mode':parts[2] if len(parts)>2 else 'rw'})
+
+for env in svc_data.get('environment', []):
+    s = str(env).strip('"\'')
+    if '=' in s:
+        k, v = s.split('=', 1)
+        config.append({'type':'Variable','target':k,'name':k,'default':v})
+
+print(json.dumps({
+    'name': app_name, 'image': image,
+    'network': network_name, 'network_ip': network_ip,
+    'webui': webui, 'config': config, '_is_edit': True
+}))
+PYEOF
+}
+
+cmd_docker_network_list() {
+    docker network ls --format '{{json .}}' 2>/dev/null | python3 -c "
+import sys, json, subprocess
+nets = []
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    try:
+        n = json.loads(line)
+    except: continue
+    nid = n.get('ID','')
+    name = n.get('Name','')
+    driver = n.get('Driver','')
+    # Skip built-in defaults
+    if name in ('bridge','host','none'): continue
+    # Get subnet
+    try:
+        info = json.loads(subprocess.check_output(['docker','network','inspect',nid], stderr=subprocess.DEVNULL))
+        cfg = info[0].get('IPAM',{}).get('Config',[{}])
+        subnet = cfg[0].get('Subnet','') if cfg else ''
+    except:
+        subnet = ''
+    nets.append({'id':nid[:12],'name':name,'driver':driver,'subnet':subnet})
+print(json.dumps(nets))
+"
+}
+
+cmd_docker_network_create() {
+    local net_name="${1:-}" parent="${2:-}" subnet="${3:-}" gateway="${4:-}"
+    [ -z "$net_name" ] && die "Usage: freeraid docker-network-create <name> <parent-iface> <subnet> <gateway>"
+    [ -z "$parent"   ] && die "parent interface required (e.g. ens3)"
+    [ -z "$subnet"   ] && die "subnet required (e.g. 192.168.1.0/24)"
+    [ -z "$gateway"  ] && die "gateway required (e.g. 192.168.1.1)"
+    docker network create \
+        -d macvlan \
+        --subnet="$subnet" \
+        --gateway="$gateway" \
+        -o parent="$parent" \
+        "$net_name" \
+    && echo "{\"ok\":true,\"name\":\"$net_name\"}" \
+    || die "Failed to create network $net_name"
+}
+
+cmd_docker_network_delete() {
+    local net_name="${1:-}"
+    [ -z "$net_name" ] && die "Usage: freeraid docker-network-delete <name>"
+    docker network rm "$net_name" \
+    && echo "{\"ok\":true}" \
+    || die "Failed to delete network $net_name"
+}
+
 cmd_apps_categories() {
     [ -f "$APPFEED_CACHE" ] || die "App feed not cached. Run: freeraid apps-fetch"
     python3 -c "
@@ -1648,9 +1803,184 @@ cmd_set_hostname() {
     local name="${1:-}"
     [ -z "$name" ] && die "Usage: freeraid set-hostname <name>"
     hostnamectl set-hostname "$name"
-    # Update /etc/hosts too
     sed -i "s/127\.0\.1\.1.*/127.0.1.1\t$name/" /etc/hosts
-    info "Hostname set to: $name"
+    echo "{\"ok\":true,\"hostname\":\"$name\"}"
+}
+
+# ── Network management ────────────────────────────────────────────────────────
+
+cmd_network_info() {
+    python3 << 'PYEOF'
+import json, subprocess, re, os
+
+try:
+    ifaces_raw = json.loads(subprocess.check_output(['ip','-j','addr','show'], stderr=subprocess.DEVNULL))
+except Exception as e:
+    print(json.dumps({'error': str(e)})); exit(1)
+
+try:
+    ifaces_conf = open('/etc/network/interfaces').read()
+except:
+    ifaces_conf = ''
+
+# Also try /etc/network/interfaces.d/
+for f in os.listdir('/etc/network/interfaces.d') if os.path.isdir('/etc/network/interfaces.d') else []:
+    try: ifaces_conf += '\n' + open(f'/etc/network/interfaces.d/{f}').read()
+    except: pass
+
+skip_prefixes = ('lo','docker','veth','br-','virbr','vmtap','tun','tap')
+
+result = []
+for iface in ifaces_raw:
+    name = iface.get('ifname','')
+    if any(name.startswith(p) for p in skip_prefixes): continue
+    addrs = [a for a in iface.get('addr_info',[]) if a.get('family') == 'inet']
+    ip     = addrs[0]['local']     if addrs else ''
+    prefix = addrs[0]['prefixlen'] if addrs else 24
+
+    mode = 'static' if re.search(rf'iface\s+{re.escape(name)}\s+inet\s+static', ifaces_conf) else 'dhcp'
+    gateway = dns = ''
+    if mode == 'static':
+        m = re.search(rf'iface\s+{re.escape(name)}\s+inet\s+static(.*?)(?=\niface\s|\Z)', ifaces_conf, re.DOTALL)
+        if m:
+            block = m.group(1)
+            gm = re.search(r'gateway\s+(\S+)', block)
+            dm = re.search(r'dns-nameservers\s+(.+)', block)
+            if gm: gateway = gm.group(1)
+            if dm: dns    = dm.group(1).strip()
+    if not gateway:
+        try:
+            rt = subprocess.check_output(['ip','-j','route','show','default'], stderr=subprocess.DEVNULL)
+            routes = json.loads(rt)
+            for r in routes:
+                if r.get('dev') == name: gateway = r.get('gateway',''); break
+            if not gateway and routes: gateway = routes[0].get('gateway','')
+        except: pass
+
+    result.append({'name':name,'ip':ip,'prefix':prefix,'mode':mode,
+                   'gateway':gateway,'dns':dns,
+                   'state':iface.get('operstate','UNKNOWN'),
+                   'mac':iface.get('address','')})
+
+print(json.dumps(result))
+PYEOF
+}
+
+cmd_network_set() {
+    # Usage: freeraid network-set <iface> dhcp
+    #        freeraid network-set <iface> static <ip/prefix> <gateway> <dns>
+    local iface="${1:-}" mode="${2:-}"
+    [ -z "$iface" ] || [ -z "$mode" ] && die "Usage: freeraid network-set <iface> <dhcp|static> [ip/prefix gateway dns]"
+
+    local conf_file="/etc/network/interfaces"
+
+    if [ "$mode" = "dhcp" ]; then
+        python3 - "$conf_file" "$iface" << 'PYEOF'
+import sys, re
+path, iface = sys.argv[1], sys.argv[2]
+txt = open(path).read()
+# Remove existing iface block
+txt = re.sub(rf'\n?(allow-hotplug|auto)\s+{re.escape(iface)}\n', '\n', txt)
+txt = re.sub(rf'\niface\s+{re.escape(iface)}\s+inet\s+\w+.*?(?=\niface\s|\n\s*\n|\Z)', '', txt, flags=re.DOTALL)
+txt = txt.rstrip() + f'\n\nauto {iface}\niface {iface} inet dhcp\n'
+open(path,'w').write(txt)
+print('ok')
+PYEOF
+    else
+        local cidr="${3:-}" gateway="${4:-}" dns="${5:-8.8.8.8}"
+        [ -z "$cidr" ] || [ -z "$gateway" ] && die "static requires: ip/prefix gateway [dns]"
+        # split cidr into ip and prefix
+        local ip="${cidr%%/*}" prefix="${cidr##*/}"
+        [ "$prefix" = "$ip" ] && prefix=24
+        # Convert prefix to netmask
+        local netmask
+        netmask=$(python3 -c "import ipaddress; print(str(ipaddress.IPv4Network(f'0.0.0.0/${prefix}',False).netmask))" 2>/dev/null || echo "255.255.255.0")
+
+        python3 - "$conf_file" "$iface" "$ip" "$netmask" "$gateway" "$dns" << 'PYEOF'
+import sys, re
+path, iface, ip, netmask, gateway, dns = sys.argv[1:]
+txt = open(path).read()
+txt = re.sub(rf'\n?(allow-hotplug|auto)\s+{re.escape(iface)}\n', '\n', txt)
+txt = re.sub(rf'\niface\s+{re.escape(iface)}\s+inet\s+\w+.*?(?=\niface\s|\n\s*\n|\Z)', '', txt, flags=re.DOTALL)
+block = (f'\nauto {iface}\n'
+         f'iface {iface} inet static\n'
+         f'    address {ip}\n'
+         f'    netmask {netmask}\n'
+         f'    gateway {gateway}\n'
+         f'    dns-nameservers {dns}\n')
+txt = txt.rstrip() + block
+open(path,'w').write(txt)
+print('ok')
+PYEOF
+    fi
+
+    # Re-apply without taking down SSH if it's the current connection iface
+    # Use ifup --force in background so we don't kill the calling process
+    nohup bash -c "sleep 1; ifdown '$iface' 2>/dev/null; ifup '$iface' 2>/dev/null" &>/dev/null &
+    echo "{\"ok\":true,\"iface\":\"$iface\",\"mode\":\"$mode\"}"
+}
+
+# ── User management ───────────────────────────────────────────────────────────
+
+cmd_users_list() {
+    python3 << 'PYEOF'
+import json, subprocess, pwd
+
+# System users with UID >= 1000 (excluding nobody)
+users = []
+for entry in pwd.getpwall():
+    if entry.pw_uid < 1000: continue
+    if entry.pw_name in ('nobody',): continue
+    # Check if they're a Samba user
+    try:
+        out = subprocess.check_output(['pdbedit','-L','-u',entry.pw_name], stderr=subprocess.DEVNULL).decode()
+        samba = bool(out.strip())
+    except:
+        samba = False
+    users.append({'name': entry.pw_name, 'uid': entry.pw_uid,
+                  'home': entry.pw_dir, 'samba': samba})
+
+print(json.dumps(users))
+PYEOF
+}
+
+cmd_users_add() {
+    local username="${1:-}" password="${2:-}"
+    [ -z "$username" ] || [ -z "$password" ] && die "Usage: freeraid users-add <username> <password>"
+    # Validate username
+    [[ "$username" =~ ^[a-z_][a-z0-9_-]*$ ]] || die "Invalid username (lowercase letters, numbers, _ - only)"
+
+    # Create system user if doesn't exist
+    if ! id "$username" &>/dev/null; then
+        useradd -m -s /bin/bash -G users "$username" || die "Failed to create user: $username"
+    fi
+
+    # Set system password
+    echo "$username:$password" | chpasswd || die "Failed to set password"
+
+    # Add/update Samba password
+    printf '%s\n%s\n' "$password" "$password" | smbpasswd -a -s "$username" 2>/dev/null || true
+    smbpasswd -e "$username" 2>/dev/null || true
+
+    echo "{\"ok\":true,\"name\":\"$username\"}"
+}
+
+cmd_users_delete() {
+    local username="${1:-}"
+    [ -z "$username" ] && die "Usage: freeraid users-delete <username>"
+    [ "$username" = "root" ] || [ "$username" = "freeraid" ] && die "Cannot delete system user: $username"
+
+    smbpasswd -x "$username" 2>/dev/null || true
+    userdel -r "$username" 2>/dev/null || userdel "$username" 2>/dev/null || die "Failed to delete: $username"
+    echo "{\"ok\":true}"
+}
+
+cmd_users_setpassword() {
+    local username="${1:-}" password="${2:-}"
+    [ -z "$username" ] || [ -z "$password" ] && die "Usage: freeraid users-setpassword <username> <password>"
+    echo "$username:$password" | chpasswd || die "Failed to set password"
+    printf '%s\n%s\n' "$password" "$password" | smbpasswd -a -s "$username" 2>/dev/null || true
+    echo "{\"ok\":true}"
 }
 
 cmd_config() {
@@ -1725,8 +2055,12 @@ case "${1:-help}" in
     apps-get)          cmd_apps_get "${2:-}" ;;
     apps-install)      cmd_apps_install "${2:-}" "${3:-[]}" ;;
     apps-categories)   cmd_apps_categories ;;
-    docker-list)       cmd_docker_list ;;
-    ports-used)        cmd_ports_used ;;
+    docker-list)           cmd_docker_list ;;
+    docker-get-config)     cmd_docker_get_config "${2:-}" ;;
+    docker-network-list)   cmd_docker_network_list ;;
+    docker-network-create) cmd_docker_network_create "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
+    docker-network-delete) cmd_docker_network_delete "${2:-}" ;;
+    ports-used)            cmd_ports_used ;;
     docker-start)  cmd_docker_start "${2:-}" ;;
     docker-stop)   cmd_docker_stop "${2:-}" ;;
     docker-logs)   cmd_docker_logs "${2:-}" ;;
@@ -1737,8 +2071,14 @@ case "${1:-help}" in
     replace-disk-bg)     cmd_replace_disk_bg "${2:-}" "${3:-}" ;;
     replace-disk-status) cmd_replace_disk_status "${2:-}" ;;
     registry-sync)       cmd_registry_sync ;;
-    sysinfo)       cmd_sysinfo ;;
-    set-hostname)  cmd_set_hostname "${2:-}" ;;
+    sysinfo)            cmd_sysinfo ;;
+    set-hostname)       cmd_set_hostname "${2:-}" ;;
+    network-info)       cmd_network_info ;;
+    network-set)        cmd_network_set "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" ;;
+    users-list)         cmd_users_list ;;
+    users-add)          cmd_users_add "${2:-}" "${3:-}" ;;
+    users-delete)       cmd_users_delete "${2:-}" ;;
+    users-setpassword)  cmd_users_setpassword "${2:-}" "${3:-}" ;;
     install-deps)  cmd_install_deps ;;
     config)        cmd_config ;;
     version)       cmd_version ;;

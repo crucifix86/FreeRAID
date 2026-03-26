@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Terminal — FreeRAID</title>
+  <link rel="stylesheet" href="xterm.css">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { width: 100%; height: 100%; background: #0d1117; overflow: hidden; }
+
+    .titlebar {
+      display: flex; align-items: center; gap: 10px;
+      padding: 6px 12px;
+      background: #161b22; border-bottom: 1px solid #30363d;
+      font-family: system-ui, sans-serif; font-size: 12px; color: #8b949e;
+    }
+    .titlebar-label { color: #e6edf3; font-weight: 600; }
+    .titlebar-cmd   { color: #58a6ff; font-family: monospace; }
+
+    #terminal-mount {
+      position: absolute; inset: 31px 0 0 0;
+      padding: 6px;
+    }
+    #terminal-mount .xterm { height: 100%; }
+  </style>
+</head>
+<body>
+  <div class="titlebar">
+    <span>FreeRAID</span>
+    <span>›</span>
+    <span class="titlebar-label" id="t-label">Terminal</span>
+    <span class="titlebar-cmd"  id="t-cmd"></span>
+  </div>
+  <div id="terminal-mount"></div>
+
+  <script src="../base1/cockpit.js"></script>
+  <script src="xterm.js"></script>
+  <script src="xterm-addon-fit.js"></script>
+  <script>
+    const params    = new URLSearchParams(window.location.search);
+    const container = params.get('container');
+    const shell     = params.get('shell');
+
+    let spawn, label, cmd;
+    if (container) {
+      spawn = ['docker', 'exec', '-it', container, '/bin/sh'];
+      label = container;
+      cmd   = `docker exec -it ${container} /bin/sh`;
+    } else {
+      spawn = ['/bin/bash'];
+      label = 'host shell';
+      cmd   = '/bin/bash';
+    }
+
+    document.title        = label + ' — Terminal';
+    document.getElementById('t-label').textContent = label;
+    document.getElementById('t-cmd').textContent   = cmd;
+
+    const term = new Terminal({
+      theme: { background: '#0d1117', foreground: '#e6edf3', cursor: '#58a6ff',
+               selectionBackground: '#264f78' },
+      fontFamily: '"Cascadia Code", "Fira Code", "Consolas", monospace',
+      fontSize: 13,
+      cursorBlink: true,
+      scrollback: 10000,
+    });
+
+    const fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(document.getElementById('terminal-mount'));
+    fitAddon.fit();
+
+    const channel = cockpit.channel({
+      payload:   'stream',
+      spawn:     spawn,
+      pty:       true,
+      superuser: 'require',
+      directory: '/',
+      environ:   ['TERM=xterm-256color'],
+    });
+
+    channel.addEventListener('message', (e, data) => term.write(data));
+    channel.addEventListener('close', () => {
+      term.write('\r\n\x1b[90m[session ended — you can close this tab]\x1b[0m\r\n');
+    });
+
+    term.onData(data => channel.send(data));
+    term.onResize(({ cols, rows }) => {
+      channel.control({ command: 'window-size', width: cols, height: rows });
+    });
+
+    window.addEventListener('resize', () => fitAddon.fit());
+    term.focus();
+  </script>
+</body>
+</html>

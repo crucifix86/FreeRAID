@@ -171,12 +171,14 @@ function switchTab(name) {
   document.querySelectorAll('.tab').forEach(t => {
     t.classList.toggle('active', t.dataset.tab === name);
   });
-  ['dashboard','disks','settings','shares','docker','plugins'].forEach(t => {
+  ['dashboard','disks','settings','shares','docker','plugins','network','users'].forEach(t => {
     document.getElementById('tab-'+t).classList.toggle('hidden', name !== t);
   });
-  if (name === 'shares') refreshShares();
-  if (name === 'disks')  refreshDisks();
-  if (name === 'docker') refreshDocker();
+  if (name === 'shares')  refreshShares();
+  if (name === 'disks')   refreshDisks();
+  if (name === 'docker')  { refreshDocker(); refreshNetworks(); }
+  if (name === 'network') refreshNetworkTab();
+  if (name === 'users')   refreshUsers();
 }
 
 // ── Logging ──────────────────────────────────────────────────────────────────
@@ -1217,7 +1219,7 @@ function closeAppInstall() {
   document.getElementById('app-install-backdrop').classList.add('hidden');
 }
 
-function renderInstallForm(app) {
+function renderInstallForm(app, isEdit = false) {
   const cfg = app.config || [];
   const ports = cfg.filter(c => c.type === 'Port');
   const paths = cfg.filter(c => c.type === 'Path');
@@ -1296,8 +1298,12 @@ function renderInstallForm(app) {
       </div>
     </div>
     <div class="install-actions">
-      <button class="btn btn-primary" onclick="doInstallApp('${safeName}')">Install</button>
-      <button class="btn btn-secondary" onclick="doInstallApp('${safeName}', false)">Install (don't start)</button>
+      <button class="btn btn-primary" onclick="doInstallApp('${safeName}')">
+        ${isEdit ? 'Save &amp; Restart' : 'Install'}
+      </button>
+      <button class="btn btn-secondary" onclick="doInstallApp('${safeName}', false)">
+        ${isEdit ? 'Save (no restart)' : "Install (don't start)"}
+      </button>
       <button class="btn btn-ghost" onclick="closeAppInstall()">Cancel</button>
     </div>`;
 }
@@ -1329,24 +1335,258 @@ function doInstallApp(name, autoStart = true) {
     config.push({ type: t, target: tgt, value: inp.value });
   }
 
-  closeAppInstall();
-  dklog('cmd', `Installing ${name}...`);
+  // If editing, grab the existing slug to stop before reinstalling
+  const editSlug = document.getElementById('app-install-body')?._editSlug || null;
 
-  cockpit.spawn(['freeraid', 'apps-install', name, JSON.stringify(config)], { superuser: 'require', err: 'out' })
-    .then(out => {
+  closeAppInstall();
+  dklog('cmd', `${editSlug ? 'Updating' : 'Installing'} ${name}...`);
+
+  // For edits: stop running container first, then overwrite compose
+  const preStep = editSlug
+    ? cockpit.spawn(['freeraid', 'docker-stop', editSlug], { superuser: 'require', err: 'out' }).catch(() => {})
+    : Promise.resolve();
+
+  preStep.then(() =>
+    cockpit.spawn(['freeraid', 'apps-install', name, JSON.stringify(config)], { superuser: 'require', err: 'out' })
+  ).then(out => {
       let result;
       try { result = JSON.parse(out.trim().split('\n').pop()); } catch(e) { result = {}; }
       if (result.error) { dklog('error', result.error); showAlert('error', result.error); return; }
-      dklog('success', `${name} installed as ${result.slug}`);
+      dklog('success', `${name} saved as ${result.slug}`);
       if (autoStart) {
         dklog('cmd', `Starting ${result.slug}...`);
         return cockpit.spawn(['freeraid', 'docker-start', result.slug], { superuser: 'require', err: 'out' })
-          .then(() => { dklog('success', `${name} started.`); refreshDocker(); showAlert('success', `${name} installed and started.`); })
-          .catch(err => { dklog('error', String(err)); showAlert('error', `Install ok but start failed: ${err}`); refreshDocker(); });
+          .then(() => { dklog('success', `${name} started.`); refreshDocker(); showAlert('success', `${name} ${editSlug ? 'updated and restarted' : 'installed and started'}.`); })
+          .catch(err => { dklog('error', String(err)); showAlert('error', `Save ok but start failed: ${err}`); refreshDocker(); });
       }
       refreshDocker();
-      showAlert('success', `${name} installed. Start it from the Containers list.`);
+      showAlert('success', `${name} ${editSlug ? 'updated' : 'installed'}. Start it from the Containers list.`);
     })
+    .catch(err => { dklog('error', String(err)); showAlert('error', String(err)); });
+}
+
+// ── Network Tab ───────────────────────────────────────────────────────────────
+
+function refreshNetworkTab() {
+  cockpit.spawn(['freeraid', 'network-info'], { superuser: 'require', err: 'out' })
+    .then(out => {
+      let ifaces;
+      try { ifaces = JSON.parse(out.trim().split('\n').pop()); } catch(e) { ifaces = []; }
+      if (ifaces.error) { document.getElementById('network-iface-list').innerHTML = `<div class="smart-error">${ifaces.error}</div>`; return; }
+
+      // Populate hostname
+      cockpit.spawn(['hostname'], { err: 'ignore' }).then(h => {
+        const hn = h.trim();
+        document.getElementById('net-hostname-current').textContent = hn;
+        document.getElementById('net-hostname').value = hn;
+      });
+
+      const el = document.getElementById('network-iface-list');
+      if (!ifaces.length) { el.innerHTML = '<div class="loading-msg">No interfaces found.</div>'; return; }
+
+      el.innerHTML = ifaces.map(iface => `
+        <div class="net-iface-card" id="iface-${iface.name}">
+          <div class="net-iface-header">
+            <span class="net-iface-name">${iface.name}</span>
+            <span class="net-iface-mac">${iface.mac}</span>
+            <span class="net-state-badge ${iface.state === 'UP' ? 'up' : 'down'}">${iface.state}</span>
+            <div style="margin-left:auto;display:flex;gap:6px">
+              <button class="btn btn-sm ${iface.mode==='dhcp'?'btn-primary':'btn-ghost'}"
+                onclick="setIfaceDHCP('${iface.name}')">DHCP</button>
+              <button class="btn btn-sm ${iface.mode==='static'?'btn-primary':'btn-ghost'}"
+                onclick="showIfaceStatic('${iface.name}')">Static</button>
+            </div>
+          </div>
+          <div class="net-iface-ip">${iface.ip ? `${iface.ip}/${iface.prefix}` : 'No IP'}</div>
+          ${iface.gateway ? `<div class="net-iface-meta">Gateway: ${iface.gateway}</div>` : ''}
+          ${iface.dns     ? `<div class="net-iface-meta">DNS: ${iface.dns}</div>` : ''}
+          <div class="net-static-form hidden" id="static-form-${iface.name}">
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr auto;gap:8px;align-items:end;margin-top:12px">
+              <div>
+                <label class="install-label">IP Address / Prefix</label>
+                <input type="text" class="install-input" id="sf-ip-${iface.name}"
+                  value="${iface.ip ? iface.ip+'/'+iface.prefix : ''}" placeholder="192.168.1.100/24">
+              </div>
+              <div>
+                <label class="install-label">Gateway</label>
+                <input type="text" class="install-input" id="sf-gw-${iface.name}"
+                  value="${iface.gateway}" placeholder="192.168.1.1">
+              </div>
+              <div>
+                <label class="install-label">DNS</label>
+                <input type="text" class="install-input" id="sf-dns-${iface.name}"
+                  value="${iface.dns || '8.8.8.8 1.1.1.1'}" placeholder="8.8.8.8">
+              </div>
+              <div style="grid-column:span 1"></div>
+              <button class="btn btn-primary" onclick="applyStatic('${iface.name}')">Apply</button>
+            </div>
+            <div style="font-size:11px;color:var(--accent-warn);margin-top:6px">
+              ⚠ Applying a new IP may drop your current connection briefly.
+            </div>
+          </div>
+        </div>`).join('');
+
+      // Show static form if already static
+      ifaces.filter(i => i.mode === 'static').forEach(i => showIfaceStatic(i.name));
+    })
+    .catch(err => { document.getElementById('network-iface-list').innerHTML = `<div class="smart-error">${err}</div>`; });
+}
+
+function saveHostname() {
+  const name = document.getElementById('net-hostname').value.trim();
+  if (!name) return;
+  cockpit.spawn(['freeraid', 'set-hostname', name], { superuser: 'require', err: 'out' })
+    .then(() => {
+      document.getElementById('net-hostname-current').textContent = name;
+      showAlert('success', `Hostname set to "${name}"`);
+    })
+    .catch(err => showAlert('error', String(err)));
+}
+
+function showIfaceStatic(name) {
+  document.getElementById(`static-form-${name}`)?.classList.remove('hidden');
+}
+
+function setIfaceDHCP(name) {
+  if (!confirm(`Switch ${name} to DHCP? Your IP address will change.`)) return;
+  cockpit.spawn(['freeraid', 'network-set', name, 'dhcp'], { superuser: 'require', err: 'out' })
+    .then(() => { showAlert('success', `${name} set to DHCP — IP will refresh shortly.`); setTimeout(refreshNetworkTab, 3000); })
+    .catch(err => showAlert('error', String(err)));
+}
+
+function applyStatic(name) {
+  const ip  = document.getElementById(`sf-ip-${name}`).value.trim();
+  const gw  = document.getElementById(`sf-gw-${name}`).value.trim();
+  const dns = document.getElementById(`sf-dns-${name}`).value.trim();
+  if (!ip || !gw) { showAlert('error', 'IP and Gateway are required.'); return; }
+  if (!confirm(`Apply static IP ${ip} to ${name}?\nYour connection may drop briefly.`)) return;
+  cockpit.spawn(['freeraid', 'network-set', name, 'static', ip, gw, dns], { superuser: 'require', err: 'out' })
+    .then(() => { showAlert('success', `Static IP applied to ${name}.`); setTimeout(refreshNetworkTab, 3000); })
+    .catch(err => showAlert('error', String(err)));
+}
+
+// ── Users Tab ─────────────────────────────────────────────────────────────────
+
+function refreshUsers() {
+  cockpit.spawn(['freeraid', 'users-list'], { superuser: 'require', err: 'out' })
+    .then(out => {
+      let users;
+      try { users = JSON.parse(out.trim().split('\n').pop()); } catch(e) { users = []; }
+      const el = document.getElementById('user-list');
+      if (!users.length) {
+        el.innerHTML = '<div style="font-size:13px;color:var(--text-muted);padding:12px 0">No user accounts yet. Add one above to enable share access.</div>';
+        return;
+      }
+      el.innerHTML = users.map(u => `
+        <div class="user-row">
+          <div class="user-avatar">${u.name[0].toUpperCase()}</div>
+          <div class="user-info">
+            <div class="user-name">${u.name}</div>
+            <div class="user-meta">UID ${u.uid} · ${u.samba ? '✓ Samba' : 'No Samba'} · ${u.home}</div>
+          </div>
+          <div style="margin-left:auto;display:flex;gap:6px;align-items:center">
+            <button class="btn btn-sm btn-ghost" onclick="openChangePassword('${u.name}')">Change Password</button>
+            <button class="btn btn-sm btn-danger" onclick="doDeleteUser('${u.name}')">Delete</button>
+          </div>
+        </div>`).join('');
+    })
+    .catch(err => { document.getElementById('user-list').innerHTML = `<div class="smart-error">${err}</div>`; });
+}
+
+function toggleAddUser() {
+  document.getElementById('add-user-form').classList.toggle('hidden');
+  document.getElementById('new-username').focus();
+}
+
+function doAddUser() {
+  const name  = document.getElementById('new-username').value.trim();
+  const pass  = document.getElementById('new-password').value;
+  const pass2 = document.getElementById('new-password2').value;
+  if (!name)          { showAlert('error', 'Username required.');           return; }
+  if (!pass)          { showAlert('error', 'Password required.');           return; }
+  if (pass !== pass2) { showAlert('error', 'Passwords do not match.');      return; }
+  cockpit.spawn(['freeraid', 'users-add', name, pass], { superuser: 'require', err: 'out' })
+    .then(() => {
+      showAlert('success', `User "${name}" created.`);
+      document.getElementById('new-username').value = '';
+      document.getElementById('new-password').value = '';
+      document.getElementById('new-password2').value = '';
+      document.getElementById('add-user-form').classList.add('hidden');
+      refreshUsers();
+    })
+    .catch(err => showAlert('error', String(err)));
+}
+
+function doDeleteUser(name) {
+  if (!confirm(`Delete user "${name}"?\nThis removes their system account and Samba access.`)) return;
+  cockpit.spawn(['freeraid', 'users-delete', name], { superuser: 'require', err: 'out' })
+    .then(() => { showAlert('success', `User "${name}" deleted.`); refreshUsers(); })
+    .catch(err => showAlert('error', String(err)));
+}
+
+function openChangePassword(name) {
+  const pass = prompt(`New password for ${name}:`);
+  if (!pass) return;
+  const pass2 = prompt('Confirm new password:');
+  if (pass !== pass2) { showAlert('error', 'Passwords do not match.'); return; }
+  cockpit.spawn(['freeraid', 'users-setpassword', name, pass], { superuser: 'require', err: 'out' })
+    .then(() => showAlert('success', `Password updated for "${name}".`))
+    .catch(err => showAlert('error', String(err)));
+}
+
+// ── Docker Networks ────────────────────────────────────────────────────────────
+
+function toggleNetworkPanel() {
+  const panel = document.getElementById('network-create-panel');
+  panel.classList.toggle('hidden');
+}
+
+function refreshNetworks() {
+  const el = document.getElementById('network-list');
+  if (!el) return;
+  cockpit.spawn(['freeraid', 'docker-network-list'], { superuser: 'require', err: 'out' })
+    .then(out => {
+      let nets;
+      try { nets = JSON.parse(out.trim().split('\n').pop()); } catch(e) { nets = []; }
+      if (!nets.length) {
+        el.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:8px 0">No custom networks. Create one above to give containers their own LAN IP.</div>';
+        return;
+      }
+      el.innerHTML = nets.map(n => `
+        <div class="network-row">
+          <span class="network-name">${n.name}</span>
+          <span class="network-badge">${n.driver}</span>
+          <span style="font-size:11px;color:var(--text-muted)">${n.subnet || ''}</span>
+          <button class="btn btn-sm btn-danger" style="margin-left:auto" onclick="deleteNetwork('${n.name}')">Delete</button>
+        </div>`).join('');
+    })
+    .catch(() => { el.innerHTML = '<div class="loading-msg">Could not load networks.</div>'; });
+}
+
+function doCreateNetwork() {
+  const name    = document.getElementById('net-name').value.trim();
+  const parent  = document.getElementById('net-parent').value.trim();
+  const subnet  = document.getElementById('net-subnet').value.trim();
+  const gateway = document.getElementById('net-gateway').value.trim();
+  if (!name || !parent || !subnet || !gateway) {
+    showAlert('error', 'All fields required to create a network.'); return;
+  }
+  dklog('cmd', `Creating network ${name}...`);
+  cockpit.spawn(['freeraid', 'docker-network-create', name, parent, subnet, gateway],
+    { superuser: 'require', err: 'out' })
+    .then(() => {
+      dklog('success', `Network ${name} created.`);
+      showAlert('success', `Network "${name}" created. Select it as "Custom" in any container's network settings.`);
+      document.getElementById('network-create-panel').classList.add('hidden');
+      refreshNetworks();
+    })
+    .catch(err => { dklog('error', String(err)); showAlert('error', String(err)); });
+}
+
+function deleteNetwork(name) {
+  if (!confirm(`Delete network "${name}"?\nContainers using it will lose network access.`)) return;
+  cockpit.spawn(['freeraid', 'docker-network-delete', name], { superuser: 'require', err: 'out' })
+    .then(() => { dklog('success', `Network ${name} deleted.`); refreshNetworks(); })
     .catch(err => { dklog('error', String(err)); showAlert('error', String(err)); });
 }
 
@@ -1488,21 +1728,64 @@ function dockerOpenWebUI(name) {
   window.open(url, '_blank');
 }
 
+// ── Terminal (new tab, xterm.js + Cockpit PTY) ────────────────────────────────
+
 function dockerTerminalCmd(name) {
-  const cmd = `docker exec -it ${name} /bin/sh\n`;
-  // Navigate to Cockpit terminal and pre-fill the command
-  cockpit.jump('/system/terminal');
-  // Give terminal a moment to load then send the command via clipboard fallback
-  setTimeout(() => {
-    navigator.clipboard.writeText(cmd.trim()).catch(() => {});
-  }, 500);
+  const url = `terminal.html?container=${encodeURIComponent(name)}`;
+  window.open(url, '_blank');
+}
+
+function terminalNewShell() {
+  window.open('terminal.html?shell=1', '_blank');
 }
 
 function dockerEdit(name) {
-  // Re-open install form using the stored app name label, or slug
-  const c = _dockerContainers.find(x => x.name === name);
-  const appName = (c && c.webui) ? name : name; // use slug as fallback
-  openAppInstall(encodeURIComponent(appName));
+  // Read current compose and pre-fill the install form with existing values
+  const backdrop = document.getElementById('app-install-backdrop');
+  const body     = document.getElementById('app-install-body');
+  const title    = document.getElementById('app-install-title');
+  const iconEl   = document.getElementById('app-install-icon');
+  title.textContent = `Edit: ${name}`;
+  iconEl.src = '';
+  body.innerHTML = '<div class="loading-msg">Loading current config...</div>';
+  backdrop.classList.remove('hidden');
+
+  Promise.all([
+    cockpit.spawn(['freeraid', 'docker-get-config', name], { superuser: 'require', err: 'out' }),
+    cockpit.spawn(['freeraid', 'ports-used'],               { superuser: 'require', err: 'out' }),
+  ]).then(([cfgOut, portsOut]) => {
+    let app;
+    try {
+      const lines = cfgOut.trim().split('\n');
+      app = JSON.parse(lines[lines.length - 1]);
+    } catch(e) { body.innerHTML = `<div class="smart-error">Parse error: ${e}</div>`; return; }
+    if (app.error) { body.innerHTML = `<div class="smart-error">${app.error}</div>`; return; }
+
+    try {
+      const portLines = portsOut.trim().split('\n');
+      const ports = JSON.parse(portLines[portLines.length - 1]);
+      _usedPorts = new Set(ports.map(Number));
+    } catch(e) { _usedPorts = new Set(); }
+
+    // Pre-fill network fields into the app object
+    body.innerHTML = renderInstallForm(app, true);
+    body._editSlug = name;  // used by doInstallApp to stop old container
+
+    // Pre-select the correct network type
+    const netSel = body.querySelector('select[data-type="freeraid.network"]');
+    const customFields = body.querySelector('#custom-network-fields');
+    const net = app.network || 'bridge';
+    if (net === 'bridge' || net === 'host') {
+      if (netSel) netSel.value = net;
+    } else {
+      if (netSel) netSel.value = 'custom';
+      if (customFields) customFields.style.display = '';
+      const nameInput = body.querySelector('#custom-network-name');
+      const ipInput   = body.querySelector('#custom-network-ip');
+      if (nameInput) nameInput.value = net;
+      if (ipInput)   ipInput.value   = app.network_ip || '';
+    }
+  }).catch(err => { body.innerHTML = `<div class="smart-error">${err}</div>`; });
 }
 
 function dockerDeleteOne(name) {

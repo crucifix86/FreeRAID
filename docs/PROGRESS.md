@@ -282,7 +282,7 @@ Features Unraid has that FreeRAID doesn't yet. Grouped by area.
 ### Dashboard / Monitoring
 - [x] Disk temperatures (from SMART data)
 - [x] Full SMART data per disk — health, ATA attributes, self-test history
-- [ ] CPU / RAM / network usage graphs
+- [x] CPU / RAM / network usage graphs (sparklines, live polling)
 - [ ] Per-disk I/O stats
 - [ ] System log viewer in UI
 - [ ] Notifications — email/Telegram alerts for array events, drive warnings

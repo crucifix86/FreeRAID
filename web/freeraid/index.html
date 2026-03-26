@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>FreeRAID</title>
   <link rel="stylesheet" href="freeraid.css">
+  <link rel="stylesheet" href="xterm.css">
 </head>
 <body>
   <div id="app">
@@ -29,6 +30,8 @@
       <button class="tab" data-tab="settings" onclick="switchTab('settings')">Settings</button>
       <button class="tab" data-tab="disks" onclick="switchTab('disks')">Disks</button>
       <button class="tab" data-tab="shares" onclick="switchTab('shares')">Shares</button>
+      <button class="tab" data-tab="users" onclick="switchTab('users')">Users</button>
+      <button class="tab" data-tab="network" onclick="switchTab('network')">Network</button>
       <button class="tab" data-tab="docker" onclick="switchTab('docker')">Docker</button>
       <button class="tab" data-tab="plugins" onclick="switchTab('plugins')">Plugins</button>
     </nav>
@@ -186,6 +189,72 @@
         </div>
 
       </div><!-- end settings -->
+
+      <!-- ── NETWORK TAB ── -->
+      <div id="tab-network" class="hidden">
+
+        <div class="settings-section">
+          <h2 class="settings-section-title">
+            Hostname
+            <button class="btn btn-sm btn-primary" style="margin-left:auto" onclick="saveHostname()">Save</button>
+          </h2>
+          <div class="settings-card">
+            <div class="settings-row">
+              <div style="flex:1">
+                <div class="settings-label">Hostname</div>
+                <input type="text" class="install-input" id="net-hostname" placeholder="freeraid" style="max-width:280px">
+              </div>
+              <div>
+                <div class="settings-label">Current</div>
+                <div class="settings-value" id="net-hostname-current">—</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <h2 class="settings-section-title">Interfaces</h2>
+          <div id="network-iface-list">
+            <div class="loading-msg">Loading...</div>
+          </div>
+        </div>
+
+      </div><!-- end network -->
+
+      <!-- ── USERS TAB ── -->
+      <div id="tab-users" class="hidden">
+
+        <div class="settings-section">
+          <h2 class="settings-section-title">
+            User Accounts
+            <button class="btn btn-sm btn-primary" style="margin-left:auto" onclick="toggleAddUser()">+ Add User</button>
+          </h2>
+
+          <div id="add-user-form" class="hidden settings-card" style="margin-bottom:12px">
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:end">
+              <div>
+                <label class="install-label">Username</label>
+                <input type="text" class="install-input" id="new-username" placeholder="john" autocomplete="off">
+              </div>
+              <div>
+                <label class="install-label">Password</label>
+                <input type="password" class="install-input" id="new-password" autocomplete="new-password">
+              </div>
+              <div>
+                <label class="install-label">Confirm Password</label>
+                <input type="password" class="install-input" id="new-password2" autocomplete="new-password">
+              </div>
+              <button class="btn btn-primary" onclick="doAddUser()">Create</button>
+            </div>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:8px">Creates a system + Samba account. The user can access network shares with these credentials.</div>
+          </div>
+
+          <div id="user-list">
+            <div class="loading-msg">Loading...</div>
+          </div>
+        </div>
+
+      </div><!-- end users -->
 
       <!-- ── DISKS TAB ── -->
       <div id="tab-disks" class="hidden">
@@ -411,6 +480,41 @@
           </div>
         </div>
 
+        <!-- Networks -->
+        <div class="settings-section">
+          <h2 class="settings-section-title">
+            Networks
+            <button class="btn btn-sm btn-primary" style="margin-left:auto" onclick="toggleNetworkPanel()">Create Network</button>
+          </h2>
+          <div id="network-create-panel" class="hidden" style="margin-bottom:12px">
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:8px;align-items:end">
+              <div>
+                <label class="install-label">Network Name</label>
+                <input type="text" class="install-input" id="net-name" placeholder="freeraid-br" value="freeraid-br">
+              </div>
+              <div>
+                <label class="install-label">Parent Interface</label>
+                <input type="text" class="install-input" id="net-parent" placeholder="ens3" value="ens3">
+              </div>
+              <div>
+                <label class="install-label">Subnet</label>
+                <input type="text" class="install-input" id="net-subnet" placeholder="192.168.1.0/24">
+              </div>
+              <div>
+                <label class="install-label">Gateway</label>
+                <input type="text" class="install-input" id="net-gateway" placeholder="192.168.1.1">
+              </div>
+            </div>
+            <div style="margin-top:8px;display:flex;gap:8px;align-items:center">
+              <button class="btn btn-sm btn-primary" onclick="doCreateNetwork()">Create macvlan Network</button>
+              <span style="font-size:11px;color:var(--text-muted)">macvlan gives containers their own IP on your LAN — containers appear as real devices on the network.</span>
+            </div>
+          </div>
+          <div id="network-list">
+            <div class="loading-msg" style="font-size:12px">Loading networks...</div>
+          </div>
+        </div>
+
         <!-- Docker log -->
         <div class="settings-section">
           <h2 class="settings-section-title">
@@ -463,6 +567,8 @@
   </div>
 
   <script src="../base1/cockpit.js"></script>
+  <script src="xterm.js"></script>
+  <script src="xterm-addon-fit.js"></script>
   <script src="freeraid.js"></script>
 </body>
 </html>
