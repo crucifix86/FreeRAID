@@ -346,7 +346,7 @@ Features Unraid has that FreeRAID doesn't yet. Grouped by area.
 - [x] Full SMART data per disk in UI
 - [x] UUID-based drive tracking (survives device renumbering)
 - [ ] Drive pre-clear utility
-- [x] Disk spin-down — per-drive idle timeout via hdparm, disabled by default, persists across reboots
+- [x] Disk spin-down — per-drive idle timeout via hdparm, disabled by default (parity defaults to 30min), persists across reboots
 
 ### Docker
 - [x] App browser — 3000+ apps from Unraid Community Applications feed
