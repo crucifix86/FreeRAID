@@ -146,6 +146,38 @@ function _drawSparkline(canvasId, data, color) {
 
 window.addEventListener('load', () => {
   if (typeof cockpit === 'undefined') initFallback();
+
+  // Verify we have superuser access before doing anything else.
+  // If the user logged in as a non-root account without admin elevation,
+  // every cockpit.spawn call silently fails. Catch this early.
+  cockpit.spawn(['id', '-u'], { superuser: 'require', err: 'ignore' })
+    .then(out => {
+      if (out.trim() !== '0') {
+        _showRootRequired();
+        return;
+      }
+      _initApp();
+    })
+    .catch(() => _showRootRequired());
+});
+
+function _showRootRequired() {
+  document.getElementById('wizard-overlay').classList.add('hidden');
+  document.body.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:center;height:100vh;background:#0d0d0d;font-family:sans-serif">
+      <div style="background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:40px;max-width:420px;text-align:center">
+        <div style="font-size:2em;margin-bottom:16px">🔒</div>
+        <div style="font-size:1.2em;font-weight:600;color:#f87171;margin-bottom:12px">Root access required</div>
+        <div style="color:#aaa;font-size:0.9em;margin-bottom:24px;line-height:1.5">
+          FreeRAID must be accessed as <strong style="color:#fff">root</strong>.<br>
+          Please log out and log back in as <code style="background:#2a2a2a;padding:2px 6px;border-radius:4px">root</code>.
+        </div>
+        <a href="/cockpit/logout" style="display:inline-block;background:#ef4444;color:#fff;padding:10px 24px;border-radius:6px;text-decoration:none;font-weight:600">Log out &amp; switch user</a>
+      </div>
+    </div>`;
+}
+
+function _initApp() {
   checkSetupStatus();
   refreshStatus();
   setInterval(refreshStatus, 8000);
@@ -153,13 +185,16 @@ window.addEventListener('load', () => {
   setInterval(refreshSysinfo, 4000);
   loadParitySchedule();
   loadMoverStatus();
+  loadTurboWrite();
+  loadBalancerStatus();
+  refreshUpsStatus();
   // Skip update check if we just finished an update (flag set before reload)
   if (!sessionStorage.getItem('justUpdated')) {
     doCheckUpdate();
   } else {
     sessionStorage.removeItem('justUpdated');
   }
-});
+}
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -182,11 +217,12 @@ function switchTab(name) {
     document.getElementById('tab-'+t).classList.toggle('hidden', name !== t);
   });
   if (name === 'shares')  refreshShares();
-  if (name === 'disks')   refreshDisks();
+  if (name === 'disks')   { refreshDisks(); refreshPools(); }
   if (name === 'docker')  { refreshDocker(); refreshNetworks(); }
-  if (name === 'network') refreshNetworkTab();
+  if (name === 'network') { refreshNetworkTab(); refreshTailscale(); }
   if (name === 'users')   refreshUsers();
   if (name === 'logs')    fetchLog();
+  if (name === 'settings') { loadNotifSettings(); loadUpsConfig(); }
 }
 
 // ── Logging ──────────────────────────────────────────────────────────────────
@@ -285,6 +321,12 @@ function applyStatus(data) {
   } catch(_) {}
 
   renderDrives(data);
+
+  if (arrayState === 'started') {
+    startIoStatLoop();
+  } else {
+    stopIoStatLoop();
+  }
 }
 
 // ── Drive cards ──────────────────────────────────────────────────────────────
@@ -402,6 +444,10 @@ function driveCard(drive, type) {
     <div class="drive-device">${drive.device}</div>
     <div class="drive-label">${drive.label}${drive.size ? ' · ' + drive.size.trim() : ''}</div>
     ${usageHtml}
+    <div class="drive-io-row hidden" data-io-dev="${drive.device}">
+      <span class="io-badge io-read">▼ <span class="io-val">0 K</span>B/s</span>
+      <span class="io-badge io-write">▲ <span class="io-val">0 K</span>B/s</span>
+    </div>
   </div>`;
 }
 
@@ -761,6 +807,165 @@ const dlog = (level, text) => appendLog('disks-log-panel', level, text);
 
 let _assignDev = null;
 
+// ── Extra Storage Pools ───────────────────────────────────────────────────────
+
+let _pools = [];
+
+function refreshPools() {
+  let buf = '';
+  cockpit.spawn(['freeraid', 'pool-list'], { superuser: 'require', err: 'ignore' })
+    .stream(d => { buf += d; })
+    .then(() => {
+      try {
+        const start = buf.indexOf('[');
+        _pools = JSON.parse(buf.slice(start));
+      } catch(_) { _pools = []; }
+      renderPools();
+      _populatePoolSelectors();
+    })
+    .catch(() => { _pools = []; renderPools(); });
+}
+
+function renderPools() {
+  const el = document.getElementById('pools-list');
+  if (!_pools.length) {
+    el.innerHTML = '<div class="loading-msg">No extra pools. Create one above to add drives outside the main array.</div>';
+    return;
+  }
+  el.innerHTML = _pools.map(p => {
+    const diskCount = (p.disks || []).length;
+    const stateClass = p.mounted ? 'status-healthy' : 'status-stopped';
+    const stateLabel = p.mounted ? 'Running' : 'Stopped';
+    const usageBar = p.mounted && p.pct ? `
+      <div class="usage-bar-bg" style="margin:4px 0 2px">
+        <div class="usage-bar-fill" style="width:${parseInt(p.pct)||0}%"></div>
+      </div>
+      <div style="font-size:11px;color:var(--text-dim)">${p.used} used / ${p.free} free (${p.pct})</div>` : '';
+    const disksList = (p.disks || []).map(d => `
+      <div class="pool-disk-row">
+        <span style="font-family:monospace">${d.device}</span>
+        <span style="color:var(--text-dim);font-size:11px">${d.slot}</span>
+        <button class="btn btn-xs btn-ghost" onclick="poolUnassignDisk(${JSON.stringify(p.name)}, ${JSON.stringify(d.device)})" title="Unassign">✕</button>
+      </div>`).join('');
+    const pn = JSON.stringify(p.name);
+    return `<div class="pool-card">
+      <div class="pool-card-header">
+        <div class="pool-name">${p.name}</div>
+        <span class="pool-state ${stateClass}">${stateLabel}</span>
+        <div style="margin-left:auto;display:flex;gap:6px">
+          ${p.mounted
+            ? `<button class="btn btn-sm btn-secondary" onclick="poolStop(${pn})">Stop</button>`
+            : `<button class="btn btn-sm btn-primary" onclick="poolStart(${pn})">Start</button>`
+          }
+          <button class="btn btn-sm btn-ghost" onclick="poolRemove(${pn})" title="Remove pool">Remove</button>
+        </div>
+      </div>
+      <div class="pool-meta">
+        <span>${diskCount} disk${diskCount !== 1 ? 's' : ''}</span>
+        <span style="color:var(--text-dim);font-size:11px">${p.mountpoint}</span>
+      </div>
+      ${usageBar}
+      <div class="pool-disks">${disksList || '<div style="font-size:12px;color:var(--text-dim);padding:4px 0">No drives assigned yet.</div>'}</div>
+    </div>`;
+  }).join('');
+}
+
+function _populatePoolSelectors() {
+  // Update the "Storage Pool" dropdown in the Add Share form
+  const sel = document.getElementById('new-share-pool');
+  if (!sel) return;
+  // Keep only the first option (main array), then add extra pools
+  while (sel.options.length > 1) sel.remove(1);
+  _pools.forEach(p => {
+    const opt = document.createElement('option');
+    opt.value = p.name;
+    opt.textContent = `${p.name} (extra pool)`;
+    sel.appendChild(opt);
+  });
+
+  // Update assign modal with pool options
+  const roleList = document.getElementById('assign-role-list');
+  if (!roleList) return;
+  // Remove previously injected pool buttons
+  roleList.querySelectorAll('.pool-assign-btn').forEach(b => b.remove());
+  _pools.forEach(p => {
+    const btn = document.createElement('button');
+    btn.className = 'assign-role-btn pool-assign-btn';
+    btn.innerHTML = `<span class="assign-role-icon">🗄</span>
+      <div>
+        <div class="assign-role-name">Pool: ${p.name}</div>
+        <div class="assign-role-desc">${p.mountpoint} — no parity</div>
+      </div>`;
+    btn.onclick = () => doAssignPool(p.name);
+    roleList.appendChild(btn);
+  });
+}
+
+function toggleAddPool() {
+  document.getElementById('add-pool-form').classList.toggle('hidden');
+  if (!document.getElementById('add-pool-form').classList.contains('hidden'))
+    document.getElementById('new-pool-name').focus();
+}
+
+function doAddPool() {
+  const name = document.getElementById('new-pool-name').value.trim();
+  if (!name) { alert('Pool name is required'); return; }
+  if (!/^[a-zA-Z0-9_-]+$/.test(name)) { alert('Pool name must be alphanumeric (underscores/hyphens ok)'); return; }
+  toggleAddPool();
+  dlog('cmd', `Creating pool: ${name}`);
+  runCmd(['pool-add', name], 'disks-log-panel')
+    .then(() => {
+      document.getElementById('new-pool-name').value = '';
+      dlog('success', `Pool "${name}" created.`);
+      refreshPools();
+    })
+    .catch(err => dlog('error', String(err)));
+}
+
+function poolRemove(name) {
+  if (!confirm(`Remove pool "${name}"?\n\nDrives will be unassigned but data is NOT deleted.`)) return;
+  dlog('cmd', `Removing pool: ${name}`);
+  runCmd(['pool-remove', name], 'disks-log-panel')
+    .then(() => { refreshPools(); refreshDisks(); })
+    .catch(err => dlog('error', String(err)));
+}
+
+function poolStart(name) {
+  dlog('cmd', `Starting pool: ${name}`);
+  runCmd(['pool-start', name], 'disks-log-panel')
+    .then(() => { dlog('success', `Pool "${name}" started.`); refreshPools(); })
+    .catch(err => dlog('error', String(err)));
+}
+
+function poolStop(name) {
+  dlog('cmd', `Stopping pool: ${name}`);
+  runCmd(['pool-stop', name], 'disks-log-panel')
+    .then(() => { dlog('success', `Pool "${name}" stopped.`); refreshPools(); })
+    .catch(err => dlog('error', String(err)));
+}
+
+function poolUnassignDisk(poolName, dev) {
+  if (!confirm(`Unassign ${dev} from pool "${poolName}"?`)) return;
+  dlog('cmd', `Unassigning ${dev} from pool ${poolName}`);
+  runCmd(['pool-unassign', poolName, dev], 'disks-log-panel')
+    .then(() => { refreshPools(); refreshDisks(); })
+    .catch(err => dlog('error', String(err)));
+}
+
+function doAssignPool(poolName) {
+  if (!_assignDev) return;
+  const dev = _assignDev;
+  closeAssignModal();
+  dlog('cmd', `Assigning ${dev} to pool ${poolName}...`);
+  runCmd(['pool-assign', poolName, dev], 'disks-log-panel')
+    .then(() => {
+      dlog('success', `${dev} assigned to pool "${poolName}".`);
+      refreshDisks();
+      refreshPools();
+    })
+    .catch(err => dlog('error', String(err)));
+}
+
 function refreshDisks() {
   refreshSpindown();
   const el = document.getElementById('disk-scan-list');
@@ -812,6 +1017,9 @@ function renderDisks(disks) {
     const unassignBtn = (stopped && d.assigned)
       ? `<button class="btn btn-sm btn-ghost" onclick="doUnassign('${d.device}')">Unassign</button>`
       : '';
+    const preClearBtn = (!d.assigned)
+      ? `<button class="btn btn-sm btn-ghost" onclick="startPreclear('${d.device}')">Pre-clear</button>`
+      : '';
 
     const model = d.model || 'Unknown';
     const fsBadge = d.has_fs ? `<span class="disk-type-badge" style="color:var(--yellow)">${d.has_fs}</span>` : '';
@@ -822,7 +1030,7 @@ function renderDisks(disks) {
       <div style="display:flex;gap:6px;align-items:center">${typeBadge}</div>
       <div class="disk-size">${d.size}</div>
       <div style="min-width:140px">${statusHtml}</div>
-      <div style="display:flex;gap:6px">${assignBtn}${unassignBtn}</div>
+      <div style="display:flex;gap:6px">${assignBtn}${unassignBtn}${preClearBtn}</div>
     </div>`;
   }).join('');
 }
@@ -857,6 +1065,100 @@ function doUnassign(dev) {
   dlog('cmd', `Unassigning ${dev}...`);
   runCmd(['disks-unassign', dev], 'disks-log-panel')
     .then(() => { refreshDisks(); refreshStatus(); })
+    .catch(err => dlog('error', String(err)));
+}
+
+// ── Pre-clear ────────────────────────────────────────────────────────────────
+
+const _preclearPollers = {}; // dev → intervalId
+
+function startPreclear(dev) {
+  if (!confirm(`Pre-clear ${dev}?\n\nThis will:\n1. Run a SMART short self-test\n2. Zero the entire drive (this takes a long time)\n3. Run a SMART long self-test\n\nAll data on ${dev} will be destroyed.`)) return;
+
+  dlog('cmd', `Starting pre-clear on ${dev}...`);
+  cockpit.spawn(['freeraid', 'preclear-bg', dev], { superuser: 'require', err: 'out' })
+    .then(out => {
+      try { JSON.parse(out.trim()); } catch(_) {}
+      dlog('info', `Pre-clear started on ${dev}. Monitoring progress...`);
+      _startPreclearPoll(dev);
+    })
+    .catch(err => dlog('error', `Pre-clear failed to start: ${err}`));
+}
+
+function _startPreclearPoll(dev) {
+  if (_preclearPollers[dev]) clearInterval(_preclearPollers[dev]);
+  _preclearPollers[dev] = setInterval(() => _pollPreclear(dev), 5000);
+  _pollPreclear(dev);
+}
+
+function _pollPreclear(dev) {
+  cockpit.spawn(['freeraid', 'preclear-status', dev], { superuser: 'require', err: 'out' })
+    .then(out => {
+      let s;
+      try { s = JSON.parse(out.trim()); } catch(_) { return; }
+      _renderPreclearProgress(dev, s);
+      if (!s.running && s.stage !== 'idle') {
+        clearInterval(_preclearPollers[dev]);
+        delete _preclearPollers[dev];
+        if (s.stage === 'done') {
+          dlog('success', `Pre-clear complete on ${dev} — drive is ready to assign.`);
+        } else {
+          dlog('warn', `Pre-clear on ${dev} ended (stage: ${s.stage}).`);
+        }
+        refreshDisks();
+      }
+    })
+    .catch(() => {});
+}
+
+function _renderPreclearProgress(dev, s) {
+  const panelId = 'preclear-bar-' + dev.replace(/\//g, '_');
+  let panel = document.getElementById(panelId);
+  if (!panel) {
+    // Insert after the disk scan card for this device
+    const scanList = document.getElementById('disk-scan-list');
+    if (!scanList) return;
+    panel = document.createElement('div');
+    panel.id = panelId;
+    panel.className = 'preclear-panel';
+    scanList.appendChild(panel);
+  }
+
+  const stageLabels = {
+    starting: 'Starting...', smart_short: 'SMART short test',
+    zeroing: 'Zeroing drive', smart_long: 'SMART long test', done: 'Complete'
+  };
+  const label = stageLabels[s.stage] || s.stage;
+  const pct = s.pct || 0;
+  const barClass = s.stage === 'done' ? 'preclear-bar-done' : 'preclear-bar-active';
+  const cancelBtn = s.running
+    ? `<button class="btn btn-sm btn-danger" onclick="cancelPreclear('${dev}')">Cancel</button>`
+    : '';
+
+  panel.innerHTML = `
+    <div class="preclear-header">
+      <span class="preclear-dev">${dev}</span>
+      <span class="preclear-stage">${label}</span>
+      <span class="preclear-pct">${pct}%</span>
+      ${cancelBtn}
+    </div>
+    <div class="preclear-bar-bg">
+      <div class="preclear-bar-fill ${barClass}" style="width:${pct}%"></div>
+    </div>
+    ${s.message ? `<div class="preclear-msg">${s.message}</div>` : ''}`;
+}
+
+function cancelPreclear(dev) {
+  if (!confirm(`Cancel pre-clear on ${dev}?`)) return;
+  clearInterval(_preclearPollers[dev]);
+  delete _preclearPollers[dev];
+  cockpit.spawn(['freeraid', 'preclear-cancel', dev], { superuser: 'require', err: 'out' })
+    .then(() => {
+      dlog('info', `Pre-clear cancelled on ${dev}.`);
+      const panelId = 'preclear-bar-' + dev.replace(/\//g, '_');
+      const panel = document.getElementById(panelId);
+      if (panel) panel.remove();
+    })
     .catch(err => dlog('error', String(err)));
 }
 
@@ -899,18 +1201,38 @@ function renderShares(shares) {
     const secBadge    = `<span class="badge ${secClass}">${secLabel}</span>`;
     const cacheBadge  = s.cache_mode ? `<span class="badge badge-cache">Cache: ${s.cache_mode}</span>` : '';
     const unraidBadge = s._imported_from_unraid ? `<span class="badge badge-unraid">Unraid</span>` : '';
+    const pwBadge     = s.share_password_set ? `<span class="badge badge-pw">Password</span>` : '';
     const nameSafe    = s.name.replace(/'/g, "\\'");
     const nameJson    = JSON.stringify(s.name);
     return `<div class="share-card" id="share-card-${s.name}">
       <div class="share-name">${s.name}</div>
       <div class="share-path">${s.path}</div>
-      <div class="share-badges">${smbBadge}${nfsBadge}${secBadge}${cacheBadge}${unraidBadge}</div>
+      <div class="share-badges">${smbBadge}${nfsBadge}${secBadge}${cacheBadge}${unraidBadge}${pwBadge}</div>
       <div class="share-actions">
         <button class="btn btn-sm btn-secondary" onclick="toggleSharePerms(${nameJson})">Permissions</button>
+        <button class="btn btn-sm btn-secondary" onclick="toggleShareNfs(${nameJson})">NFS</button>
+        <button class="btn btn-sm btn-secondary" onclick="toggleSharePassword(${nameJson})">Password</button>
         <button class="btn btn-sm btn-ghost" onclick="removeShare('${nameSafe}')">Remove</button>
       </div>
     </div>
-    <div class="share-perms-panel hidden" id="share-perms-${s.name}"></div>`;
+    <div class="share-perms-panel hidden" id="share-perms-${s.name}"></div>
+    <div class="share-perms-panel hidden" id="share-nfs-${s.name}"></div>
+    <div class="share-perms-panel hidden" id="share-pw-${s.name}">
+      <div class="share-panel-inner">
+        <div class="panel-title">Share Password — <span style="color:var(--text-muted);font-weight:400">${s.name}</span></div>
+        <p style="font-size:0.85em;color:var(--text-muted);margin:0 0 10px">
+          Set a password so clients connect as <code>freeraid_share_${s.name}</code> with this password.
+          Leave blank to remove password protection.
+        </p>
+        <label class="field-label">New Password</label>
+        <input type="password" id="share-pw-input-${s.name}" class="text-input" placeholder="Leave blank to remove" autocomplete="new-password">
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <button class="btn btn-primary btn-sm" onclick="saveSharePassword(${nameJson})">Save</button>
+          <button class="btn btn-ghost btn-sm" onclick="document.getElementById('share-pw-${s.name}').classList.add('hidden')">Cancel</button>
+        </div>
+        <div id="share-pw-msg-${s.name}" style="margin-top:8px;font-size:0.85em"></div>
+      </div>
+    </div>`;
   }).join('');
 }
 
@@ -1028,6 +1350,107 @@ function saveSharePerms(name) {
     .catch(err => slog('error', String(err)));
 }
 
+function toggleShareNfs(name) {
+  const panel = document.getElementById('share-nfs-' + name);
+  if (!panel.classList.contains('hidden')) {
+    panel.classList.add('hidden');
+    return;
+  }
+  panel.innerHTML = '<div class="loading-msg" style="padding:12px">Loading...</div>';
+  panel.classList.remove('hidden');
+
+  let shareBuf = '';
+  cockpit.spawn(['freeraid', 'shares-list'], { superuser: 'require', err: 'ignore' })
+    .stream(d => { shareBuf += d; })
+    .then(() => {
+      let shares;
+      try { shares = JSON.parse(shareBuf); } catch(e) { panel.innerHTML = '<div style="padding:12px;color:var(--red)">Error loading share data.</div>'; return; }
+      const share = shares.find(s => s.name === name);
+      if (!share) { panel.innerHTML = '<div style="padding:12px;color:var(--red)">Share not found.</div>'; return; }
+
+      const enabled  = share.nfs_enabled ? 'checked' : '';
+      const clients  = share.nfs_clients  || '*';
+      const options  = share.nfs_options  || 'rw,sync,no_subtree_check,no_root_squash';
+
+      panel.innerHTML = `
+        <div class="share-perms-body">
+          <div class="perms-row" style="align-items:center;margin-bottom:12px">
+            <label style="display:flex;align-items:center;gap:8px;font-size:14px;font-weight:500;cursor:pointer">
+              <input type="checkbox" id="nfs-enabled-${name}" ${enabled} style="accent-color:var(--accent)">
+              Enable NFS export for this share
+            </label>
+          </div>
+          <div class="perms-row" style="flex-direction:column;gap:4px;margin-bottom:10px">
+            <label class="settings-label">Allowed Clients</label>
+            <input type="text" class="install-input" id="nfs-clients-${name}" value="${clients}"
+              placeholder="* or 192.168.1.0/24 or hostname" style="max-width:320px">
+            <div style="font-size:11px;color:var(--text-dim);margin-top:2px">
+              Use * for all, or a subnet like 192.168.1.0/24, or a specific IP
+            </div>
+          </div>
+          <div class="perms-row" style="flex-direction:column;gap:4px;margin-bottom:14px">
+            <label class="settings-label">Export Options</label>
+            <input type="text" class="install-input" id="nfs-options-${name}" value="${options}"
+              placeholder="rw,sync,no_subtree_check,no_root_squash" style="max-width:400px">
+            <div style="font-size:11px;color:var(--text-dim);margin-top:2px">
+              Common: rw/ro, sync/async, no_subtree_check, no_root_squash/root_squash
+            </div>
+          </div>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-primary btn-sm" onclick="saveShareNfs('${name}')">Save NFS</button>
+            <button class="btn btn-ghost btn-sm" onclick="document.getElementById('share-nfs-${name}').classList.add('hidden')">Cancel</button>
+          </div>
+        </div>`;
+    })
+    .catch(() => { panel.innerHTML = '<div style="padding:12px;color:var(--red)">Failed to load shares.</div>'; });
+}
+
+function saveShareNfs(name) {
+  const enabled = document.getElementById('nfs-enabled-' + name).checked ? 'true' : 'false';
+  const clients = document.getElementById('nfs-clients-' + name).value.trim() || '*';
+  const options = document.getElementById('nfs-options-' + name).value.trim() || 'rw,sync,no_subtree_check,no_root_squash';
+
+  slog('cmd', `Updating NFS for ${name}...`);
+  runCmd(['shares-set-nfs', name, enabled, clients, options], 'shares-log-panel')
+    .then(() => {
+      slog('success', `NFS settings saved for ${name}.`);
+      document.getElementById('share-nfs-' + name).classList.add('hidden');
+      refreshShares();
+    })
+    .catch(err => slog('error', String(err)));
+}
+
+function toggleSharePassword(name) {
+  const panel = document.getElementById('share-pw-' + name);
+  panel.classList.toggle('hidden');
+  if (!panel.classList.contains('hidden')) {
+    document.getElementById('share-pw-input-' + name).focus();
+  }
+}
+
+function saveSharePassword(name) {
+  const pw  = document.getElementById('share-pw-input-' + name).value;
+  const msg = document.getElementById('share-pw-msg-' + name);
+  msg.textContent = 'Saving...';
+  msg.style.color = 'var(--text-muted)';
+
+  cockpit.spawn(['freeraid', 'shares-set-password', name, pw], { superuser: 'require', err: 'message' })
+    .stream(d => { msg.textContent = d.trim(); })
+    .then(() => {
+      msg.style.color = 'var(--green)';
+      msg.textContent = pw ? `Password set. Connect as: freeraid_share_${name}` : 'Password removed.';
+      document.getElementById('share-pw-input-' + name).value = '';
+      setTimeout(() => {
+        document.getElementById('share-pw-' + name).classList.add('hidden');
+        refreshShares();
+      }, 1500);
+    })
+    .catch(err => {
+      msg.style.color = 'var(--red)';
+      msg.textContent = String(err);
+    });
+}
+
 function toggleAddShare() {
   document.getElementById('add-share-form').classList.toggle('hidden');
 }
@@ -1036,6 +1459,7 @@ function doAddShare() {
   const name     = document.getElementById('new-share-name').value.trim();
   const comment  = document.getElementById('new-share-comment').value.trim();
   const security = document.getElementById('new-share-security').value;
+  const pool     = document.getElementById('new-share-pool').value;
   const cache    = document.getElementById('new-share-cache').value;
   const smb      = document.getElementById('new-share-smb').checked;
   const nfs      = document.getElementById('new-share-nfs').checked;
@@ -1051,7 +1475,7 @@ function doAddShare() {
       // Patch the extra fields into config via jq
       return new Promise((resolve, reject) => {
         cockpit.spawn(['bash', '-c',
-          `jq '(.shares[] | select(.name=="${name}")) |= . + {"comment":"${comment}","smb_security":"${security}","cache_mode":"${cache}","smb_enabled":${smb},"nfs_enabled":${nfs}}' /boot/config/freeraid.conf.json > /tmp/fr.tmp && mv /tmp/fr.tmp /boot/config/freeraid.conf.json`
+          `jq '(.shares[] | select(.name=="${name}")) |= . + {"comment":"${comment}","smb_security":"${security}","pool":"${pool}","cache_mode":"${cache}","smb_enabled":${smb},"nfs_enabled":${nfs}}' /boot/config/freeraid.conf.json > /tmp/fr.tmp && mv /tmp/fr.tmp /boot/config/freeraid.conf.json`
         ], { superuser: 'require' })
           .then(resolve).catch(reject);
       });
@@ -1497,6 +1921,75 @@ function doInstallApp(name, autoStart = true) {
     .catch(err => { dklog('error', String(err)); showAlert('error', String(err)); });
 }
 
+// ── Tailscale ─────────────────────────────────────────────────────────────────
+
+function refreshTailscale() {
+  cockpit.spawn(['freeraid', 'tailscale-status'], { superuser: 'require', err: 'out' })
+    .then(out => {
+      try { applyTailscaleStatus(JSON.parse(out.trim())); } catch(_) {}
+    }).catch(() => {});
+}
+
+function applyTailscaleStatus(s) {
+  document.getElementById('ts-loading').style.display = 'none';
+  const notInst = document.getElementById('ts-not-installed');
+  const inst    = document.getElementById('ts-installed');
+
+  if (!s.installed) {
+    notInst.classList.remove('hidden');
+    inst.classList.add('hidden');
+    return;
+  }
+  notInst.classList.add('hidden');
+  inst.classList.remove('hidden');
+
+  const connected = s.state === 'Running' && s.online;
+  document.getElementById('ts-dot').className = 'drive-status-dot ' + (connected ? 'dot-green' : 'dot-grey');
+  document.getElementById('ts-state').textContent    = s.state || 'Unknown';
+  document.getElementById('ts-ip').textContent       = s.ip    || '—';
+  document.getElementById('ts-hostname').textContent = s.hostname || '—';
+
+  document.getElementById('ts-btn-up').classList.toggle('hidden', connected);
+  document.getElementById('ts-btn-down').classList.toggle('hidden', !connected);
+}
+
+function installTailscale() {
+  log('cmd', 'Installing Tailscale...');
+  document.getElementById('ts-not-installed').innerHTML = '<div style="color:var(--text-dim)">Installing... this may take a minute.</div>';
+  cockpit.spawn(['freeraid', 'tailscale-install'], { superuser: 'require', err: 'out' })
+    .stream(line => { const t = line.trim(); if (t) log('info', t); })
+    .then(() => { log('success', 'Tailscale installed.'); refreshTailscale(); })
+    .catch(err => log('error', 'Install failed: ' + err));
+}
+
+function tailscaleUp() {
+  log('cmd', 'Connecting to Tailscale...');
+  cockpit.spawn(['freeraid', 'tailscale-up'], { superuser: 'require', err: 'out' })
+    .stream(line => { const t = line.trim(); if (t) log('info', t); })
+    .then(out => {
+      try {
+        const r = JSON.parse(out.trim().split('\n').pop());
+        if (r.needs_auth && r.auth_url) {
+          const wrap = document.getElementById('ts-auth-wrap');
+          const link = document.getElementById('ts-auth-url');
+          wrap.classList.remove('hidden');
+          link.href = r.auth_url;
+          link.textContent = r.auth_url;
+          log('info', 'Authentication required — open the URL shown in the Network tab.');
+        }
+      } catch(_) {}
+      refreshTailscale();
+    })
+    .catch(err => log('error', 'Tailscale up failed: ' + err));
+}
+
+function tailscaleDown() {
+  log('cmd', 'Disconnecting Tailscale...');
+  cockpit.spawn(['freeraid', 'tailscale-down'], { superuser: 'require', err: 'out' })
+    .then(() => { log('success', 'Tailscale disconnected.'); refreshTailscale(); })
+    .catch(err => log('error', String(err)));
+}
+
 // ── Network Tab ───────────────────────────────────────────────────────────────
 
 function refreshNetworkTab() {
@@ -1763,6 +2256,207 @@ function runMoverNow() {
     .catch(err => appendLog('log-panel', 'error', String(err)));
 }
 
+// ── UPS / NUT ─────────────────────────────────────────────────────────────────
+
+function refreshUpsStatus() {
+  cockpit.spawn(['freeraid', 'ups-status'], { superuser: 'require', err: 'out' })
+    .then(out => {
+      try { applyUpsStatus(JSON.parse(out.trim())); } catch(_) {}
+    }).catch(() => {});
+}
+
+function applyUpsStatus(s) {
+  const card = document.getElementById('ups-card');
+  if (!card) return;
+
+  if (!s.available) {
+    card.style.display = 'none';
+    const res = document.getElementById('ups-test-result');
+    if (res) res.textContent = s.error || 'UPS unavailable';
+    return;
+  }
+
+  card.style.display = '';
+
+  const onBatt = s.on_battery;
+  const statusLabel = onBatt ? '⚡ On Battery' : '✔ On Mains';
+  const statusColor = onBatt ? 'var(--yellow)' : 'var(--green)';
+
+  const statusEl = document.getElementById('ups-status-val');
+  if (statusEl) { statusEl.textContent = statusLabel; statusEl.style.color = statusColor; }
+
+  const battPct = parseInt(s.battery_pct) || 0;
+  const loadPct = parseInt(s.load_pct)    || 0;
+
+  const battBar = document.getElementById('ups-batt-bar');
+  if (battBar) {
+    battBar.style.width = battPct + '%';
+    battBar.style.background = battPct < 25 ? 'var(--red)' : battPct < 50 ? 'var(--yellow)' : 'var(--green)';
+  }
+  const battPctEl = document.getElementById('ups-batt-pct');
+  if (battPctEl) battPctEl.textContent = battPct + '%';
+
+  const loadBar = document.getElementById('ups-load-bar');
+  if (loadBar) loadBar.style.width = loadPct + '%';
+  const loadPctEl = document.getElementById('ups-load-pct');
+  if (loadPctEl) loadPctEl.textContent = loadPct + '%';
+
+  const runtimeEl = document.getElementById('ups-runtime');
+  if (runtimeEl) runtimeEl.textContent = `Runtime: ${s.runtime_mins}min  •  ${s.model}`;
+
+  const res = document.getElementById('ups-test-result');
+  if (res) res.textContent = '';
+}
+
+function loadUpsConfig() {
+  cockpit.spawn(['freeraid', 'ups-config-get'], { superuser: 'require', err: 'out' })
+    .then(out => {
+      try {
+        const c = JSON.parse(out.trim());
+        document.getElementById('ups-enabled').checked      = !!c.enabled;
+        document.getElementById('ups-mode').value           = c.mode         || 'standalone';
+        document.getElementById('ups-name').value           = c.name         || 'ups';
+        document.getElementById('ups-driver').value         = c.driver       || 'usbhid-ups';
+        document.getElementById('ups-port').value           = c.port         || 'auto';
+        document.getElementById('ups-host').value           = c.host         || '';
+        document.getElementById('ups-shutdown-pct').value   = c.shutdown_pct || 20;
+        upsToggleMode();
+      } catch(_) {}
+    }).catch(() => {});
+}
+
+function upsToggleMode() {
+  const mode = document.getElementById('ups-mode').value;
+  document.getElementById('ups-standalone-fields').classList.toggle('hidden', mode !== 'standalone');
+  document.getElementById('ups-netclient-fields').classList.toggle('hidden', mode !== 'netclient');
+}
+
+function saveUpsConfig() {
+  const payload = {
+    enabled:      document.getElementById('ups-enabled').checked,
+    mode:         document.getElementById('ups-mode').value,
+    name:         document.getElementById('ups-name').value.trim()           || 'ups',
+    driver:       document.getElementById('ups-driver').value,
+    port:         document.getElementById('ups-port').value.trim()           || 'auto',
+    host:         document.getElementById('ups-host').value.trim()           || 'localhost',
+    shutdown_pct: parseInt(document.getElementById('ups-shutdown-pct').value) || 20
+  };
+  log('cmd', 'Saving UPS configuration...');
+  cockpit.spawn(['freeraid', 'ups-config-set', JSON.stringify(payload)], { superuser: 'require', err: 'out' })
+    .stream(line => { const t = line.trim(); if (t) log('info', t); })
+    .then(() => {
+      log('success', 'UPS configuration saved.');
+      refreshUpsStatus();
+    })
+    .catch(err => log('error', 'UPS config failed: ' + err));
+}
+
+// ── File Balancer ─────────────────────────────────────────────────────────────
+
+let _balancerPoller = null;
+
+function loadBalancerStatus() {
+  cockpit.spawn(['freeraid', 'balance-status'], { superuser: 'require', err: 'out' })
+    .then(out => {
+      try { _applyBalancerStatus(JSON.parse(out.trim())); } catch(_) {}
+    }).catch(() => {});
+}
+
+function _applyBalancerStatus(s) {
+  // Disk usage mini-bars
+  const barsEl = document.getElementById('balancer-disk-bars');
+  if (barsEl && s.disks && s.disks.length) {
+    barsEl.innerHTML = s.disks.map(d => {
+      const pct = d.pct || 0;
+      const barColor = pct >= 90 ? 'var(--red)' : pct >= 75 ? 'var(--yellow)' : 'var(--accent)';
+      const name = d.mountpoint.split('/').pop() || d.device;
+      return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;font-size:12px">
+        <span style="width:50px;color:var(--text-dim);flex-shrink:0">${name}</span>
+        <div style="flex:1;height:5px;background:var(--bg3);border-radius:3px;overflow:hidden">
+          <div style="height:100%;width:${pct}%;background:${barColor};border-radius:3px"></div>
+        </div>
+        <span style="width:32px;text-align:right;color:var(--text-dim)">${pct}%</span>
+      </div>`;
+    }).join('');
+  }
+
+  const running = !!s.running;
+  document.getElementById('btn-balance-start').classList.toggle('hidden', running);
+  document.getElementById('btn-balance-cancel').classList.toggle('hidden', !running);
+
+  const prog = s.progress || {};
+  const progressEl = document.getElementById('balancer-progress');
+  if (progressEl) progressEl.classList.toggle('hidden', !running && prog.stage !== 'done');
+
+  if (prog.stage) {
+    const msgEl = document.getElementById('balancer-msg');
+    if (msgEl) msgEl.textContent = prog.log || prog.stage;
+    // Rough progress: use moved_bytes as proxy (cap at 100%)
+    const barEl = document.getElementById('balancer-bar');
+    if (barEl) {
+      const pct = prog.stage === 'done' ? 100 : running ? 50 : 0;
+      barEl.style.width = pct + '%';
+      barEl.className = 'preclear-bar-fill ' + (prog.stage === 'done' ? 'preclear-bar-done' : 'preclear-bar-active');
+    }
+  }
+
+  if (!running && _balancerPoller) {
+    clearInterval(_balancerPoller);
+    _balancerPoller = null;
+    if (prog.stage === 'done') {
+      log('success', `Balancer complete — moved ${prog.moved_files || 0} file(s).`);
+    }
+  }
+}
+
+function startBalancer() {
+  const threshold = document.getElementById('balance-threshold').value || '10';
+  log('cmd', `Starting file balancer (threshold: ${threshold}%)...`);
+  cockpit.spawn(['freeraid', 'balance-bg', threshold], { superuser: 'require', err: 'out' })
+    .then(() => {
+      log('info', 'Balancer running in background...');
+      _balancerPoller = setInterval(loadBalancerStatus, 4000);
+      loadBalancerStatus();
+    })
+    .catch(err => log('error', 'Balancer failed to start: ' + err));
+}
+
+function cancelBalancer() {
+  cockpit.spawn(['freeraid', 'balance-cancel'], { superuser: 'require', err: 'out' })
+    .then(() => {
+      log('info', 'Balancer cancelled.');
+      if (_balancerPoller) { clearInterval(_balancerPoller); _balancerPoller = null; }
+      loadBalancerStatus();
+    })
+    .catch(err => log('error', String(err)));
+}
+
+function loadTurboWrite() {
+  cockpit.spawn(['freeraid', 'turbo-get'], { superuser: 'require', err: 'out' })
+    .then(out => {
+      try {
+        const d = JSON.parse(out.trim());
+        document.getElementById('turbo-enabled').checked = !!d.enabled;
+        document.getElementById('turbo-warning').classList.toggle('hidden', !d.enabled);
+      } catch(e) {}
+    }).catch(() => {});
+}
+
+function setTurboWrite(enabled) {
+  const label = enabled ? 'Enabling turbo write...' : 'Disabling turbo write and syncing parity...';
+  log('cmd', label);
+  document.getElementById('turbo-warning').classList.toggle('hidden', !enabled);
+  cockpit.spawn(['freeraid', 'turbo-set', enabled ? 'true' : 'false'], { superuser: 'require', err: 'out' })
+    .stream(line => { const t = line.trim(); if (t) log('info', t); })
+    .then(() => {
+      log('success', enabled ? 'Turbo write enabled.' : 'Turbo write disabled — parity synced.');
+    })
+    .catch(err => {
+      log('error', 'Turbo write toggle failed: ' + err);
+      loadTurboWrite(); // revert UI
+    });
+}
+
 function setAnonAccess(enabled) {
   cockpit.spawn(['freeraid', 'shares-set-anon', enabled ? 'true' : 'false'], { superuser: 'require', err: 'out' })
     .then(() => showAlert('success', `Anonymous access ${enabled ? 'enabled' : 'disabled'}.`))
@@ -1830,12 +2524,17 @@ function refreshDocker() {
   el.innerHTML = '<div class="loading-msg">Loading...</div>';
 
   let buf = '';
-  cockpit.spawn(['freeraid', 'docker-list'], { superuser: 'require', err: 'ignore' })
-    .stream(d => { buf += d; })
-    .then(() => {
+  const listP = cockpit.spawn(['freeraid', 'docker-list'], { superuser: 'require', err: 'ignore' })
+    .stream(d => { buf += d; });
+  const auP = cockpit.spawn(['freeraid', 'docker-autoupdate-get'], { superuser: 'require', err: 'out' });
+
+  Promise.all([listP, auP])
+    .then(([, auOut]) => {
       try {
         const jsonStart = buf.indexOf('[');
-        renderDocker(JSON.parse(buf.slice(jsonStart)));
+        const containers = JSON.parse(buf.slice(jsonStart));
+        const autoupdate = JSON.parse(auOut || '{}');
+        renderDocker(containers, autoupdate);
       } catch(e) {
         el.innerHTML = '<div class="loading-msg">Could not load containers.</div>';
       }
@@ -1854,8 +2553,11 @@ document.addEventListener('click', (e) => {
   }
 });
 
-function renderDocker(containers) {
+let _dockerAutoupdate = {};
+
+function renderDocker(containers, autoupdate) {
   _dockerContainers = containers;
+  if (autoupdate) _dockerAutoupdate = autoupdate;
   const el = document.getElementById('docker-container-list');
 
   const running = containers.filter(c => c.state === 'running').length;
@@ -1878,6 +2580,7 @@ function renderDocker(containers) {
     const stateColor = isRunning ? 'var(--green)' : 'var(--text-dim)';
     const nameSafe   = c.name.replace(/'/g, "\\'");
     const checked    = _dockerSelection.has(c.name) ? 'checked' : '';
+    const auChecked  = _dockerAutoupdate[c.name] ? 'checked' : '';
     const toggleBtn  = isRunning
       ? `<button class="btn btn-sm btn-danger" onclick="dockerStop('${nameSafe}')">Stop</button>`
       : `<button class="btn btn-sm btn-primary" onclick="dockerStart('${nameSafe}')">Start</button>`;
@@ -1910,8 +2613,38 @@ function renderDocker(containers) {
         ${toggleBtn}
         <button class="btn btn-sm btn-ghost" onclick="dockerLogs('${nameSafe}')">Logs</button>
       </div>
+      <div class="docker-autoupdate-row">
+        <label class="autoupdate-label">
+          <input type="checkbox" ${auChecked} onchange="setDockerAutoupdate('${nameSafe}', this.checked)">
+          Auto-update
+        </label>
+      </div>
     </div>`;
   }).join('');
+}
+
+function setDockerAutoupdate(name, enabled) {
+  _dockerAutoupdate[name] = enabled;
+  cockpit.spawn(['freeraid', 'docker-autoupdate-set', name, enabled ? 'true' : 'false'],
+    { superuser: 'require', err: 'out' })
+    .catch(err => dklog('error', 'Failed to save auto-update setting: ' + err));
+}
+
+function dockerUpdateNow(name) {
+  const existing = document.getElementById('docker-ctx-menu');
+  if (existing) existing.remove();
+  dklog('cmd', `Pulling latest image for ${name}...`);
+  cockpit.spawn(['freeraid', 'docker-update', name], { superuser: 'require', err: 'out' })
+    .stream(line => { const t = line.trim(); if (t) dklog('info', t); })
+    .then(out => {
+      try {
+        const r = JSON.parse(out.trim().split('\n').pop());
+        if (r.updated) dklog('success', `${name} updated to latest image.`);
+        else dklog('info', `${name} is already up to date.`);
+      } catch(_) {}
+      refreshDocker();
+    })
+    .catch(err => dklog('error', `Update failed: ${err}`));
 }
 
 function openDockerMenu(event, name) {
@@ -1933,6 +2666,7 @@ function openDockerMenu(event, name) {
   if (isRunning) items.push(`<div class="ctx-item" onclick="dockerTerminalCmd('${name}')">⬛ Terminal</div>`);
   items.push(`<div class="ctx-item" onclick="dockerEdit('${name}')">✎ Edit</div>`);
   items.push(`<div class="ctx-item" onclick="dockerLogs('${name}')">📋 Logs</div>`);
+  items.push(`<div class="ctx-item" onclick="dockerUpdateNow('${name}')">⟳ Update Now</div>`);
   items.push(`<div class="ctx-sep"></div>`);
   if (isRunning) items.push(`<div class="ctx-item" onclick="dockerStop('${name}')">⏹ Stop</div>`);
   else           items.push(`<div class="ctx-item" onclick="dockerStart('${name}')">▶ Start</div>`);
@@ -2682,4 +3416,128 @@ function setSpindown(dev, value) {
   cockpit.spawn(['freeraid', 'spindown-set', dev, value], { superuser: 'require', err: 'out' })
     .then(() => refreshSpindown())
     .catch(() => {});
+}
+
+// ── Notifications ─────────────────────────────────────────────────────────────
+
+const NOTIF_EVENTS = ['array_degraded', 'drive_temp', 'sync_error', 'scrub_error', 'update_available'];
+
+function loadNotifSettings() {
+  cockpit.spawn(['freeraid', 'notify-get'], { superuser: 'require', err: 'out' })
+    .then(out => {
+      const c = JSON.parse(out);
+      applyNotifSettings(c);
+    })
+    .catch(() => {});
+}
+
+function applyNotifSettings(c) {
+  const email = c.email || {};
+  const webhook = c.webhook || {};
+  const events = c.events || {};
+
+  document.getElementById('notif-email-enabled').checked = !!email.enabled;
+  document.getElementById('notif-smtp-host').value    = email.smtp_host  || '';
+  document.getElementById('notif-smtp-port').value    = email.smtp_port  || '';
+  document.getElementById('notif-smtp-from').value    = email.smtp_from  || '';
+  document.getElementById('notif-smtp-user').value    = email.smtp_user  || '';
+  document.getElementById('notif-smtp-pass').value    = email.smtp_pass  || '';
+  document.getElementById('notif-smtp-to').value      = email.smtp_to    || '';
+
+  document.getElementById('notif-webhook-enabled').checked = !!webhook.enabled;
+  document.getElementById('notif-webhook-url').value    = webhook.url    || '';
+  document.getElementById('notif-webhook-format').value = webhook.format || 'discord';
+
+  NOTIF_EVENTS.forEach(ev => {
+    const el = document.getElementById('notif-ev-' + ev);
+    if (el) el.checked = !!events[ev];
+  });
+
+  const thresh = document.getElementById('notif-temp-threshold');
+  if (thresh) thresh.value = c.temp_threshold || 55;
+}
+
+function saveNotifSettings() {
+  const payload = {
+    email: {
+      enabled:   document.getElementById('notif-email-enabled').checked,
+      smtp_host: document.getElementById('notif-smtp-host').value.trim(),
+      smtp_port: parseInt(document.getElementById('notif-smtp-port').value) || 587,
+      smtp_from: document.getElementById('notif-smtp-from').value.trim(),
+      smtp_user: document.getElementById('notif-smtp-user').value.trim(),
+      smtp_pass: document.getElementById('notif-smtp-pass').value,
+      smtp_to:   document.getElementById('notif-smtp-to').value.trim()
+    },
+    webhook: {
+      enabled: document.getElementById('notif-webhook-enabled').checked,
+      url:     document.getElementById('notif-webhook-url').value.trim(),
+      format:  document.getElementById('notif-webhook-format').value
+    },
+    events: {},
+    temp_threshold: parseInt(document.getElementById('notif-temp-threshold').value) || 55
+  };
+
+  NOTIF_EVENTS.forEach(ev => {
+    const el = document.getElementById('notif-ev-' + ev);
+    payload.events[ev] = el ? el.checked : false;
+  });
+
+  cockpit.spawn(['freeraid', 'notify-set', JSON.stringify(payload)], { superuser: 'require', err: 'out' })
+    .then(() => log('info', 'Notification settings saved'))
+    .catch(err => log('error', 'Save failed: ' + err));
+}
+
+function testNotif(method) {
+  cockpit.spawn(['freeraid', 'notify-test', method], { superuser: 'require', err: 'out' })
+    .then(out => {
+      const r = JSON.parse(out);
+      log(r.ok ? 'info' : 'error', r.message || (r.ok ? 'Test sent' : 'Test failed'));
+    })
+    .catch(err => log('error', 'Test failed: ' + err));
+}
+
+// ── Per-disk I/O stats ────────────────────────────────────────────────────────
+
+let _iostatRunning = false;
+
+function startIoStatLoop() {
+  if (_iostatRunning) return;
+  _iostatRunning = true;
+  _pollIoStat();
+}
+
+function stopIoStatLoop() {
+  _iostatRunning = false;
+}
+
+function _pollIoStat() {
+  if (!_iostatRunning) return;
+  cockpit.spawn(['freeraid', 'iostat', '2'], { superuser: 'require', err: 'out' })
+    .then(out => {
+      try {
+        const stats = JSON.parse(out.trim());
+        applyIoStats(stats);
+      } catch(_) {}
+      if (_iostatRunning) setTimeout(_pollIoStat, 500);
+    })
+    .catch(() => {
+      if (_iostatRunning) setTimeout(_pollIoStat, 5000);
+    });
+}
+
+function applyIoStats(stats) {
+  stats.forEach(s => {
+    const row = document.querySelector(`[data-io-dev="${s.device}"]`);
+    if (!row) return;
+    const active = s.read_kbs > 0 || s.write_kbs > 0;
+    row.classList.toggle('hidden', !active);
+    const vals = row.querySelectorAll('.io-val');
+    if (vals[0]) vals[0].textContent = fmtKbs(s.read_kbs);
+    if (vals[1]) vals[1].textContent = fmtKbs(s.write_kbs);
+  });
+}
+
+function fmtKbs(kbs) {
+  if (kbs >= 1024) return (kbs / 1024).toFixed(1) + ' M';
+  return kbs + ' K';
 }

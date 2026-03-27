@@ -10,7 +10,7 @@ Built on Debian Linux + MergerFS + SnapRAID + Cockpit web UI.
 
 ---
 
-## Current Version: v0.4.2
+## Current Version: v0.5.3
 
 ---
 
@@ -63,6 +63,9 @@ Built on Debian Linux + MergerFS + SnapRAID + Cockpit web UI.
 - `freeraid shares-remove <name>` — remove a share
 - `freeraid shares-apply` — write smb.conf and reload Samba
 - `freeraid shares-import <dir>` — import from Unraid config directory
+- `freeraid shares-set-password <name> <password>` — set per-share Samba password (blank to remove)
+  - Creates dedicated `freeraid_share_<name>` samba user; sets `valid users` in smb.conf
+  - Password badge shows on share card when active
 - Shares tab: create form (name, comment, SMB security, cache mode, SMB/NFS toggles)
 - Unraid zip uploader: drag & drop backup zip, preview contents, import
 
@@ -135,42 +138,16 @@ Built on Debian Linux + MergerFS + SnapRAID + Cockpit web UI.
 - Fixed: page no longer re-checks GitHub immediately after a successful update
   (used sessionStorage flag to skip post-update reload check)
 
-### Live USB — Boots Like Unraid
-- `scripts/build-image.sh` — builds the full live OS image (one-time, ~20-30 min)
-  - debootstrap Debian 12 minimal rootfs
-  - Installs all FreeRAID dependencies: mergerfs, snapraid, docker, cockpit, samba, jq
-  - NIC firmware: Realtek, Intel, Broadcom, iwlwifi
-  - Configures freeraid/freeraid user, DHCP networking, all systemd services
-  - Builds custom busybox-based initrd: finds USB by FREERAID label, mounts squashfs,
-    sets up overlay filesystem (read-only OS + tmpfs writes), bind-mounts USB
-    `config/` at `/boot/config` (persistent across reboots)
-  - Packs rootfs as xz squashfs (~407MB)
-  - Output: `build/vmlinuz`, `build/initrd.gz`, `build/rootfs.squashfs`
-- `scripts/create-usb.sh /dev/sdX [unraid-backup.zip]` — writes live image to USB
-  - FAT32 MBR partition, labeled `FREERAID` (identical structure to Unraid USB)
-  - Syslinux BIOS bootloader (MBR) + syslinux EFI64 (`EFI/boot/bootx64.efi`)
-  - `syslinux.cfg` matches Unraid style with FreeRAID branding
-  - Copies vmlinuz, initrd.gz, rootfs.squashfs
-  - Creates `config/` directory — this is the persistent layer (mounted at `/boot/config`)
-  - Copies Unraid backup zip to `config/unraid-backup.zip` if provided
-  - Copies default `freeraid.conf.json` to `config/`
+### Installation — Debian Installer Method
 
-**Boot flow (no screen needed, headless):**
-1. Server boots USB (BIOS or UEFI)
-2. Syslinux loads kernel + initrd
-3. initrd finds `FREERAID` USB, mounts squashfs + overlay, bind-mounts `config/`
-4. System hands off to systemd — Cockpit, Docker, SSH, FreeRAID all start
-5. DHCP gets an IP — navigate to `https://<ip>:9090` in a browser
-6. Login: `freeraid` / `freeraid`
-7. Assign drives in Disks tab → Start Array → shares and containers are live
+FreeRAID installs onto a standard Debian 12 system via `scripts/install.sh`.
 
-**What persists (on USB `config/`):**
-- `freeraid.conf.json` — array config, disk assignments, shares
-- `unraid-backup.zip` — optional Unraid import source
+- `scripts/install.sh` — installs all dependencies, copies CLI + Cockpit plugin, sets up systemd services
+- Works on any Debian 12 machine (bare metal, VM, VPS)
+- Config lives at `/boot/config/freeraid.conf.json` (persistent)
+- Unraid backup import supported via wizard or `freeraid shares-import`
 
-**What does NOT persist (in RAM overlay, lost on reboot):**
-- Changes outside of `/boot/config`
-- Docker container state (container data should live on array drives)
+> **Note:** Live USB approach (squashfs + overlay, boot from USB like Unraid) was explored but dropped — the installer method is simpler, more reliable, and works on real hardware without initrd complexity.
 
 ---
 
@@ -288,6 +265,17 @@ Run `sudo vm/setup-vm-network.sh` once before starting the VM to set up TAP + pr
 | v0.4.0 | Custom sidebar replaces Cockpit nav, FreeRAID login theme + remember login, array controls on dashboard, logout button |
 | v0.4.1 | Samba shares working end-to-end, per-user Samba enable/disable, guest access toggle, avahi + wsdd network discovery, parity check scheduler, cache mover with systemd timer |
 | v0.4.2 | First-boot setup wizard, per-share user permissions, system log viewer |
+| v0.4.3 | Disk spin-down (per-drive, opt-in, parity 30min default), email + webhook notifications with per-event toggles |
+| v0.4.4 | Per-disk I/O stats — live read/write KB/s badges on drive cards, polls /proc/diskstats |
+| v0.4.5 | Auto-update containers — per-container toggle, Update Now in context menu, nightly systemd timer at 04:00 |
+| v0.4.6 | NFS export config — per-share enable/disable, client subnet, export options, writes /etc/exports and reloads nfs-kernel-server |
+| v0.4.7 | Drive pre-clear — zero drive + SMART short/long tests, background job with live progress bar, cancel support, safety guard blocks assigned drives |
+| v0.4.8 | Turbo write mode — skip parity sync for max write speed, pauses nightly timer, auto-syncs on disable, warning banner while active |
+| v0.4.9 | File balancer — redistributes files from full disks to empty ones, configurable spread threshold, background job with live progress, cancel support |
+| v0.5.0 | UPS/NUT integration — standalone USB and netclient modes, battery/load/runtime dashboard card, auto-shutdown config, NUT config file management |
+| v0.5.1 | Tailscale VPN — install, connect/disconnect, auth URL flow, status card in Network tab with IP and connection state |
+| v0.5.2 | Share-level passwords — per-share samba user, Password badge on card, inline panel to set/clear |
+| v0.5.3 | Multiple storage pools — extra MergerFS pools (no parity), assign drives to any pool, shares target any pool, auto-start/stop with array |
 
 ---
 
@@ -295,7 +283,7 @@ Run `sudo vm/setup-vm-network.sh` once before starting the VM to set up TAP + pr
 
 - [x] Docker tab — list containers, start/stop/logs per app
 - [x] Multi-select delete for Docker containers
-- [x] Live USB — boots FreeRAID directly, no installer, headless-safe
+- [x] Installer — `scripts/install.sh` installs onto any Debian 12 system
 - [x] Community App Browser — install from 3000+ Unraid CA templates
 - [x] Docker context menu — WebUI, Terminal, Edit, Logs, Delete
 - [x] Drive SMART data in UI — health, temp, attributes, self-test
@@ -314,8 +302,10 @@ Run `sudo vm/setup-vm-network.sh` once before starting the VM to set up TAP + pr
 - [x] First-boot setup wizard — Welcome, Hostname/Network, optional Unraid import, Assign Drives, Start Array
 - [x] Per-share user permissions — Public/Secure/Private, per-user Read/Write checkboxes
 - [x] System log viewer — FreeRAID, Syslog, Kernel, Samba logs with live tail mode
-- [ ] First-boot Unraid import on live USB (auto-import from config/unraid-backup.zip)
-- [ ] NFS export configuration in UI
+- [x] Disk spin-down — per-drive idle timeout, disabled by default, parity defaults to 30min
+- [x] Notifications — email (msmtp) + webhook (Discord/Slack/generic), per-event toggles, temp threshold alerts
+- [x] First-boot Unraid import (via setup wizard — live USB approach dropped, installer method used instead)
+- [x] NFS export configuration in UI
 - [ ] Plugin system — real implementation
 
 ---
@@ -328,24 +318,24 @@ Features Unraid has that FreeRAID doesn't yet. Grouped by area.
 - [x] Disk temperatures (from SMART data)
 - [x] Full SMART data per disk — health, ATA attributes, self-test history
 - [x] CPU / RAM / network usage graphs (sparklines, live polling)
-- [ ] Per-disk I/O stats
+- [x] Per-disk I/O stats
 - [x] System log viewer — FreeRAID, Syslog, Kernel, Samba with live tail
-- [ ] Notifications — email/Telegram alerts for array events, drive warnings
+- [x] Notifications — email + webhook alerts for array degraded, sync/scrub errors, drive temp, updates
 
 ### Storage
 - [x] Degraded mode — array stays up with a missing drive
 - [x] Drive replacement + parity rebuild from UI
-- [ ] Multiple storage pools
+- [x] Multiple storage pools — extra MergerFS pools, no parity, pool cards in Disks tab, shares can target any pool
 - [ ] Per-share encryption
-- [ ] Turbo write mode (bypass parity during writes for speed)
+- [x] Turbo write mode (bypass parity during writes for speed)
 - [x] Cache mover — moves files from cache to array pool, manual + scheduled
-- [ ] File balancer utility (redistribute files across array disks)
+- [x] File balancer utility (redistribute files across array disks)
 - [ ] ZFS pool support
 
 ### Drives
 - [x] Full SMART data per disk in UI
 - [x] UUID-based drive tracking (survives device renumbering)
-- [ ] Drive pre-clear utility
+- [x] Drive pre-clear utility
 - [x] Disk spin-down — per-drive idle timeout via hdparm, disabled by default (parity defaults to 30min), persists across reboots
 
 ### Docker
@@ -356,7 +346,7 @@ Features Unraid has that FreeRAID doesn't yet. Grouped by area.
 - [x] Per-container xterm.js terminals in new browser tab
 - [x] Network type selector (Bridge / Host / Custom macvlan + static IP)
 - [x] Docker Networks panel — create/delete macvlan networks
-- [ ] Auto-update containers
+- [x] Auto-update containers
 
 ### VMs
 - [ ] VM manager (KVM/QEMU) — create, start, stop, delete VMs from UI
@@ -364,15 +354,15 @@ Features Unraid has that FreeRAID doesn't yet. Grouped by area.
 ### Users & Shares
 - [x] User management — add/delete Samba users, set passwords from UI
 - [x] Per-share user permissions — Public/Secure/Private with per-user Read/Write lists
-- [ ] Share-level passwords
-- [ ] Advanced NFS export options in UI
+- [x] Share-level passwords — dedicated samba user per share, Password badge + inline panel in UI
+- [x] NFS export config in UI — per-share enable/disable, client subnet, export options
 
 ### Network & System
 - [x] Network settings tab (static IP / DHCP, hostname from UI)
 - [x] Custom login page (FreeRAID themed + remember login)
 - [ ] UPS support (NUT integration)
 - [x] Web terminal — per-container xterm.js terminals in new tab
-- [ ] Tailscale / VPN built-in
+- [x] Tailscale / VPN built-in
 
 ### Plugins
 - [ ] Real plugin system (install/remove/update plugins)

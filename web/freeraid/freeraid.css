@@ -715,6 +715,8 @@ body {
   margin-bottom: 10px;
 }
 .share-perms-body { padding: 16px; }
+.share-panel-inner { padding: 16px; }
+.panel-title { font-weight: 600; font-size: 0.95em; margin-bottom: 10px; }
 .perms-row {
   display: flex;
   align-items: flex-end;
@@ -778,8 +780,28 @@ body {
 .badge-private { background: #2a1515; color: #fca5a5; }
 .badge-cache   { background: #2a1f3a; color: #c084fc; }
 .badge-unraid  { background: #1a2a2a; color: #67e8f9; }
+.badge-pw      { background: #2a1a1a; color: #f87171; }
 
 .share-actions { display: flex; gap: 6px; margin-left: auto; }
+
+/* ── Extra pools ── */
+.pool-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-left: 3px solid #7c3aed;
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  margin-bottom: 8px;
+}
+.pool-card-header { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.pool-name { font-weight: 600; font-size: 1em; }
+.pool-state { font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: 600; }
+.pool-state.status-healthy { background: #14301f; color: #4ade80; }
+.pool-state.status-stopped { background: #2a2a2a; color: var(--text-dim); }
+.pool-meta { display: flex; gap: 14px; font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
+.pool-disks { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+.pool-disk-row { display: flex; align-items: center; gap: 10px; font-size: 12px; }
+.btn-xs { padding: 2px 6px; font-size: 11px; }
 
 /* ── Docker container cards ── */
 .docker-card {
@@ -1218,3 +1240,110 @@ body {
 }
 .spindle-on  { background: #1f3a2a; color: var(--green); }
 .spindle-off { background: #2a2410; color: var(--yellow); }
+
+/* ── Notifications ── */
+.notif-events-grid { display: flex; flex-direction: column; gap: 0; }
+.notif-event-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+.notif-event-row:last-child { border-bottom: none; }
+.notif-event-row input[type=checkbox] { margin-top: 3px; accent-color: var(--accent); flex-shrink: 0; }
+.notif-event-name { font-size: 14px; font-weight: 500; }
+.notif-event-desc { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+
+/* ── Per-disk I/O ── */
+.drive-io-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+}
+.io-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 10px;
+  letter-spacing: 0.2px;
+}
+.io-read  { background: #1a2e3a; color: #5bb4d4; }
+.io-write { background: #2a1f38; color: #a07de0; }
+
+/* ── Docker auto-update ── */
+.docker-autoupdate-row {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.autoupdate-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+.autoupdate-label input[type=checkbox] { accent-color: var(--accent); }
+
+/* ── Pre-clear progress ── */
+.preclear-panel {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 var(--radius) var(--radius);
+  padding: 10px 14px 12px;
+  margin-bottom: 6px;
+}
+.preclear-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+.preclear-dev   { font-family: monospace; font-weight: 600; }
+.preclear-stage { flex: 1; color: var(--text-dim); }
+.preclear-pct   { font-weight: 600; color: var(--accent); min-width: 36px; text-align: right; }
+.preclear-bar-bg {
+  height: 6px;
+  background: var(--bg3);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.preclear-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.5s ease;
+}
+.preclear-bar-active { background: var(--accent); }
+.preclear-bar-done   { background: var(--green); }
+.preclear-msg { font-size: 11px; color: var(--text-dim); margin-top: 6px; }
+
+/* ── UPS card ── */
+.ups-stat-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  font-size: 12px;
+}
+.ups-stat-label { width: 46px; color: var(--text-dim); flex-shrink: 0; }
+.ups-bar-bg {
+  flex: 1;
+  height: 5px;
+  background: var(--bg3);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.ups-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--green);
+  transition: width 0.5s ease;
+}
+.ups-bar-load { background: var(--accent); }
+.ups-stat-pct { width: 32px; text-align: right; color: var(--text-dim); }

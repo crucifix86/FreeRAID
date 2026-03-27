@@ -8,59 +8,9 @@
   },
   "array": {
     "state": "stopped",
-    "parity": [
-      {
-        "slot": "parity",
-        "device": "/dev/vdf",
-        "mountpoint": "/mnt/parity",
-        "fstype": "xfs",
-        "label": "Parity"
-      }
-    ],
-    "disks": [
-      {
-        "slot": "disk1",
-        "device": "/dev/vdb",
-        "mountpoint": "/mnt/disk1",
-        "fstype": "xfs",
-        "label": "Disk 1",
-        "enabled": true
-      },
-      {
-        "slot": "disk2",
-        "device": "/dev/vdc",
-        "mountpoint": "/mnt/disk2",
-        "fstype": "xfs",
-        "label": "Disk 2",
-        "enabled": true
-      },
-      {
-        "slot": "disk3",
-        "device": "/dev/vdd",
-        "mountpoint": "/mnt/disk3",
-        "fstype": "xfs",
-        "label": "Disk 3",
-        "enabled": false
-      },
-      {
-        "slot": "disk4",
-        "device": "/dev/vde",
-        "mountpoint": "/mnt/disk4",
-        "fstype": "xfs",
-        "label": "Disk 4",
-        "enabled": false
-      }
-    ],
-    "cache": [
-      {
-        "slot": "cache",
-        "device": "/dev/vdg",
-        "mountpoint": "/mnt/cache",
-        "fstype": "ext4",
-        "label": "Cache",
-        "enabled": true
-      }
-    ],
+    "parity": [],
+    "disks": [],
+    "cache": [],
     "pool_mountpoint": "/mnt/user",
     "mergerfs_options": "defaults,allow_other,use_ino,cache.files=off,dropcacheonclose=true,category.create=mfs"
   },
@@ -71,10 +21,7 @@
     "scrub_age": 10,
     "diff_warn_deleted": 40,
     "diff_warn_updated": 40,
-    "content_files": [
-      "/mnt/disk1/.snapraid.content",
-      "/mnt/disk2/.snapraid.content"
-    ],
+    "content_files": [],
     "exclude": [
       "/lost+found/",
       "*.tmp",
@@ -82,9 +29,11 @@
       "*.part"
     ]
   },
+  "pools": [],
   "shares": [],
+  "samba_anon": true,
   "network": {
-    "interface": "eth0",
+    "interface": "",
     "dhcp": true,
     "ip": "",
     "gateway": "",
@@ -95,7 +44,33 @@
   },
   "docker": {
     "enabled": true,
-    "data_root": "/mnt/user/Appdata/docker",
-    "compose_dir": "/mnt/user/Appdata/compose"
+    "data_root": "/mnt/user/appdata",
+    "compose_dir": "/etc/freeraid/compose",
+    "autoupdate": {}
+  },
+  "notifications": {
+    "email": {
+      "enabled": false,
+      "smtp_host": "",
+      "smtp_port": "587",
+      "smtp_user": "",
+      "smtp_pass": "",
+      "smtp_from": "",
+      "smtp_to": ""
+    },
+    "webhook": {
+      "enabled": false,
+      "url": "",
+      "type": "discord"
+    },
+    "events": {
+      "array_degraded": true,
+      "drive_temp": true,
+      "sync_error": true,
+      "scrub_error": true,
+      "update_available": false,
+      "container_updated": false
+    },
+    "temp_threshold": 55
   }
 }

@@ -389,7 +389,10 @@ cmd_start() {
             info "$mnt already mounted"
         fi
     done < <(jq -r '.array.disks[] | select(.enabled==true) | .slot + " " + .device + " " + .mountpoint + " " + .fstype + " " + (.uuid // "")' "$CONFIG_FILE")
-    $degraded && warn "Array starting in DEGRADED mode — one or more drives missing"
+    if $degraded; then
+        warn "Array starting in DEGRADED mode — one or more drives missing"
+        cmd_notify_send "array_degraded" "Array started in DEGRADED mode — one or more drives are missing" 2>/dev/null || true
+    fi
 
     # Mount cache
     local cache_dev cache_mnt cache_fs
@@ -447,6 +450,10 @@ cmd_start() {
     cmd_spindown_apply 2>/dev/null || true
 
     info "Array started. Pool at ${pool}"
+
+    # Start any extra pools
+    cmd_pool_start_all 2>/dev/null || true
+
     cmd_status
 }
 
@@ -457,6 +464,9 @@ cmd_stop() {
     pool=$(cfg_pool_mountpoint)
 
     # Unmount pool first
+    # Stop extra pools first
+    cmd_pool_stop_all 2>/dev/null || true
+
     if mountpoint -q "$pool" 2>/dev/null; then
         info "Unmounting pool $pool"
         umount "$pool" || umount -l "$pool"
@@ -498,7 +508,12 @@ cmd_sync() {
 
     [ -f "$SNAPRAID_CONF" ] || { generate_snapraid_conf > "$SNAPRAID_CONF"; info "Generated $SNAPRAID_CONF"; }
 
-    snapraid -c "$SNAPRAID_CONF" sync && info "Sync complete." || die "Sync failed — check snapraid output above"
+    if snapraid -c "$SNAPRAID_CONF" sync; then
+        info "Sync complete."
+    else
+        cmd_notify_send "sync_error" "SnapRAID sync failed — check logs for details" 2>/dev/null || true
+        die "Sync failed — check snapraid output above"
+    fi
 }
 
 cmd_scrub() {
@@ -507,13 +522,50 @@ cmd_scrub() {
     percent="${percent:-22}"
     info "Running SnapRAID scrub (${percent}% of parity)..."
     require snapraid
-    snapraid -c "$SNAPRAID_CONF" scrub -p "$percent" && info "Scrub complete." || die "Scrub failed"
+    if snapraid -c "$SNAPRAID_CONF" scrub -p "$percent"; then
+        info "Scrub complete."
+    else
+        cmd_notify_send "scrub_error" "SnapRAID scrub failed — check logs for details" 2>/dev/null || true
+        die "Scrub failed"
+    fi
 }
 
 cmd_diff() {
     info "SnapRAID diff (what changed since last sync)..."
     require snapraid
     snapraid -c "$SNAPRAID_CONF" diff
+}
+
+cmd_turbo_get() {
+    local enabled
+    enabled=$(jq -r '.turbo_write // false' "$CONFIG_FILE" 2>/dev/null || echo "false")
+    echo "{\"enabled\":$([ "$enabled" = "true" ] && echo true || echo false)}"
+}
+
+cmd_turbo_set() {
+    local val="${1:-false}"
+    [ "$val" = "true" ] || val="false"
+
+    local current
+    current=$(jq -r '.turbo_write // false' "$CONFIG_FILE" 2>/dev/null || echo "false")
+
+    jq --argjson v "$([ "$val" = "true" ] && echo true || echo false)" \
+        '.turbo_write = $v' "$CONFIG_FILE" > /tmp/freeraid.conf.tmp \
+        && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+
+    if [ "$val" = "true" ]; then
+        # Disable the nightly sync timer while turbo write is active
+        systemctl stop freeraid-sync.timer 2>/dev/null || true
+        warn "Turbo write ENABLED — parity is now INVALID until you disable turbo write or run a manual sync."
+        log "TURBO: Turbo write enabled — nightly sync timer paused"
+    else
+        # Re-enable the nightly sync timer
+        systemctl start freeraid-sync.timer 2>/dev/null || true
+        info "Turbo write disabled — running parity sync now..."
+        log "TURBO: Turbo write disabled — starting sync"
+        cmd_sync
+    fi
+    echo "{\"enabled\":$([ "$val" = "true" ] && echo true || echo false)}"
 }
 
 cmd_disks_scan() {
@@ -523,7 +575,8 @@ cmd_disks_scan() {
         [
           (.array.parity[] | {device:.device, slot:.slot, role:"parity"}),
           (.array.disks[]  | {device:.device, slot:.slot, role:"array"}),
-          (.array.cache[]  | {device:.device, slot:.slot, role:"cache"})
+          (.array.cache[]  | {device:.device, slot:.slot, role:"cache"}),
+          ((.pools // [])[] | .name as $pn | .disks[] | {device:.device, slot:.slot, role:("pool:"+$pn)})
         ]
     ' "$CONFIG_FILE" 2>/dev/null || echo "[]")
 
@@ -623,12 +676,13 @@ cmd_disks_assign() {
 }
 
 cmd_disks_unassign_dev() {
-    # Internal helper — remove a device from all roles
+    # Internal helper — remove a device from all roles (including extra pools)
     local dev="$1"
     jq --arg d "$dev" '
         .array.disks   |= map(select(.device != $d)) |
         .array.parity  |= map(select(.device != $d)) |
-        .array.cache   |= map(select(.device != $d))
+        .array.cache   |= map(select(.device != $d)) |
+        (.pools // []) |= map(.disks |= map(select(.device != $d)))
     ' "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
 }
 
@@ -670,6 +724,166 @@ cmd_remove_disk() {
     info "Slot $slot disabled. Run 'freeraid stop && freeraid start' to apply."
 }
 
+cmd_pool_list() {
+    local pools_json="["
+    local first=true
+    while IFS= read -r pool_entry; do
+        local name mnt
+        name=$(echo "$pool_entry" | jq -r '.name')
+        mnt=$(echo "$pool_entry" | jq -r '.mountpoint')
+        local mounted=false
+        mountpoint -q "$mnt" 2>/dev/null && mounted=true
+        local size="" used="" free="" pct=""
+        if $mounted; then
+            read -r size used free pct < <(df -h "$mnt" 2>/dev/null | awk 'NR==2{print $2,$3,$4,$5}' || echo "? ? ? ?")
+        fi
+        $first || pools_json+=","
+        first=false
+        pools_json+=$(echo "$pool_entry" | jq --argjson m "$mounted" \
+            --arg sz "$size" --arg us "$used" --arg fr "$free" --arg pc "$pct" \
+            '. + {"mounted":$m,"size":$sz,"used":$us,"free":$fr,"pct":$pc}')
+    done < <(jq -c '.pools // [] | .[]' "$CONFIG_FILE" 2>/dev/null)
+    pools_json+="]"
+    echo "$pools_json"
+}
+
+cmd_pool_add() {
+    local name="${1:-}"
+    [ -z "$name" ] && die "Usage: freeraid pool-add <name>"
+    echo "$name" | grep -qE '^[a-zA-Z0-9_-]+$' || die "Pool name must be alphanumeric (underscores/hyphens ok)"
+    local existing
+    existing=$(jq -r --arg n "$name" '.pools // [] | .[] | select(.name==$n) | .name' "$CONFIG_FILE" 2>/dev/null || true)
+    [ -n "$existing" ] && die "Pool '$name' already exists"
+    local mnt="/mnt/pools/${name}"
+    jq --arg name "$name" --arg mnt "$mnt" \
+        '.pools //= [] | .pools += [{"name":$name,"label":$name,"mountpoint":$mnt,"mergerfs_options":"defaults,allow_other,use_ino,category.create=mfs,moveonenospc=true,minfreespace=200M","disks":[]}]' \
+        "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+    info "Pool '$name' created. Assign drives with: freeraid pool-assign $name <device>"
+}
+
+cmd_pool_remove() {
+    local name="${1:-}"
+    [ -z "$name" ] && die "Usage: freeraid pool-remove <name>"
+    local mnt
+    mnt=$(jq -r --arg n "$name" '.pools // [] | .[] | select(.name==$n) | .mountpoint' "$CONFIG_FILE" 2>/dev/null || true)
+    [ -z "$mnt" ] && die "Pool '$name' not found"
+    mountpoint -q "$mnt" 2>/dev/null && die "Stop pool '$name' before removing: freeraid pool-stop $name"
+    jq --arg n "$name" '.pools //= [] | .pools |= map(select(.name != $n))' \
+        "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+    info "Pool '$name' removed."
+}
+
+cmd_pool_assign() {
+    local name="${1:-}" dev="${2:-}" fstype="${3:-xfs}"
+    [ -z "$name" ] || [ -z "$dev" ] && die "Usage: freeraid pool-assign <pool-name> <device> [fstype]"
+    [ -b "$dev" ] || die "Device $dev not found"
+    local existing_pool
+    existing_pool=$(jq -r --arg n "$name" '.pools // [] | .[] | select(.name==$n) | .name' "$CONFIG_FILE" 2>/dev/null || true)
+    [ -z "$existing_pool" ] && die "Pool '$name' not found"
+    # Remove from other roles first
+    cmd_disks_unassign_dev "$dev" 2>/dev/null || true
+    local disk_count
+    disk_count=$(jq -r --arg n "$name" '(.pools[] | select(.name==$n) | .disks | length)' "$CONFIG_FILE" 2>/dev/null || echo "0")
+    local slot="${name}_disk$((disk_count + 1))"
+    local mnt="/mnt/pool_${slot}"
+    jq --arg n "$name" --arg slot "$slot" --arg dev "$dev" --arg mnt "$mnt" --arg fs "$fstype" \
+        '(.pools[] | select(.name==$n)).disks += [{"slot":$slot,"device":$dev,"mountpoint":$mnt,"fstype":$fs,"label":$slot,"enabled":true}]' \
+        "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+    info "Assigned $dev to pool '$name' as $slot"
+}
+
+cmd_pool_unassign() {
+    local name="${1:-}" dev="${2:-}"
+    [ -z "$name" ] || [ -z "$dev" ] && die "Usage: freeraid pool-unassign <pool-name> <device>"
+    local mnt
+    mnt=$(jq -r --arg n "$name" '.pools // [] | .[] | select(.name==$n) | .mountpoint' "$CONFIG_FILE" 2>/dev/null || true)
+    [ -z "$mnt" ] && die "Pool '$name' not found"
+    mountpoint -q "$mnt" 2>/dev/null && die "Stop pool '$name' before unassigning: freeraid pool-stop $name"
+    jq --arg n "$name" --arg d "$dev" \
+        '(.pools[] | select(.name==$n)).disks |= map(select(.device != $d))' \
+        "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+    info "Unassigned $dev from pool '$name'."
+}
+
+cmd_pool_start() {
+    local name="${1:-}"
+    [ -z "$name" ] && die "Usage: freeraid pool-start <name>"
+    local pool_json
+    pool_json=$(jq -c --arg n "$name" '.pools // [] | .[] | select(.name==$n)' "$CONFIG_FILE" 2>/dev/null || true)
+    [ -z "$pool_json" ] && die "Pool '$name' not found"
+    local mnt mergerfs_opts
+    mnt=$(echo "$pool_json" | jq -r '.mountpoint')
+    mergerfs_opts=$(echo "$pool_json" | jq -r '.mergerfs_options // "defaults,allow_other,use_ino,category.create=mfs,moveonenospc=true,minfreespace=200M"')
+    if mountpoint -q "$mnt" 2>/dev/null; then
+        info "Pool '$name' already mounted at $mnt"
+        return
+    fi
+    local branches=""
+    while IFS=$'\t' read -r dev disk_mnt fstype; do
+        if [ ! -b "$dev" ]; then
+            warn "Pool '$name': device $dev not found, skipping"
+            continue
+        fi
+        mkdir -p "$disk_mnt"
+        if ! blkid "$dev" &>/dev/null; then
+            info "Formatting $dev as $fstype for pool '$name'..."
+            case "$fstype" in
+                xfs)   mkfs.xfs  -f -L "${name}" "$dev" ;;
+                ext4)  mkfs.ext4 -F -L "${name}" "$dev" ;;
+                btrfs) mkfs.btrfs -f -L "${name}" "$dev" ;;
+                *)     mkfs.xfs  -f "$dev" ;;
+            esac
+        fi
+        if ! mountpoint -q "$disk_mnt"; then
+            info "Mounting $dev → $disk_mnt"
+            mount "$dev" "$disk_mnt" || { warn "Failed to mount $dev — skipping"; continue; }
+        fi
+        branches+="${disk_mnt}:"
+    done < <(echo "$pool_json" | jq -r '.disks[] | select(.enabled==true) | [.device, .mountpoint, .fstype] | join("\t")')
+    branches="${branches%:}"
+    if [ -z "$branches" ]; then
+        warn "Pool '$name': no drives available — not started"
+        return
+    fi
+    mkdir -p "$mnt"
+    info "Starting pool '$name': $branches → $mnt"
+    mergerfs "$branches" "$mnt" -o "${mergerfs_opts},fsname=freeraid_${name}" || die "mergerfs failed for pool '$name'"
+    info "Pool '$name' started at $mnt"
+}
+
+cmd_pool_stop() {
+    local name="${1:-}"
+    [ -z "$name" ] && die "Usage: freeraid pool-stop <name>"
+    local pool_json
+    pool_json=$(jq -c --arg n "$name" '.pools // [] | .[] | select(.name==$n)' "$CONFIG_FILE" 2>/dev/null || true)
+    [ -z "$pool_json" ] && die "Pool '$name' not found"
+    local mnt
+    mnt=$(echo "$pool_json" | jq -r '.mountpoint')
+    if mountpoint -q "$mnt" 2>/dev/null; then
+        info "Unmounting pool '$name' at $mnt"
+        umount "$mnt" || umount -l "$mnt"
+    fi
+    while IFS= read -r disk_mnt; do
+        if mountpoint -q "$disk_mnt" 2>/dev/null; then
+            info "Unmounting $disk_mnt"
+            umount "$disk_mnt" || umount -l "$disk_mnt"
+        fi
+    done < <(echo "$pool_json" | jq -r '.disks[] | .mountpoint')
+    info "Pool '$name' stopped."
+}
+
+cmd_pool_start_all() {
+    while IFS= read -r pname; do
+        cmd_pool_start "$pname" 2>/dev/null || warn "Failed to start pool '$pname'"
+    done < <(jq -r '.pools // [] | .[] | .name' "$CONFIG_FILE" 2>/dev/null)
+}
+
+cmd_pool_stop_all() {
+    while IFS= read -r pname; do
+        cmd_pool_stop "$pname" 2>/dev/null || warn "Failed to stop pool '$pname'"
+    done < <(jq -r '.pools // [] | .[] | .name' "$CONFIG_FILE" 2>/dev/null)
+}
+
 cmd_shares_list() {
     jq -c '.shares // []' "$CONFIG_FILE"
 }
@@ -702,14 +916,24 @@ cmd_shares_apply() {
 SMBEOF
 
     while IFS= read -r share; do
-        local name smb_enabled smb_security comment cache_mode read_list write_list
+        local name smb_enabled smb_security comment read_list write_list share_pw_set samba_user share_pool
         name=$(echo "$share" | jq -r '.name')
         smb_enabled=$(echo "$share" | jq -r '.smb_enabled')
         smb_security=$(echo "$share" | jq -r '.smb_security // "public"')
         comment=$(echo "$share" | jq -r '.comment // ""')
         read_list=$(echo "$share" | jq -r '.smb_read_list // [] | join(",")')
         write_list=$(echo "$share" | jq -r '.smb_write_list // [] | join(",")')
-        local path="${pool}/${name}"
+        share_pw_set=$(echo "$share" | jq -r '.share_password_set // false')
+        samba_user="freeraid_share_${name}"
+        share_pool=$(echo "$share" | jq -r '.pool // "array"')
+        local path
+        if [ "$share_pool" = "array" ] || [ -z "$share_pool" ]; then
+            path="${pool}/${name}"
+        else
+            local extra_pool_mnt
+            extra_pool_mnt=$(jq -r --arg p "$share_pool" '.pools // [] | .[] | select(.name==$p) | .mountpoint' "$CONFIG_FILE" 2>/dev/null || echo "")
+            path="${extra_pool_mnt:-$pool}/${name}"
+        fi
 
         [ "$smb_enabled" = "false" ] && continue
 
@@ -721,7 +945,7 @@ SMBEOF
    comment = ${comment}
 SHAREEOF
 
-        if [ "$smb_security" = "public" ]; then
+        if [ "$smb_security" = "public" ] && [ "$share_pw_set" != "true" ]; then
             cat >> "$smb_conf" <<SHAREEOF
    guest ok = yes
    browseable = yes
@@ -733,8 +957,13 @@ SHAREEOF
    browseable = yes
    writable = yes
 SHAREEOF
-            [ -n "$read_list"  ] && echo "   read list = ${read_list}" >> "$smb_conf"
-            [ -n "$write_list" ] && echo "   write list = ${write_list}" >> "$smb_conf"
+            # If share has a dedicated password user, add them to valid users
+            if [ "$share_pw_set" = "true" ]; then
+                echo "   valid users = ${samba_user}" >> "$smb_conf"
+            else
+                [ -n "$read_list"  ] && echo "   read list = ${read_list}" >> "$smb_conf"
+                [ -n "$write_list" ] && echo "   write list = ${write_list}" >> "$smb_conf"
+            fi
         fi
         echo "" >> "$smb_conf"
 
@@ -742,6 +971,36 @@ SHAREEOF
 
     systemctl restart smbd nmbd 2>/dev/null || systemctl restart samba 2>/dev/null || true
     info "Samba reloaded. Shares active."
+
+    # Also regenerate NFS exports if nfs-kernel-server is installed
+    command -v exportfs &>/dev/null && cmd_nfs_apply 2>/dev/null || true
+}
+
+cmd_nfs_apply() {
+    local exports_file="/etc/exports"
+    local pool
+    pool=$(cfg_pool_mountpoint)
+
+    info "Writing NFS exports..."
+    > "$exports_file"
+
+    while IFS= read -r share; do
+        local name nfs_enabled nfs_clients nfs_options
+        name=$(echo "$share" | jq -r '.name')
+        nfs_enabled=$(echo "$share" | jq -r '.nfs_enabled // false')
+        [ "$nfs_enabled" = "false" ] && continue
+
+        nfs_clients=$(echo "$share" | jq -r '.nfs_clients // "*"')
+        nfs_options=$(echo "$share" | jq -r '.nfs_options // "rw,sync,no_subtree_check,no_root_squash"')
+        local path="${pool}/${name}"
+        mkdir -p "$path"
+        echo "${path}  ${nfs_clients}(${nfs_options})" >> "$exports_file"
+        info "Exporting: ${path} → ${nfs_clients}"
+    done < <(jq -c '.shares[]' "$CONFIG_FILE" 2>/dev/null)
+
+    exportfs -ra 2>/dev/null || true
+    systemctl is-active --quiet nfs-kernel-server 2>/dev/null && systemctl reload-or-restart nfs-kernel-server 2>/dev/null || true
+    info "NFS exports applied."
 }
 
 cmd_shares_add() {
@@ -795,6 +1054,68 @@ cmd_shares_set_perms() {
 
     cmd_shares_apply
     info "Permissions updated for share '$name'."
+}
+
+cmd_shares_set_password() {
+    # Usage: freeraid shares-set-password <name> <password|"">
+    # Empty password disables share-level password (reverts to standard user auth)
+    local name="${1:-}" password="${2:-}"
+    [ -z "$name" ] && die "Usage: freeraid shares-set-password <name> <password>"
+
+    local existing
+    existing=$(jq -r --arg n "$name" '.shares[] | select(.name==$n) | .name' "$CONFIG_FILE" 2>/dev/null || true)
+    [ -z "$existing" ] && die "Share '$name' not found"
+
+    local samba_user="freeraid_share_${name}"
+
+    if [ -z "$password" ]; then
+        # Remove password protection: delete the samba user if it exists
+        if id "$samba_user" &>/dev/null; then
+            smbpasswd -x "$samba_user" 2>/dev/null || true
+            userdel "$samba_user" 2>/dev/null || true
+        fi
+        jq --arg n "$name" \
+           '(.shares[] | select(.name==$n)) |= del(.share_password_set)' \
+           "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+        cmd_shares_apply
+        info "Password removed from share '$name'."
+    else
+        # Create system user (no login shell, no home) if not already present
+        if ! id "$samba_user" &>/dev/null; then
+            useradd -r -s /usr/sbin/nologin -M "$samba_user" 2>/dev/null || true
+        fi
+        # Set samba password non-interactively
+        printf '%s\n%s\n' "$password" "$password" | smbpasswd -a -s "$samba_user" 2>/dev/null
+        smbpasswd -e "$samba_user" 2>/dev/null || true
+        # Record that share has a password (don't store plaintext)
+        jq --arg n "$name" \
+           '(.shares[] | select(.name==$n)) |= . + {"share_password_set":true}' \
+           "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+        cmd_shares_apply
+        info "Password set for share '$name'. Connect as user: $samba_user"
+    fi
+}
+
+cmd_shares_set_nfs() {
+    # Usage: freeraid shares-set-nfs <name> <enabled:true|false> [clients] [options]
+    local name="${1:-}" enabled="${2:-false}"
+    local clients="${3:-*}"
+    local options="${4:-rw,sync,no_subtree_check,no_root_squash}"
+    [ -z "$name" ] && die "Usage: freeraid shares-set-nfs <name> <true|false> [clients] [options]"
+
+    local existing
+    existing=$(jq -r --arg n "$name" '.shares[] | select(.name==$n) | .name' "$CONFIG_FILE" 2>/dev/null || true)
+    [ -z "$existing" ] && die "Share '$name' not found"
+
+    jq --arg n "$name" \
+       --argjson en "$([ "$enabled" = "true" ] && echo true || echo false)" \
+       --arg cl "$clients" \
+       --arg op "$options" \
+       '(.shares[] | select(.name==$n)) |= . + {"nfs_enabled":$en,"nfs_clients":$cl,"nfs_options":$op}' \
+       "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+
+    cmd_nfs_apply
+    info "NFS settings updated for share '$name'."
 }
 
 cmd_shares_import() {
@@ -1417,6 +1738,105 @@ cmd_docker_delete() {
     info "Deleted compose file for: $name"
 }
 
+cmd_docker_autoupdate_set() {
+    # freeraid docker-autoupdate-set <name> <true|false>
+    local name="${1:-}" val="${2:-false}"
+    [ -z "$name" ] && die "Usage: freeraid docker-autoupdate-set <name> <true|false>"
+    [ "$val" = "true" ] || val="false"
+    jq --arg n "$name" --argjson v "$val" \
+        '.docker.autoupdate[$n] = $v' "$CONFIG_FILE" > /tmp/freeraid.conf.tmp \
+        && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+    info "Auto-update for $name set to $val"
+}
+
+cmd_docker_autoupdate_get() {
+    # Returns JSON object: { "name": true/false, ... }
+    jq -r '.docker.autoupdate // {}' "$CONFIG_FILE" 2>/dev/null || echo '{}'
+}
+
+cmd_docker_update() {
+    # Pull latest image for a container and restart if the image changed
+    local name="${1:-}"
+    [ -z "$name" ] && die "Usage: freeraid docker-update <name>"
+    local f="${COMPOSE_DIR}/${name}.docker-compose.yml"
+    [ -f "$f" ] || die "No compose file found for: $name"
+    require docker
+
+    # Get current image ID before pull
+    local container_name image old_id new_id
+    container_name=$(python3 -c "
+import json
+try:
+    d = json.load(open('$f'))
+    svcs = d.get('services', {})
+    svc = next(iter(svcs.values()), {})
+    print(svc.get('container_name', list(svcs.keys())[0] if svcs else '$name'))
+except: print('$name')
+" 2>/dev/null || echo "$name")
+
+    image=$(python3 -c "
+import json
+try:
+    d = json.load(open('$f'))
+    svcs = d.get('services', {})
+    svc = next(iter(svcs.values()), {})
+    print(svc.get('image', ''))
+except: print('')
+" 2>/dev/null || echo "")
+
+    [ -z "$image" ] && die "Could not determine image for $name"
+
+    old_id=$(docker inspect --format '{{.Id}}' "$image" 2>/dev/null || echo "")
+
+    info "Pulling latest image for $name ($image)..."
+    docker pull "$image" 2>&1 || { warn "Pull failed for $name"; return 1; }
+
+    new_id=$(docker inspect --format '{{.Id}}' "$image" 2>/dev/null || echo "")
+
+    if [ "$old_id" = "$new_id" ] && [ -n "$old_id" ]; then
+        info "$name is already up to date."
+        echo '{"name":"'"$name"'","updated":false,"image":"'"$image"'"}'
+        return 0
+    fi
+
+    info "New image available — restarting $name..."
+    docker_compose -f "$f" up -d 2>&1
+    cmd_notify_send "container_updated" "Container $name updated to latest image ($image)" 2>/dev/null || true
+    info "$name updated and restarted."
+    echo '{"name":"'"$name"'","updated":true,"image":"'"$image"'"}'
+}
+
+cmd_docker_update_all() {
+    # Update all containers that have auto-update enabled
+    require docker
+    local autoupdate
+    autoupdate=$(jq -r '.docker.autoupdate // {} | to_entries[] | select(.value==true) | .key' "$CONFIG_FILE" 2>/dev/null || echo "")
+
+    if [ -z "$autoupdate" ]; then
+        info "No containers have auto-update enabled."
+        return 0
+    fi
+
+    local updated=0 failed=0
+    while IFS= read -r name; do
+        [ -z "$name" ] && continue
+        local f="${COMPOSE_DIR}/${name}.docker-compose.yml"
+        if [ ! -f "$f" ]; then
+            warn "Skipping $name — compose file not found"
+            continue
+        fi
+        info "Checking $name..."
+        if cmd_docker_update "$name" 2>&1; then
+            updated=$(( updated + 1 ))
+        else
+            failed=$(( failed + 1 ))
+            warn "Update failed for $name"
+        fi
+    done <<< "$autoupdate"
+
+    info "Auto-update complete: $updated checked, $failed failed."
+}
+
 cmd_install_deps() {
     info "Installing FreeRAID dependencies..."
     apt-get update -qq
@@ -1548,6 +1968,7 @@ cmd_check_update() {
     else
         local release_notes
         release_notes=$(echo "$release_json" | jq -r '.body // ""' | head -5)
+        cmd_notify_send "update_available" "FreeRAID update available: v${latest_ver} (current: v${FREERAID_VERSION})" 2>/dev/null || true
         echo '{"update_available":true,"current":"'"$FREERAID_VERSION"'","latest":"'"$latest_ver"'","notes":'"$(echo "$release_notes" | jq -Rs .)"'}'
     fi
 }
@@ -1801,6 +2222,308 @@ cmd_replace_disk_status() {
         "$running" "$exit_code" "${last_lines:-\"\"}"
 }
 
+# ── File balancer ────────────────────────────────────────────────────────────
+
+cmd_balance_status() {
+    # Returns per-disk usage as JSON for the UI to display
+    local run_dir="/var/run/freeraid"
+    local progress_file="$run_dir/balance.progress"
+    local pid_file="$run_dir/balance.pid"
+
+    local running=false
+    if [ -f "$pid_file" ]; then
+        local pid; pid=$(cat "$pid_file")
+        kill -0 "$pid" 2>/dev/null && running=true
+    fi
+
+    # Per-disk usage
+    local disks_json="["
+    local first=true
+    while IFS=' ' read -r dev mnt fstype; do
+        [ -b "$dev" ] || continue
+        mountpoint -q "$mnt" 2>/dev/null || continue
+        local used_kb avail_kb total_kb pct
+        read -r used_kb avail_kb total_kb < <(df -k --output=used,avail,size "$mnt" 2>/dev/null | tail -1)
+        pct=$(( total_kb > 0 ? used_kb * 100 / total_kb : 0 ))
+        $first || disks_json+=","
+        disks_json+="{\"device\":\"${dev}\",\"mountpoint\":\"${mnt}\",\"used_kb\":${used_kb:-0},\"avail_kb\":${avail_kb:-0},\"total_kb\":${total_kb:-0},\"pct\":${pct}}"
+        first=false
+    done < <(cfg_array_disks_enabled)
+    disks_json+="]"
+
+    local progress='{}'
+    [ -f "$progress_file" ] && progress=$(cat "$progress_file" 2>/dev/null || echo '{}')
+
+    printf '{"running":%s,"disks":%s,"progress":%s}\n' \
+        "$running" "$disks_json" "$progress"
+}
+
+cmd_balance_bg() {
+    # Start the file balancer as a background job
+    # Moves files from most-full disks to least-full until within threshold
+    local threshold="${1:-10}"  # stop when max-min usage % difference is within threshold
+    local run_dir="/var/run/freeraid"
+    mkdir -p "$run_dir"
+    local pid_file="$run_dir/balance.pid"
+    local log_file="/var/log/freeraid-balance.log"
+    local progress_file="$run_dir/balance.progress"
+
+    if [ -f "$pid_file" ]; then
+        local old_pid; old_pid=$(cat "$pid_file")
+        kill -0 "$old_pid" 2>/dev/null && die "Balancer already running (pid $old_pid)"
+    fi
+
+    printf '{"stage":"starting","moved_files":0,"moved_bytes":0,"log":"Starting balancer..."}\n' > "$progress_file"
+
+    # Build disk list for the background script
+    local disk_list
+    disk_list=$(jq -r '.array.disks[] | select(.enabled==true) | .mountpoint' "$CONFIG_FILE" 2>/dev/null | tr '\n' ' ')
+
+    nohup bash << BALSCRIPT > /dev/null 2>&1 &
+#!/bin/bash
+LOG="$log_file"
+PROG="$progress_file"
+THRESHOLD=$threshold
+DISKS=($disk_list)
+
+_upd() { printf '{"stage":"%s","moved_files":%d,"moved_bytes":%d,"log":"%s"}\n' "\$1" "\$2" "\$3" "\$4" > "\$PROG"; }
+_disk_used_pct() { df -k "\$1" 2>/dev/null | tail -1 | awk '{if(\$2>0) print int(\$3*100/\$2); else print 0}'; }
+_disk_avail_kb() { df -k "\$1" 2>/dev/null | tail -1 | awk '{print \$4}'; }
+
+echo "[$(date)] Balancer started. Threshold: \${THRESHOLD}%" > "\$LOG"
+_upd "balancing" 0 0 "Analyzing disk usage..."
+
+moved_files=0
+moved_bytes=0
+passes=0
+
+while true; do
+    passes=\$((passes + 1))
+    [ "\$passes" -gt 50 ] && break  # safety limit
+
+    # Find most-full and least-full mounted disks
+    max_pct=0; min_pct=100; src=""; dst=""
+    for d in "\${DISKS[@]}"; do
+        mountpoint -q "\$d" 2>/dev/null || continue
+        pct=\$(_disk_used_pct "\$d")
+        [ "\$pct" -gt "\$max_pct" ] && { max_pct=\$pct; src="\$d"; }
+        [ "\$pct" -lt "\$min_pct" ] && { min_pct=\$pct; dst="\$d"; }
+    done
+
+    diff=\$((max_pct - min_pct))
+    echo "[$(date)] Pass \$passes: max=\${max_pct}% (\$src), min=\${min_pct}% (\$dst), diff=\${diff}%" >> "\$LOG"
+
+    [ "\$diff" -le "\$THRESHOLD" ] && break
+    [ -z "\$src" ] || [ -z "\$dst" ] || [ "\$src" = "\$dst" ] && break
+
+    avail_kb=\$(_disk_avail_kb "\$dst")
+
+    # Find and move the largest file from src that fits in dst
+    moved_this_pass=0
+    while IFS= read -r -d '' f; do
+        fsize_kb=\$(du -k "\$f" 2>/dev/null | awk '{print \$1}')
+        [ "\${fsize_kb:-0}" -gt "\$avail_kb" ] && continue
+
+        rel="\${f#\$src/}"
+        dst_path="\$dst/\$rel"
+        dst_dir="\$(dirname "\$dst_path")"
+        mkdir -p "\$dst_dir"
+
+        echo "[$(date)] Moving: \$f → \$dst_path (\${fsize_kb}KB)" >> "\$LOG"
+        _upd "balancing" "\$moved_files" "\$((moved_bytes + fsize_kb * 1024))" "Moving \$(basename "\$f")..."
+
+        if rsync -a --remove-source-files "\$f" "\$dst_path" 2>> "\$LOG"; then
+            moved_files=\$((moved_files + 1))
+            moved_bytes=\$((moved_bytes + fsize_kb * 1024))
+            avail_kb=\$((avail_kb - fsize_kb))
+            moved_this_pass=1
+            break
+        else
+            echo "[$(date)] rsync failed for \$f" >> "\$LOG"
+        fi
+    done < <(find "\$src" -type f -not -name '.snapraid*' -print0 2>/dev/null | sort -z -t/ -k1)
+
+    # If we couldn't move anything this pass, stop
+    [ "\$moved_this_pass" -eq 0 ] && break
+done
+
+echo "[$(date)] Balancer done. Moved \$moved_files files (\$((moved_bytes / 1048576)) MB)." >> "\$LOG"
+_upd "done" "\$moved_files" "\$moved_bytes" "Complete — moved \$moved_files files."
+BALSCRIPT
+
+    echo $! > "$pid_file"
+    info "Balancer started in background (pid $!)"
+    printf '{"pid":%d,"log":"%s"}\n' "$!" "$log_file"
+}
+
+cmd_balance_cancel() {
+    local run_dir="/var/run/freeraid"
+    local pid_file="$run_dir/balance.pid"
+    [ -f "$pid_file" ] || die "No balancer running"
+    local pid; pid=$(cat "$pid_file")
+    kill -TERM "$pid" 2>/dev/null || true
+    pkill -TERM -P "$pid" 2>/dev/null || true
+    rm -f "$pid_file"
+    info "Balancer cancelled"
+}
+
+# ── Drive pre-clear ──────────────────────────────────────────────────────────
+
+cmd_preclear_bg() {
+    # Start a pre-clear on a drive in the background
+    # Stages: 1) SMART short test  2) Zero the drive  3) SMART long test
+    local dev="${1:-}"
+    [ -z "$dev" ] && die "Usage: freeraid preclear-bg <device>"
+    [ -b "$dev" ] || die "Device not found: $dev"
+
+    # Safety: refuse if device is currently assigned in config
+    local assigned
+    assigned=$(jq -r '
+        (.array.disks[]  | .device),
+        (.array.parity[] | .device),
+        (.array.cache[]  | .device)
+    ' "$CONFIG_FILE" 2>/dev/null | grep -xF "$dev" || true)
+    [ -n "$assigned" ] && die "Cannot pre-clear $dev — it is assigned to the array"
+
+    local run_dir="/var/run/freeraid"
+    mkdir -p "$run_dir"
+    local safe_dev="${dev//\//_}"
+    local pid_file="$run_dir/preclear-${safe_dev}.pid"
+    local log_file="/var/log/freeraid-preclear-${safe_dev}.log"
+    local progress_file="$run_dir/preclear-${safe_dev}.progress"
+
+    if [ -f "$pid_file" ]; then
+        local old_pid; old_pid=$(cat "$pid_file")
+        kill -0 "$old_pid" 2>/dev/null && die "Pre-clear already running on $dev (pid $old_pid)"
+    fi
+
+    local size_bytes
+    size_bytes=$(blockdev --getsize64 "$dev" 2>/dev/null || echo 0)
+
+    printf '{"stage":"starting","pct":0,"log":"Starting pre-clear on %s"}\n' "$dev" > "$progress_file"
+
+    nohup bash << PCLSCRIPT > /dev/null 2>&1 &
+#!/bin/bash
+set -e
+DEV="$dev"
+LOG="$log_file"
+PROG="$progress_file"
+SIZE=$size_bytes
+
+_upd() { printf '{"stage":"%s","pct":%d,"log":"%s"}\n' "\$1" "\$2" "\$3" > "\$PROG"; }
+
+echo "[$(date)] Pre-clear started on \$DEV" > "\$LOG"
+
+# Stage 1: SMART short self-test
+_upd "smart_short" 0 "Running SMART short self-test..."
+echo "[$(date)] Stage 1: SMART short self-test" >> "\$LOG"
+if command -v smartctl &>/dev/null; then
+    smartctl -t short "\$DEV" >> "\$LOG" 2>&1 || true
+    # Wait up to 3 minutes for short test
+    for i in \$(seq 1 36); do
+        sleep 5
+        result=\$(smartctl -a "\$DEV" 2>/dev/null | grep -i "self-test execution status" | head -1 || echo "")
+        echo "\$result" >> "\$LOG"
+        echo "\$result" | grep -qi "completed without error" && break
+        echo "\$result" | grep -qi "in progress" || break
+    done
+    smartctl -a "\$DEV" >> "\$LOG" 2>&1 || true
+else
+    echo "smartctl not available — skipping SMART tests" >> "\$LOG"
+fi
+_upd "zeroing" 5 "Zeroing drive (this may take a while)..."
+
+# Stage 2: Zero the drive with progress tracking
+echo "[$(date)] Stage 2: Zeroing drive" >> "\$LOG"
+if [ "\$SIZE" -gt 0 ]; then
+    dd if=/dev/zero of="\$DEV" bs=1M 2>&1 | while IFS= read -r line; do
+        echo "\$line" >> "\$LOG"
+        # dd outputs "N bytes (X GB) copied" — parse bytes written
+        if [[ "\$line" =~ ^([0-9]+)[[:space:]]bytes ]]; then
+            written="\${BASH_REMATCH[1]}"
+            pct=\$(( 5 + (written * 90 / SIZE) ))
+            [ "\$pct" -gt 95 ] && pct=95
+            _upd "zeroing" "\$pct" "Zeroing: \$((written / 1073741824)) GB written..."
+        fi
+    done || true
+fi
+sync
+_upd "smart_long" 96 "Running SMART long self-test..."
+
+# Stage 3: SMART long self-test
+echo "[$(date)] Stage 3: SMART long self-test" >> "\$LOG"
+if command -v smartctl &>/dev/null; then
+    smartctl -t long "\$DEV" >> "\$LOG" 2>&1 || true
+    # Wait up to 3 hours for long test (poll every 60s)
+    for i in \$(seq 1 180); do
+        sleep 60
+        result=\$(smartctl -a "\$DEV" 2>/dev/null | grep -i "self-test execution status" | head -1 || echo "")
+        echo "\$result" >> "\$LOG"
+        echo "\$result" | grep -qi "in progress" || break
+    done
+    smartctl -a "\$DEV" >> "\$LOG" 2>&1 || true
+fi
+
+echo "[$(date)] Pre-clear complete." >> "\$LOG"
+_upd "done" 100 "Pre-clear complete. Drive is ready to use."
+PCLSCRIPT
+
+    echo $! > "$pid_file"
+    info "Pre-clear started on $dev (pid $!). Log: $log_file"
+    printf '{"pid":%d,"log":"%s","progress_file":"%s"}\n' "$!" "$log_file" "$progress_file"
+}
+
+cmd_preclear_status() {
+    local dev="${1:-}"
+    [ -z "$dev" ] && die "Usage: freeraid preclear-status <device>"
+    local run_dir="/var/run/freeraid"
+    local safe_dev="${dev//\//_}"
+    local pid_file="$run_dir/preclear-${safe_dev}.pid"
+    local progress_file="$run_dir/preclear-${safe_dev}.progress"
+    local log_file="/var/log/freeraid-preclear-${safe_dev}.log"
+
+    if [ ! -f "$pid_file" ] && [ ! -f "$progress_file" ]; then
+        printf '{"running":false,"stage":"idle","pct":0,"log":""}\n'
+        return
+    fi
+
+    local running=false
+    if [ -f "$pid_file" ]; then
+        local pid; pid=$(cat "$pid_file")
+        kill -0 "$pid" 2>/dev/null && running=true
+    fi
+
+    local progress='{}'
+    [ -f "$progress_file" ] && progress=$(cat "$progress_file" 2>/dev/null || echo '{}')
+
+    local last_lines=""
+    [ -f "$log_file" ] && last_lines=$(tail -8 "$log_file" 2>/dev/null | jq -Rs .)
+
+    local stage pct msg
+    stage=$(echo "$progress" | jq -r '.stage // "idle"')
+    pct=$(echo "$progress" | jq -r '.pct // 0')
+    msg=$(echo "$progress" | jq -r '.log // ""' | jq -Rs .)
+
+    printf '{"running":%s,"stage":"%s","pct":%s,"message":%s,"log":%s}\n' \
+        "$running" "$stage" "$pct" "$msg" "${last_lines:-\"\"}"
+}
+
+cmd_preclear_cancel() {
+    local dev="${1:-}"
+    [ -z "$dev" ] && die "Usage: freeraid preclear-cancel <device>"
+    local run_dir="/var/run/freeraid"
+    local safe_dev="${dev//\//_}"
+    local pid_file="$run_dir/preclear-${safe_dev}.pid"
+
+    [ -f "$pid_file" ] || die "No pre-clear running on $dev"
+    local pid; pid=$(cat "$pid_file")
+    kill -TERM "$pid" 2>/dev/null || true
+    # Also kill any dd child
+    pkill -TERM -P "$pid" 2>/dev/null || true
+    rm -f "$pid_file"
+    info "Pre-clear cancelled on $dev"
+}
+
 # Scan all currently-mounted drives and update UUIDs/serials in config
 cmd_registry_sync() {
     info "Syncing drive registry (UUID/serial) from currently-mounted drives..."
@@ -1989,7 +2712,10 @@ cmd_users_add() {
 
     # Create system user if doesn't exist
     if ! id "$username" &>/dev/null; then
-        useradd -m -s /bin/bash -G users "$username" || die "Failed to create user: $username"
+        useradd -m -s /bin/bash -G sudo,users "$username" || die "Failed to create user: $username"
+    else
+        # Ensure existing user has sudo
+        usermod -aG sudo "$username" 2>/dev/null || true
     fi
 
     # Set system password
@@ -2208,6 +2934,398 @@ cmd_sysinfo() {
         "$hostname" "$uptime_sec" "$cpu_model" "$cpu_cores" "$kernel"
 }
 
+# ── UPS / NUT ────────────────────────────────────────────────────────────────────
+
+cmd_ups_status() {
+    require upsc 2>/dev/null || { echo '{"available":false,"error":"NUT not installed"}'; return 0; }
+
+    local ups_name
+    ups_name=$(jq -r '.ups.name // "ups@localhost"' "$CONFIG_FILE" 2>/dev/null || echo "ups@localhost")
+
+    local raw
+    raw=$(upsc "$ups_name" 2>&1) || { echo '{"available":false,"error":"Cannot connect to UPS: '"$(echo "$raw" | head -1 | tr '"' "'")"'"}'; return 0; }
+
+    _upsc_val() { echo "$raw" | grep "^${1}:" | head -1 | awk '{print $2}'; }
+
+    local status batt_pct load_pct runtime_mins input_v output_v
+    status=$(      _upsc_val "ups.status")
+    batt_pct=$(    _upsc_val "battery.charge")
+    load_pct=$(    _upsc_val "ups.load")
+    runtime_mins=$(echo "$raw" | grep "^battery.runtime:" | head -1 | awk '{print int($2/60)}')
+    input_v=$(     _upsc_val "input.voltage")
+    output_v=$(    _upsc_val "output.voltage")
+    model=$(       echo "$raw" | grep "^device.model:" | head -1 | sed 's/^device.model: //')
+
+    local on_battery=false
+    echo "$status" | grep -qi "OB" && on_battery=true
+
+    printf '{"available":true,"ups":"%s","status":"%s","on_battery":%s,"battery_pct":%s,"load_pct":%s,"runtime_mins":%s,"input_v":"%s","output_v":"%s","model":"%s"}\n' \
+        "$ups_name" \
+        "${status:-unknown}" \
+        "$on_battery" \
+        "${batt_pct:-0}" \
+        "${load_pct:-0}" \
+        "${runtime_mins:-0}" \
+        "${input_v:-?}" \
+        "${output_v:-?}" \
+        "${model:-Unknown UPS}"
+}
+
+cmd_ups_config_get() {
+    jq -r '.ups // {"enabled":false,"name":"ups","host":"localhost","driver":"usbhid-ups","port":"auto","shutdown_pct":20,"mode":"standalone"}' "$CONFIG_FILE" 2>/dev/null
+}
+
+cmd_ups_config_set() {
+    local json="${1:-}"
+    [ -z "$json" ] && die "Usage: freeraid ups-config-set <json>"
+
+    # Merge into config
+    jq --argjson u "$json" '.ups = ($u + (.ups // {})) | .ups = $u' "$CONFIG_FILE" \
+        > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+
+    local enabled driver port ups_name host shutdown_pct mode
+    enabled=$(    jq -r '.ups.enabled      // false'       "$CONFIG_FILE")
+    mode=$(       jq -r '.ups.mode         // "standalone"' "$CONFIG_FILE")
+    driver=$(     jq -r '.ups.driver       // "usbhid-ups"' "$CONFIG_FILE")
+    port=$(       jq -r '.ups.port         // "auto"'       "$CONFIG_FILE")
+    ups_name=$(   jq -r '.ups.name         // "ups"'        "$CONFIG_FILE")
+    host=$(       jq -r '.ups.host         // "localhost"'   "$CONFIG_FILE")
+    shutdown_pct=$(jq -r '.ups.shutdown_pct // 20'          "$CONFIG_FILE")
+
+    if [ "$enabled" != "true" ]; then
+        systemctl stop nut-server nut-monitor 2>/dev/null || true
+        info "UPS monitoring disabled."
+        return 0
+    fi
+
+    require nut-server 2>/dev/null || {
+        warn "NUT not installed. Run: apt-get install nut"
+        return 1
+    }
+
+    # Write /etc/nut/ups.conf
+    if [ "$mode" = "standalone" ]; then
+        cat > /etc/nut/ups.conf << UPSCONF
+[${ups_name}]
+    driver = ${driver}
+    port   = ${port}
+    desc   = "FreeRAID UPS"
+UPSCONF
+        echo "MODE=standalone" > /etc/nut/nut.conf
+    else
+        # netclient — remote UPS server
+        echo "MODE=netclient" > /etc/nut/nut.conf
+    fi
+
+    # Write /etc/nut/upsmon.conf
+    cat > /etc/nut/upsmon.conf << MONCONF
+MONITOR ${ups_name}@${host} 1 admin password master
+MINSUPPLIES 1
+SHUTDOWNCMD "/usr/local/bin/freeraid stop && /sbin/shutdown -h +0"
+NOTIFYCMD /usr/local/bin/freeraid-ups-notify
+POWERDOWNFLAG /etc/killpower
+POLLFREQ 5
+POLLFREQALERT 5
+DEADTIME 15
+RBWARNTIME 43200
+NOCOMMWARNTIME 300
+FINALDELAY 5
+NOTIFYMSG ONLINE    "UPS back on mains power"
+NOTIFYMSG ONBATT    "UPS on battery — power outage detected"
+NOTIFYMSG LOWBATT   "UPS battery low — shutting down soon"
+NOTIFYMSG SHUTDOWN  "System shutting down due to UPS"
+NOTIFYFLAG ONLINE   SYSLOG+EXEC
+NOTIFYFLAG ONBATT   SYSLOG+EXEC
+NOTIFYFLAG LOWBATT  SYSLOG+EXEC
+MONCONF
+
+    # Write /etc/nut/upsd.conf (for standalone mode)
+    cat > /etc/nut/upsd.conf << UPSDCONF
+LISTEN 127.0.0.1 3493
+UPSDCONF
+
+    # Write /etc/nut/upsd.users
+    cat > /etc/nut/upsd.users << USERSCONF
+[admin]
+    password = password
+    actions = SET
+    instcmds = ALL
+    upsmon master
+USERSCONF
+
+    # Write notify script
+    cat > /usr/local/bin/freeraid-ups-notify << 'NOTIFYSCRIPT'
+#!/bin/bash
+/usr/local/bin/freeraid notify-send "ups_event" "${NOTIFYTYPE}: ${UPSNAME}" 2>/dev/null || true
+NOTIFYSCRIPT
+    chmod +x /usr/local/bin/freeraid-ups-notify
+
+    chmod 640 /etc/nut/upsd.users /etc/nut/upsmon.conf 2>/dev/null || true
+    chown root:nut /etc/nut/upsd.users /etc/nut/upsmon.conf /etc/nut/ups.conf 2>/dev/null || true
+
+    systemctl restart nut-server  2>/dev/null || true
+    systemctl restart nut-monitor 2>/dev/null || true
+    systemctl enable  nut-server nut-monitor 2>/dev/null || true
+
+    info "UPS monitoring configured and started."
+    echo '{"ok":true}'
+}
+
+# ── Tailscale ────────────────────────────────────────────────────────────────────
+
+cmd_tailscale_status() {
+    if ! command -v tailscale &>/dev/null; then
+        echo '{"installed":false}'
+        return 0
+    fi
+
+    local raw
+    raw=$(tailscale status --json 2>/dev/null) || {
+        echo '{"installed":true,"running":false,"error":"tailscale daemon not running"}'
+        return 0
+    }
+
+    local state ip hostname
+    state=$(    echo "$raw" | jq -r '.BackendState // "unknown"')
+    ip=$(       echo "$raw" | jq -r '.TailscaleIPs[0] // ""')
+    hostname=$( echo "$raw" | jq -r '.Self.HostName // ""')
+    local online=false
+    echo "$raw" | jq -e '.Self.Online == true' &>/dev/null && online=true
+
+    printf '{"installed":true,"running":true,"state":"%s","ip":"%s","hostname":"%s","online":%s}\n' \
+        "$state" "$ip" "$hostname" "$online"
+}
+
+cmd_tailscale_install() {
+    info "Installing Tailscale..."
+    curl -fsSL https://tailscale.com/install.sh | sh 2>&1 || die "Tailscale install failed"
+    systemctl enable --now tailscaled 2>/dev/null || true
+    info "Tailscale installed."
+}
+
+cmd_tailscale_up() {
+    require tailscale
+    info "Bringing Tailscale up..."
+    # Run tailscale up and capture the auth URL if not yet authenticated
+    local out
+    out=$(tailscale up --accept-routes 2>&1) || true
+    echo "$out"
+    # If there's an auth URL, extract and return it as JSON
+    local url
+    url=$(echo "$out" | grep -oP 'https://login\.tailscale\.com/\S+' | head -1 || true)
+    if [ -n "$url" ]; then
+        printf '{"needs_auth":true,"auth_url":"%s"}\n' "$url"
+    else
+        printf '{"needs_auth":false}\n'
+    fi
+}
+
+cmd_tailscale_down() {
+    require tailscale
+    tailscale down 2>&1 && info "Tailscale disconnected." || warn "tailscale down failed"
+}
+
+# ── Notifications ────────────────────────────────────────────────────────────────
+
+cmd_notify_get() {
+    jq -r '.notifications // {
+        "email":   {"enabled":false,"smtp_host":"","smtp_port":587,"smtp_from":"","smtp_user":"","smtp_pass":"","smtp_to":""},
+        "webhook": {"enabled":false,"url":"","format":"discord"},
+        "events":  {"array_degraded":true,"drive_temp":true,"sync_error":true,"scrub_error":true,"update_available":true,"container_updated":false},
+        "temp_threshold": 55
+    }' "$CONFIG_FILE"
+}
+
+cmd_notify_set() {
+    local json="${1:-}"
+    [ -z "$json" ] && die "Usage: freeraid notify-set <json>"
+    jq --argjson n "$json" '.notifications = $n' "$CONFIG_FILE" > /tmp/freeraid.conf.tmp \
+        && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+    info "Notification settings saved."
+}
+
+_notify_email() {
+    local subject="$1" body="$2"
+    command -v msmtp &>/dev/null || { warn "msmtp not installed — run: apt-get install msmtp"; return 1; }
+
+    local smtp_host smtp_port smtp_user smtp_pass smtp_tls to_addr
+    smtp_host=$(jq -r '.notifications.email.smtp_host // ""' "$CONFIG_FILE")
+    smtp_port=$(jq -r '.notifications.email.smtp_port // 587' "$CONFIG_FILE")
+    local smtp_from to_addr
+    smtp_from=$(jq -r '.notifications.email.smtp_from // ""' "$CONFIG_FILE")
+    smtp_user=$(jq -r '.notifications.email.smtp_user // ""' "$CONFIG_FILE")
+    smtp_pass=$(jq -r '.notifications.email.smtp_pass // ""' "$CONFIG_FILE")
+    to_addr=$(jq -r '.notifications.email.smtp_to // ""' "$CONFIG_FILE")
+    [ -z "$smtp_from" ] && smtp_from="freeraid@${smtp_host}"
+
+    [ -z "$smtp_host" ] || [ -z "$to_addr" ] && { warn "Email not configured"; return 1; }
+
+    printf "To: %s\nFrom: %s\nSubject: %s\n\n%s\n" \
+        "$to_addr" "$smtp_from" "$subject" "$body" | \
+        msmtp --host="$smtp_host" --port="$smtp_port" \
+              --auth=on --user="$smtp_user" --passwordeval="echo '${smtp_pass}'" \
+              --tls=on --tls-starttls=on \
+              "$to_addr" 2>&1
+}
+
+_notify_webhook() {
+    local event="$1" message="$2" hostname="$3"
+    command -v curl &>/dev/null || return 1
+
+    local url format
+    url=$(jq -r '.notifications.webhook.url // ""' "$CONFIG_FILE")
+    format=$(jq -r '.notifications.webhook.format // "discord"' "$CONFIG_FILE")
+    [ -z "$url" ] && { warn "Webhook URL not configured"; return 1; }
+
+    local payload
+    case "$format" in
+        discord)
+            payload=$(jq -n \
+                --arg title "FreeRAID Alert: $event" \
+                --arg desc "$message" \
+                --arg host "$hostname" \
+                '{"embeds":[{"title":$title,"description":$desc,"color":15158332,"footer":{"text":("Host: "+$host)}}]}')
+            ;;
+        slack)
+            payload=$(jq -n \
+                --arg text "*FreeRAID* ($hostname): *$event* — $message" \
+                '{"text":$text}')
+            ;;
+        *)
+            payload=$(jq -n \
+                --arg event "$event" --arg message "$message" --arg hostname "$hostname" \
+                '{"event":$event,"message":$message,"hostname":$hostname}')
+            ;;
+    esac
+
+    curl -fsSL -X POST -H "Content-Type: application/json" -d "$payload" "$url" 2>&1
+}
+
+cmd_notify_send() {
+    local event="${1:-}" message="${2:-unknown}"
+    [ -z "$event" ] && die "Usage: freeraid notify-send <event> <message>"
+
+    # Check if event is enabled in config
+    local enabled
+    enabled=$(jq -r --arg k "$event" '.notifications.events[$k] // true' "$CONFIG_FILE" 2>/dev/null || echo "true")
+    [ "$enabled" = "false" ] && return 0
+
+    local hostname; hostname=$(cat /proc/sys/kernel/hostname 2>/dev/null || echo "FreeRAID")
+    local subject="[FreeRAID] ${event//_/ }: $message"
+
+    local email_on webhook_on
+    email_on=$(jq -r '.notifications.email.enabled // false' "$CONFIG_FILE" 2>/dev/null || echo "false")
+    webhook_on=$(jq -r '.notifications.webhook.enabled // false' "$CONFIG_FILE" 2>/dev/null || echo "false")
+
+    [ "$email_on"   = "true" ] && _notify_email   "$subject" "Host: $hostname\nEvent: $event\n\n$message" 2>/dev/null || true
+    [ "$webhook_on" = "true" ] && _notify_webhook "$event" "$message" "$hostname" 2>/dev/null || true
+
+    log "NOTIFY: $event — $message"
+}
+
+cmd_notify_test() {
+    local method="${1:-all}"
+    local hostname; hostname=$(cat /proc/sys/kernel/hostname 2>/dev/null || echo "FreeRAID")
+    local msg="Test notification from FreeRAID on $hostname. If you see this, notifications are working."
+
+    case "$method" in
+        email)
+            if _notify_email "[FreeRAID] Test" "$msg" 2>&1; then
+                echo '{"ok":true,"message":"Test email sent successfully"}'
+            else
+                echo '{"ok":false,"message":"Email failed — check SMTP settings"}'
+            fi
+            ;;
+        webhook)
+            if _notify_webhook "test" "$msg" "$hostname" 2>&1; then
+                echo '{"ok":true,"message":"Test webhook sent successfully"}'
+            else
+                echo '{"ok":false,"message":"Webhook failed — check URL and format"}'
+            fi
+            ;;
+        *)
+            _notify_email   "[FreeRAID] Test" "$msg" 2>/dev/null || true
+            _notify_webhook "test" "$msg" "$hostname" 2>/dev/null || true
+            echo '{"ok":true,"message":"Test notifications sent"}'
+            ;;
+    esac
+}
+
+cmd_temp_check() {
+    # Check all drive temps and notify if above threshold (default 55°C)
+    local threshold="${1:-55}"
+    command -v smartctl &>/dev/null || return 0
+
+    while IFS= read -r dev; do
+        [ -b "$dev" ] || continue
+        local temp
+        temp=$(smartctl -j -A "$dev" 2>/dev/null | jq -r '
+            .temperature.current //
+            (.ata_smart_attributes.table[]? | select(.name=="Temperature_Celsius") | .raw.value) //
+            empty' 2>/dev/null | head -1)
+        [ -z "$temp" ] && continue
+        if [ "$temp" -ge "$threshold" ] 2>/dev/null; then
+            warn "Drive $dev temperature ${temp}°C exceeds ${threshold}°C threshold"
+            cmd_notify_send "drive_temp" "Drive $dev is running hot: ${temp}°C (threshold: ${threshold}°C)" 2>/dev/null || true
+        fi
+    done < <(jq -r '
+        (.array.disks[]  | select(.enabled==true) | .device),
+        (.array.parity[] | .device),
+        (.array.cache[]  | select(.enabled==true) | .device)
+    ' "$CONFIG_FILE" 2>/dev/null | sort -u)
+}
+
+# ── Disk I/O stats ───────────────────────────────────────────────────────────────
+
+cmd_iostat() {
+    # Returns JSON array with read/write KB/s for each assigned drive
+    # Samples /proc/diskstats twice (1 second apart) and returns delta
+    local interval="${1:-1}"
+
+    # Collect all assigned device basenames
+    local devs
+    devs=$(jq -r '
+        (.array.disks[]  | select(.enabled==true) | .device),
+        (.array.parity[] | .device),
+        (.array.cache[]  | select(.enabled==true) | .device)
+    ' "$CONFIG_FILE" 2>/dev/null | sed 's|/dev/||' | sort -u)
+
+    [ -z "$devs" ] && { echo "[]"; return 0; }
+
+    # Parse /proc/diskstats: field 3=name, 6=sectors_read, 10=sectors_written
+    _read_diskstats() {
+        local dev="$1"
+        awk -v d="$dev" '$3==d{print $6, $10}' /proc/diskstats 2>/dev/null | head -1
+    }
+
+    # Sample 1
+    declare -A snap1_r snap1_w
+    while IFS= read -r dev; do
+        read -r r w <<< "$(_read_diskstats "$dev")"
+        snap1_r[$dev]="${r:-0}"
+        snap1_w[$dev]="${w:-0}"
+    done <<< "$devs"
+
+    sleep "$interval"
+
+    # Sample 2 + compute delta (sectors → KB, 1 sector = 512 bytes)
+    local out="["
+    local first=true
+    while IFS= read -r dev; do
+        read -r r w <<< "$(_read_diskstats "$dev")"
+        local r2="${r:-0}" w2="${w:-0}"
+        local dr=$(( (r2 - ${snap1_r[$dev]:-0}) / 2 ))   # sectors/s → KB/s
+        local dw=$(( (w2 - ${snap1_w[$dev]:-0}) / 2 ))
+        [ "$dr" -lt 0 ] && dr=0
+        [ "$dw" -lt 0 ] && dw=0
+        $first || out+=","
+        out+="{\"device\":\"/dev/${dev}\",\"read_kbs\":${dr},\"write_kbs\":${dw}}"
+        first=false
+    done <<< "$devs"
+    out+="]"
+    echo "$out"
+}
+
 # ── Disk spin-down ───────────────────────────────────────────────────────────────
 
 cmd_spindown_get() {
@@ -2352,16 +3470,28 @@ case "${1:-help}" in
     sync)         cmd_sync ;;
     scrub)        cmd_scrub ;;
     diff)         cmd_diff ;;
+    turbo-get)    cmd_turbo_get ;;
+    turbo-set)    cmd_turbo_set "${2:-false}" ;;
     add-disk)     cmd_add_disk "${2:-}" "${3:-}" "${4:-}" ;;
     remove-disk)  cmd_remove_disk "${2:-}" ;;
     disks-scan)    cmd_disks_scan ;;
     disks-assign)  cmd_disks_assign "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
     disks-unassign) cmd_disks_unassign "${2:-}" ;;
+    pool-list)        cmd_pool_list ;;
+    pool-add)         cmd_pool_add "${2:-}" ;;
+    pool-remove)      cmd_pool_remove "${2:-}" ;;
+    pool-assign)      cmd_pool_assign "${2:-}" "${3:-}" "${4:-}" ;;
+    pool-unassign)    cmd_pool_unassign "${2:-}" "${3:-}" ;;
+    pool-start)       cmd_pool_start "${2:-}" ;;
+    pool-stop)        cmd_pool_stop "${2:-}" ;;
     shares-list)   cmd_shares_list ;;
-    shares-apply)  cmd_shares_apply ;;
+    shares-apply)    cmd_shares_apply ;;
+    nfs-apply)       cmd_nfs_apply ;;
+    shares-set-nfs)  cmd_shares_set_nfs "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
     shares-add)    cmd_shares_add "${2:-}" ;;
     shares-remove)    cmd_shares_remove "${2:-}" ;;
     shares-set-perms) cmd_shares_set_perms "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
+    shares-set-password) cmd_shares_set_password "${2:-}" "${3:-}" ;;
     shares-import)    cmd_shares_import "${2:-}" ;;
     apps-fetch)        cmd_apps_fetch ;;
     apps-search)       cmd_apps_search "${2:-}" "${3:-50}" ;;
@@ -2378,11 +3508,21 @@ case "${1:-help}" in
     docker-stop)   cmd_docker_stop "${2:-}" ;;
     docker-logs)   cmd_docker_logs "${2:-}" ;;
     docker-delete) cmd_docker_delete "${2:-}" ;;
+    docker-update)           cmd_docker_update "${2:-}" ;;
+    docker-update-all)       cmd_docker_update_all ;;
+    docker-autoupdate-set)   cmd_docker_autoupdate_set "${2:-}" "${3:-}" ;;
+    docker-autoupdate-get)   cmd_docker_autoupdate_get ;;
     smart)               cmd_smart "${2:-}" ;;
     smart-test)          cmd_smart_test "${2:-}" "${3:-}" ;;
     replace-disk)        cmd_replace_disk "${2:-}" "${3:-}" ;;
     replace-disk-bg)     cmd_replace_disk_bg "${2:-}" "${3:-}" ;;
     replace-disk-status) cmd_replace_disk_status "${2:-}" ;;
+    preclear-bg)         cmd_preclear_bg "${2:-}" ;;
+    preclear-status)     cmd_preclear_status "${2:-}" ;;
+    preclear-cancel)     cmd_preclear_cancel "${2:-}" ;;
+    balance-status)      cmd_balance_status ;;
+    balance-bg)          cmd_balance_bg "${2:-10}" ;;
+    balance-cancel)      cmd_balance_cancel ;;
     registry-sync)       cmd_registry_sync ;;
     sysinfo)            cmd_sysinfo ;;
     set-hostname)       cmd_set_hostname "${2:-}" ;;
@@ -2401,10 +3541,23 @@ case "${1:-help}" in
     mover-set-schedule)   cmd_mover_set_schedule "${2:-}" "${3:-}" ;;
     parity-get-schedule)  cmd_parity_get_schedule ;;
     parity-set-schedule)  cmd_parity_set_schedule "${2:-}" "${3:-}" "${4:-}" ;;
+    iostat)               cmd_iostat "${2:-1}" ;;
     spindown-get)         cmd_spindown_get ;;
     spindown-set)         cmd_spindown_set "${2:-}" "${3:-}" ;;
     spindown-apply)       cmd_spindown_apply ;;
     logs-get)             cmd_logs_get "${2:-}" "${3:-}" ;;
+    ups-status)           cmd_ups_status ;;
+    ups-config-get)       cmd_ups_config_get ;;
+    ups-config-set)       cmd_ups_config_set "${2:-}" ;;
+    tailscale-status)     cmd_tailscale_status ;;
+    tailscale-install)    cmd_tailscale_install ;;
+    tailscale-up)         cmd_tailscale_up ;;
+    tailscale-down)       cmd_tailscale_down ;;
+    notify-get)           cmd_notify_get ;;
+    notify-set)           cmd_notify_set "${2:-}" ;;
+    notify-send)          cmd_notify_send "${2:-}" "${3:-}" ;;
+    notify-test)          cmd_notify_test "${2:-}" ;;
+    temp-check)           cmd_temp_check "${2:-55}" ;;
     setup-status)         cmd_setup_status ;;
     setup-complete)       cmd_setup_complete ;;
     install-deps)  cmd_install_deps ;;

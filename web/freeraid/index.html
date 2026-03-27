@@ -229,6 +229,23 @@
             </div>
             <canvas id="net-chart" class="sysstat-canvas" width="220" height="44"></canvas>
           </div>
+          <div class="sysstat-card" id="ups-card" style="display:none">
+            <div class="sysstat-header">
+              <span class="sysstat-label">UPS</span>
+              <span class="sysstat-value" id="ups-status-val">—</span>
+            </div>
+            <div class="ups-stat-row">
+              <span class="ups-stat-label">Battery</span>
+              <div class="ups-bar-bg"><div class="ups-bar-fill" id="ups-batt-bar" style="width:0%"></div></div>
+              <span class="ups-stat-pct" id="ups-batt-pct">—</span>
+            </div>
+            <div class="ups-stat-row">
+              <span class="ups-stat-label">Load</span>
+              <div class="ups-bar-bg"><div class="ups-bar-fill ups-bar-load" id="ups-load-bar" style="width:0%"></div></div>
+              <span class="ups-stat-pct" id="ups-load-pct">—</span>
+            </div>
+            <div style="font-size:11px;color:var(--text-dim);margin-top:6px" id="ups-runtime">—</div>
+          </div>
         </div>
 
         <!-- System Info -->
@@ -294,6 +311,49 @@
             <button class="btn btn-primary btn-sm" style="margin-top:12px" onclick="saveParitySchedule()">Save Schedule</button>
           </section>
 
+          <!-- File Balancer -->
+          <section class="schedule-panel" id="balancer-panel">
+            <h3 class="schedule-title">File Balancer</h3>
+            <div id="balancer-disk-bars" style="margin-bottom:10px"></div>
+            <div class="schedule-row" style="margin-bottom:10px">
+              <div class="schedule-field">
+                <label class="schedule-label">Balance threshold</label>
+                <div style="display:flex;align-items:center;gap:6px">
+                  <input type="number" class="install-input" id="balance-threshold" value="10" min="1" max="50" style="width:60px">
+                  <span style="font-size:12px;color:var(--text-dim)">% max spread</span>
+                </div>
+              </div>
+            </div>
+            <div id="balancer-progress" class="hidden" style="margin-bottom:10px">
+              <div class="preclear-bar-bg" style="margin-bottom:6px">
+                <div class="preclear-bar-fill preclear-bar-active" id="balancer-bar" style="width:0%"></div>
+              </div>
+              <div style="font-size:12px;color:var(--text-dim)" id="balancer-msg">—</div>
+            </div>
+            <div style="display:flex;gap:8px">
+              <button class="btn btn-secondary btn-sm" id="btn-balance-start" onclick="startBalancer()">Balance Now</button>
+              <button class="btn btn-danger btn-sm hidden" id="btn-balance-cancel" onclick="cancelBalancer()">Cancel</button>
+            </div>
+          </section>
+
+          <!-- Turbo Write -->
+          <section class="schedule-panel" id="turbo-panel">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+              <h3 class="schedule-title" style="margin:0">Turbo Write</h3>
+              <label class="toggle-switch">
+                <input type="checkbox" id="turbo-enabled" onchange="setTurboWrite(this.checked)">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px">
+              Skip parity updates during writes for maximum speed.
+              Parity becomes invalid until turbo is disabled (auto-syncs on disable).
+            </div>
+            <div id="turbo-warning" class="hidden" style="font-size:12px;color:var(--yellow);font-weight:600">
+              ⚠ Parity is invalid — disable turbo write to re-sync
+            </div>
+          </section>
+
           <!-- Cache Mover -->
           <section class="schedule-panel" id="mover-panel">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
@@ -335,19 +395,6 @@
       <div id="tab-settings" class="hidden">
 
         <!-- WebUI Accounts -->
-        <div class="settings-section">
-          <h2 class="settings-section-title">WebUI Accounts</h2>
-          <div class="settings-card">
-            <div class="settings-row" style="align-items:center">
-              <div style="flex:1">
-                <div class="settings-label">Cockpit User Accounts</div>
-                <div class="settings-value" style="font-size:13px;margin-top:4px;color:var(--text-dim)">Manage accounts that can log in to this web interface</div>
-              </div>
-              <button class="btn btn-secondary" onclick="openWebUIAccounts()">Manage Accounts ↗</button>
-            </div>
-          </div>
-        </div>
-
         <!-- Updates -->
         <div class="settings-section">
           <h2 class="settings-section-title">Updates</h2>
@@ -403,6 +450,205 @@
           </div>
         </div>
 
+        <!-- Notifications -->
+        <div class="settings-section">
+          <h2 class="settings-section-title">Notifications</h2>
+
+          <!-- Email -->
+          <div class="settings-card" style="margin-bottom:12px">
+            <div class="settings-row" style="align-items:center;margin-bottom:12px">
+              <div style="flex:1">
+                <div class="settings-label">Email Notifications</div>
+                <div class="settings-value" style="font-size:13px;margin-top:4px;color:var(--text-dim)">Send alerts via email using msmtp</div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="notif-email-enabled">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div id="notif-email-fields">
+              <div class="settings-row" style="flex-wrap:wrap;gap:12px;margin-bottom:8px">
+                <div style="flex:1;min-width:200px">
+                  <div class="settings-label" style="margin-bottom:4px">SMTP Host</div>
+                  <input type="text" class="install-input" id="notif-smtp-host" placeholder="smtp.gmail.com" style="width:100%">
+                </div>
+                <div style="width:80px">
+                  <div class="settings-label" style="margin-bottom:4px">Port</div>
+                  <input type="number" class="install-input" id="notif-smtp-port" placeholder="587" style="width:100%">
+                </div>
+                <div style="flex:1;min-width:180px">
+                  <div class="settings-label" style="margin-bottom:4px">From Address</div>
+                  <input type="email" class="install-input" id="notif-smtp-from" placeholder="freeraid@example.com" style="width:100%">
+                </div>
+              </div>
+              <div class="settings-row" style="flex-wrap:wrap;gap:12px;margin-bottom:8px">
+                <div style="flex:1;min-width:180px">
+                  <div class="settings-label" style="margin-bottom:4px">Username</div>
+                  <input type="text" class="install-input" id="notif-smtp-user" placeholder="user@gmail.com" style="width:100%">
+                </div>
+                <div style="flex:1;min-width:180px">
+                  <div class="settings-label" style="margin-bottom:4px">Password</div>
+                  <input type="password" class="install-input" id="notif-smtp-pass" placeholder="••••••••" style="width:100%">
+                </div>
+                <div style="flex:1;min-width:180px">
+                  <div class="settings-label" style="margin-bottom:4px">To Address</div>
+                  <input type="email" class="install-input" id="notif-smtp-to" placeholder="admin@example.com" style="width:100%">
+                </div>
+              </div>
+              <div style="text-align:right">
+                <button class="btn btn-secondary btn-sm" onclick="testNotif('email')">Send Test Email</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Webhook -->
+          <div class="settings-card" style="margin-bottom:12px">
+            <div class="settings-row" style="align-items:center;margin-bottom:12px">
+              <div style="flex:1">
+                <div class="settings-label">Webhook Notifications</div>
+                <div class="settings-value" style="font-size:13px;margin-top:4px;color:var(--text-dim)">POST alerts to Discord, Slack, or a custom URL</div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="notif-webhook-enabled">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div id="notif-webhook-fields">
+              <div class="settings-row" style="align-items:flex-end;gap:12px;margin-bottom:12px">
+                <div style="flex:1">
+                  <div class="settings-label" style="margin-bottom:4px">Webhook URL</div>
+                  <input type="url" class="install-input" id="notif-webhook-url" placeholder="https://discord.com/api/webhooks/..." style="width:100%">
+                </div>
+                <div>
+                  <div class="settings-label" style="margin-bottom:4px">Format</div>
+                  <select class="install-input" id="notif-webhook-format" style="padding:6px 10px">
+                    <option value="discord">Discord</option>
+                    <option value="slack">Slack</option>
+                    <option value="generic">Generic JSON</option>
+                  </select>
+                </div>
+              </div>
+              <div style="text-align:right">
+                <button class="btn btn-secondary btn-sm" onclick="testNotif('webhook')">Send Test Webhook</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Events -->
+          <div class="settings-card">
+            <div class="settings-label" style="margin-bottom:12px">Alert Events</div>
+            <div class="notif-events-grid">
+              <label class="notif-event-row">
+                <input type="checkbox" id="notif-ev-array_degraded">
+                <div>
+                  <div class="notif-event-name">Array Degraded</div>
+                  <div class="notif-event-desc">A drive is missing when the array starts</div>
+                </div>
+              </label>
+              <label class="notif-event-row">
+                <input type="checkbox" id="notif-ev-drive_temp">
+                <div>
+                  <div class="notif-event-name">Drive Temperature</div>
+                  <div class="notif-event-desc">A drive exceeds the temperature threshold</div>
+                </div>
+              </label>
+              <label class="notif-event-row">
+                <input type="checkbox" id="notif-ev-sync_error">
+                <div>
+                  <div class="notif-event-name">Sync Error</div>
+                  <div class="notif-event-desc">SnapRAID sync fails</div>
+                </div>
+              </label>
+              <label class="notif-event-row">
+                <input type="checkbox" id="notif-ev-scrub_error">
+                <div>
+                  <div class="notif-event-name">Scrub Error</div>
+                  <div class="notif-event-desc">SnapRAID scrub fails</div>
+                </div>
+              </label>
+              <label class="notif-event-row">
+                <input type="checkbox" id="notif-ev-update_available">
+                <div>
+                  <div class="notif-event-name">Update Available</div>
+                  <div class="notif-event-desc">A new version of FreeRAID is available</div>
+                </div>
+              </label>
+            </div>
+            <div style="margin-top:16px;display:flex;align-items:center;gap:12px">
+              <div style="flex:1">
+                <div class="settings-label" style="margin-bottom:4px">Temp Threshold (°C)</div>
+                <input type="number" class="install-input" id="notif-temp-threshold" placeholder="55" style="width:100px">
+              </div>
+              <button class="btn btn-primary" onclick="saveNotifSettings()">Save Notifications</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- UPS / NUT -->
+        <div class="settings-section">
+          <h2 class="settings-section-title">UPS / Power Management</h2>
+          <div class="settings-card">
+            <div class="settings-row" style="align-items:center;margin-bottom:14px">
+              <div style="flex:1">
+                <div class="settings-label">UPS Monitoring</div>
+                <div class="settings-value" style="font-size:13px;margin-top:4px;color:var(--text-dim)">Monitor UPS via NUT and auto-shutdown on low battery</div>
+              </div>
+              <label class="toggle-switch">
+                <input type="checkbox" id="ups-enabled">
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+            <div class="settings-row" style="flex-wrap:wrap;gap:12px;margin-bottom:12px">
+              <div style="flex:1;min-width:160px">
+                <div class="settings-label" style="margin-bottom:4px">Mode</div>
+                <select class="install-input" id="ups-mode" style="padding:6px 10px;width:100%" onchange="upsToggleMode()">
+                  <option value="standalone">Standalone (USB)</option>
+                  <option value="netclient">Net Client (remote NUT server)</option>
+                </select>
+              </div>
+              <div style="flex:1;min-width:140px">
+                <div class="settings-label" style="margin-bottom:4px">UPS Name</div>
+                <input type="text" class="install-input" id="ups-name" placeholder="ups" style="width:100%">
+              </div>
+            </div>
+            <div id="ups-standalone-fields">
+              <div class="settings-row" style="flex-wrap:wrap;gap:12px;margin-bottom:12px">
+                <div style="flex:1;min-width:160px">
+                  <div class="settings-label" style="margin-bottom:4px">Driver</div>
+                  <select class="install-input" id="ups-driver" style="padding:6px 10px;width:100%">
+                    <option value="usbhid-ups">usbhid-ups (USB HID)</option>
+                    <option value="blazer_usb">blazer_usb (CyberPower USB)</option>
+                    <option value="nutdrv_qx">nutdrv_qx (Megatec/Q1)</option>
+                    <option value="bcmxcp_usb">bcmxcp_usb (APC)</option>
+                  </select>
+                </div>
+                <div style="flex:1;min-width:120px">
+                  <div class="settings-label" style="margin-bottom:4px">Port</div>
+                  <input type="text" class="install-input" id="ups-port" placeholder="auto" style="width:100%">
+                </div>
+              </div>
+            </div>
+            <div id="ups-netclient-fields" class="hidden">
+              <div class="settings-row" style="gap:12px;margin-bottom:12px">
+                <div style="flex:1">
+                  <div class="settings-label" style="margin-bottom:4px">NUT Server Host</div>
+                  <input type="text" class="install-input" id="ups-host" placeholder="192.168.1.x" style="width:100%">
+                </div>
+              </div>
+            </div>
+            <div class="settings-row" style="align-items:center;gap:12px;margin-bottom:16px">
+              <div class="settings-label" style="margin-bottom:0">Shutdown when battery below</div>
+              <input type="number" class="install-input" id="ups-shutdown-pct" value="20" min="5" max="80" style="width:70px">
+              <span style="font-size:13px;color:var(--text-dim)">%</span>
+            </div>
+            <div style="display:flex;gap:8px;align-items:center">
+              <button class="btn btn-primary" onclick="saveUpsConfig()">Save UPS Settings</button>
+              <button class="btn btn-secondary btn-sm" onclick="refreshUpsStatus()">Test Connection</button>
+              <span id="ups-test-result" style="font-size:12px;margin-left:4px"></span>
+            </div>
+          </div>
+        </div>
+
       </div><!-- end settings -->
 
       <!-- ── NETWORK TAB ── -->
@@ -431,6 +677,58 @@
           <h2 class="settings-section-title">Interfaces</h2>
           <div id="network-iface-list">
             <div class="loading-msg">Loading...</div>
+          </div>
+        </div>
+
+        <!-- Tailscale -->
+        <div class="settings-section">
+          <h2 class="settings-section-title">Tailscale VPN</h2>
+          <div class="settings-card">
+
+            <!-- Not installed -->
+            <div id="ts-not-installed" class="hidden">
+              <div class="settings-label" style="margin-bottom:8px">Tailscale is not installed</div>
+              <div style="font-size:13px;color:var(--text-dim);margin-bottom:12px">
+                Install Tailscale to securely access this NAS from anywhere without port forwarding.
+              </div>
+              <button class="btn btn-primary" onclick="installTailscale()">Install Tailscale</button>
+            </div>
+
+            <!-- Installed: status -->
+            <div id="ts-installed" class="hidden">
+              <div class="settings-row" style="align-items:center;margin-bottom:14px">
+                <div style="flex:1">
+                  <div class="settings-label">Status</div>
+                  <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+                    <span class="drive-status-dot" id="ts-dot" style="flex-shrink:0"></span>
+                    <span class="sysinfo-value" id="ts-state">—</span>
+                  </div>
+                </div>
+                <div style="flex:1">
+                  <div class="settings-label">Tailscale IP</div>
+                  <div class="sysinfo-value" id="ts-ip" style="margin-top:4px;font-family:monospace">—</div>
+                </div>
+                <div style="flex:1">
+                  <div class="settings-label">Hostname</div>
+                  <div class="sysinfo-value" id="ts-hostname" style="margin-top:4px">—</div>
+                </div>
+              </div>
+
+              <!-- Auth URL (shown when needs_auth) -->
+              <div id="ts-auth-wrap" class="hidden" style="margin-bottom:14px;padding:12px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius)">
+                <div class="settings-label" style="margin-bottom:6px;color:var(--yellow)">Authentication required</div>
+                <div style="font-size:13px;color:var(--text-dim);margin-bottom:8px">Open this URL to authenticate this device with your Tailscale account:</div>
+                <a id="ts-auth-url" href="#" target="_blank" style="font-size:12px;color:var(--accent);word-break:break-all">—</a>
+              </div>
+
+              <div style="display:flex;gap:8px">
+                <button class="btn btn-primary btn-sm" id="ts-btn-up" onclick="tailscaleUp()">Connect</button>
+                <button class="btn btn-ghost btn-sm" id="ts-btn-down" onclick="tailscaleDown()">Disconnect</button>
+                <button class="btn btn-ghost btn-sm" onclick="refreshTailscale()">Refresh</button>
+              </div>
+            </div>
+
+            <div id="ts-loading" style="color:var(--text-dim);font-size:13px">Checking Tailscale...</div>
           </div>
         </div>
 
@@ -509,6 +807,29 @@
           </div>
         </div>
 
+        <!-- Extra Pools -->
+        <div class="settings-section">
+          <h2 class="settings-section-title">
+            Extra Storage Pools
+            <span style="font-size:11px;font-weight:400;color:var(--text-dim);text-transform:none;letter-spacing:0;margin-left:8px">— independent MergerFS pools (no parity)</span>
+            <button class="btn btn-sm btn-primary" style="margin-left:auto" onclick="toggleAddPool()">+ Add Pool</button>
+          </h2>
+          <!-- Add pool form -->
+          <div id="add-pool-form" class="settings-card hidden" style="margin-bottom:12px">
+            <div style="display:flex;gap:10px;align-items:flex-end">
+              <div style="flex:1">
+                <div class="settings-label">Pool Name</div>
+                <input id="new-pool-name" class="text-input" placeholder="e.g. media or fast-nvme" />
+              </div>
+              <button class="btn btn-primary" onclick="doAddPool()">Create</button>
+              <button class="btn btn-ghost" onclick="toggleAddPool()">Cancel</button>
+            </div>
+          </div>
+          <div id="pools-list">
+            <div class="loading-msg">Loading pools...</div>
+          </div>
+        </div>
+
         <!-- Spin-down -->
         <div class="settings-section">
           <h2 class="settings-section-title">
@@ -525,12 +846,12 @@
           <div class="modal" onclick="event.stopPropagation()">
             <div class="modal-title">Assign Disk</div>
             <div id="assign-modal-device" style="font-family:monospace;color:var(--text-dim);margin-bottom:16px"></div>
-            <div style="display:flex;flex-direction:column;gap:10px">
+            <div style="display:flex;flex-direction:column;gap:10px" id="assign-role-list">
               <button class="assign-role-btn" onclick="doAssign('array')">
                 <span class="assign-role-icon">💾</span>
                 <div>
                   <div class="assign-role-name">Array Disk</div>
-                  <div class="assign-role-desc">Data storage — pooled via MergerFS</div>
+                  <div class="assign-role-desc">Data storage — pooled via MergerFS, parity protected</div>
                 </div>
               </button>
               <button class="assign-role-btn" onclick="doAssign('parity')">
@@ -547,6 +868,7 @@
                   <div class="assign-role-desc">SSD fast lane — data moves to array on sync</div>
                 </div>
               </button>
+              <!-- Extra pool options injected by JS -->
             </div>
             <button class="btn btn-ghost" style="margin-top:16px;width:100%" onclick="closeAssignModal()">Cancel</button>
           </div>
@@ -618,6 +940,12 @@
                   <option value="public">Public (no password)</option>
                   <option value="secure">Secure (users only)</option>
                   <option value="private">Private (read/write lists)</option>
+                </select>
+              </div>
+              <div>
+                <div class="settings-label">Storage Pool</div>
+                <select id="new-share-pool" class="text-input">
+                  <option value="array">Main Array (parity protected)</option>
                 </select>
               </div>
               <div>
