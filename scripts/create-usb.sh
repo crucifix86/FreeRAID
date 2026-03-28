@@ -129,15 +129,28 @@ step "3/5" "Installing bootloaders"
 if $HAVE_GRUB; then
     mkdir -p "$MNT/EFI/BOOT"
 
-    # Build standalone GRUB EFI image with needed modules embedded
+    # Embed a minimal config that searches for the FREERAID label at boot.
+    # This means GRUB finds the USB regardless of which disk slot it's in.
+    local GRUB_EMBED
+    GRUB_EMBED=$(mktemp /tmp/grub-embed-XXXXXX.cfg)
+    cat > "$GRUB_EMBED" <<'EMBEDEOF'
+search --no-floppy --label --set=root FREERAID
+set prefix=($root)/EFI/BOOT
+configfile ($root)/EFI/BOOT/grub.cfg
+EMBEDEOF
+
+    # Build standalone GRUB EFI image with all needed modules embedded.
+    # --prefix is overridden by the embedded config's set prefix= line.
     grub-mkimage \
         --format=x86_64-efi \
         --output="$MNT/EFI/BOOT/BOOTX64.EFI" \
-        --prefix='(hd0,msdos1)/EFI/BOOT' \
+        --config="$GRUB_EMBED" \
+        --prefix='/EFI/BOOT' \
         boot linux normal configfile \
         part_msdos part_gpt fat \
         echo ls cat search search_label \
         2>/dev/null || warn "grub-mkimage failed — EFI boot may not work"
+    rm -f "$GRUB_EMBED"
 
     cat > "$MNT/EFI/BOOT/grub.cfg" <<GRUBEOF
 set default=0
