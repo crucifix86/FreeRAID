@@ -452,7 +452,7 @@ cp "$BUSYBOX_BIN" "$INITRD_DIR/bin/busybox"
 chmod +x "$INITRD_DIR/bin/busybox"
 
 for cmd in sh ash mount umount mkdir mknod modprobe insmod sleep \
-           blkid switch_root echo cat ls grep awk sed find; do
+           blkid switch_root echo cat ls grep awk sed find mdev; do
     ln -sf busybox "$INITRD_DIR/bin/$cmd" 2>/dev/null || true
 done
 ln -sf ../bin/sh "$INITRD_DIR/sbin/init" 2>/dev/null || true
@@ -486,12 +486,19 @@ echo ""
 echo "  FreeRAID — starting..."
 echo ""
 
-modprobe squashfs  2>/dev/null || true
-modprobe overlay   2>/dev/null || true
-modprobe vfat      2>/dev/null || true
+# Populate /dev with all devices the kernel already knows about
+echo /bin/mdev > /proc/sys/kernel/hotplug 2>/dev/null || true
+mdev -s 2>/dev/null || true
+
+modprobe squashfs    2>/dev/null || true
+modprobe overlay     2>/dev/null || true
+modprobe vfat        2>/dev/null || true
 modprobe usb_storage 2>/dev/null || true
-modprobe uas       2>/dev/null || true
-modprobe mmc_block 2>/dev/null || true
+modprobe uas         2>/dev/null || true
+modprobe mmc_block   2>/dev/null || true
+
+# Re-scan after loading storage modules (USB/MMC devices may now be visible)
+mdev -s 2>/dev/null || true
 
 # Find FREERAID USB by label (up to 30s)
 USB_PART=""
