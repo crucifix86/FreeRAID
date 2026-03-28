@@ -54,18 +54,36 @@ echo ""
 # ── Step 1: Packages ──────────────────────────────────────────────────────────
 step "1/7" "Installing packages"
 
+# Detect architecture for arch-specific downloads
+ARCH="$(dpkg --print-architecture)"   # amd64, arm64, armhf, etc.
+
 apt-get update -qq
+
+# Add backports repo (needed for zfsutils-linux on Bookworm)
+if ! grep -r 'bookworm-backports' /etc/apt/sources.list /etc/apt/sources.list.d/ &>/dev/null; then
+    info "Adding Debian Bookworm backports..."
+    echo "deb http://deb.debian.org/debian bookworm-backports main contrib non-free" \
+        > /etc/apt/sources.list.d/backports.list
+    apt-get update -qq
+fi
 
 # mergerfs — download latest deb directly (not in Debian repos)
 if ! command -v mergerfs &>/dev/null; then
     info "Installing mergerfs..."
     MERGERFS_VER="2.40.2"
-    MERGERFS_DEB="mergerfs_${MERGERFS_VER}.debian-bookworm_amd64.deb"
+    # Map dpkg arch to mergerfs release naming
+    case "$ARCH" in
+        amd64)  MERGERFS_ARCH="amd64" ;;
+        arm64)  MERGERFS_ARCH="arm64" ;;
+        armhf)  MERGERFS_ARCH="armhf" ;;
+        *)      MERGERFS_ARCH="$ARCH" ;;
+    esac
+    MERGERFS_DEB="mergerfs_${MERGERFS_VER}.debian-bookworm_${MERGERFS_ARCH}.deb"
     MERGERFS_URL="https://github.com/trapexit/mergerfs/releases/download/${MERGERFS_VER}/${MERGERFS_DEB}"
-    apt-get install -y fuse -qq
-    wget -q --show-progress "$MERGERFS_URL" -O /tmp/mergerfs.deb
-    dpkg -i /tmp/mergerfs.deb
-    rm /tmp/mergerfs.deb
+    apt-get install -y fuse3 -qq
+    wget -q --show-progress "$MERGERFS_URL" -O /tmp/mergerfs.deb \
+        || { warn "mergerfs download failed — trying generic fuse-based fallback"; true; }
+    [ -f /tmp/mergerfs.deb ] && dpkg -i /tmp/mergerfs.deb && rm /tmp/mergerfs.deb
     info "mergerfs installed."
 fi
 
@@ -75,6 +93,7 @@ PACKAGES=(
     xfsprogs
     btrfs-progs
     e2fsprogs
+    fuse3
     # Sharing
     samba
     wsdd
@@ -94,6 +113,12 @@ PACKAGES=(
     # UPS
     nut
     nut-client
+    # Encryption
+    gocryptfs
+    # Virtualization
+    qemu-kvm
+    libvirt-daemon-system
+    virtinst
     # Utilities
     jq
     python3
@@ -103,6 +128,13 @@ PACKAGES=(
 )
 
 apt-get install -y "${PACKAGES[@]}" 2>&1 | grep -E '(Setting up|already|Error|WARNING)' || true
+
+# ZFS — from backports (kernel module may need a reboot to activate)
+if ! command -v zpool &>/dev/null; then
+    info "Installing ZFS from backports..."
+    apt-get install -y -t bookworm-backports zfsutils-linux 2>&1 \
+        | grep -E '(Setting up|already|Error|WARNING)' || true
+fi
 
 info "Packages installed."
 
@@ -135,8 +167,12 @@ step "3/7" "Setting up config and directories"
 mkdir -p "$CONFIG_DIR"
 mkdir -p "$LOG_DIR"
 mkdir -p /etc/freeraid/compose
+mkdir -p /etc/freeraid/plugins
 mkdir -p /var/run/freeraid
+mkdir -p /var/lib/freeraid/vms
 mkdir -p /mnt/user
+mkdir -p /mnt/user/isos
+mkdir -p /mnt/zfs
 
 # Default config — only write if not already present (preserve existing config on reinstall)
 if [ ! -f "$CONFIG_DIR/freeraid.conf.json" ]; then
@@ -277,6 +313,11 @@ systemctl enable freeraid-scrub.timer
 systemctl enable freeraid-mover.timer
 systemctl enable freeraid-docker-update.timer
 
+# Enable libvirt for VM manager (start it now too if available)
+if systemctl list-unit-files libvirtd.service &>/dev/null 2>&1 | grep -q libvirtd; then
+    systemctl enable --now libvirtd 2>/dev/null || true
+fi
+
 info "Systemd services installed and enabled."
 
 # ── Step 5: Web UI (Cockpit plugin + branding) ────────────────────────────────
@@ -338,9 +379,9 @@ $UNRAID_FOUND || info "No Unraid USB detected. Starting fresh."
 
 # ── Done ──────────────────────────────────────────────────────────────────────
 echo ""
-echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}${BOLD}║   FreeRAID v${FREERAID_VERSION} installed successfully!           ║${NC}"
-echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════════════╝${NC}"
+echo -e "${GREEN}${BOLD}╔════════════════════════════════════════════════════════╗${NC}"
+echo -e "${GREEN}${BOLD}║   FreeRAID v${FREERAID_VERSION} installed successfully!             ║${NC}"
+echo -e "${GREEN}${BOLD}╚════════════════════════════════════════════════════════╝${NC}"
 echo ""
 echo "  Web UI:   https://${LOCAL_IP}:9090"
 echo "  Login:    root / (your root password)"
@@ -351,3 +392,7 @@ echo "    • Assigning drives to array, parity, cache"
 echo "    • Optional Unraid config import"
 echo "    • Starting the array"
 echo ""
+# Warn if ZFS kernel module not yet loaded (common on first install)
+if ! lsmod | grep -q zfs 2>/dev/null; then
+    warn "ZFS kernel module not loaded — a reboot may be required before creating ZFS pools."
+fi
