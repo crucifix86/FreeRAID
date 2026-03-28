@@ -1883,10 +1883,10 @@ cfg_map = {c['target']: c['value'] for c in plain_cfg}
 resolved = []
 for c in app.get('config', []):
     val = cfg_map.get(c['target'], c.get('default', ''))
-    # Remap Unraid default appdata paths to FreeRAID paths
+    # Keep Unraid appdata paths as-is — /mnt/user is the mergerfs pool
     if c.get('type','').lower() == 'path' and isinstance(val, str):
-        val = val.replace('/mnt/user/appdata/', '/mnt/freeraid/appdata/')
-        val = val.replace('/mnt/user/', '/mnt/freeraid/')
+        val = val.replace('/mnt/freeraid/appdata/', '/mnt/user/appdata/')
+        val = val.replace('/mnt/freeraid/', '/mnt/user/')
     resolved.append({**c, 'value': val})
 
 # Build compose
