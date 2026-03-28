@@ -482,32 +482,41 @@ mount -t proc     proc     /proc
 mount -t sysfs    sysfs    /sys
 mount -t tmpfs    tmpfs    /run
 
-echo ""
-echo "  FreeRAID — starting..."
-echo ""
+# Boot log — written to /run/boot.log, copied to USB once found
+LOG=/run/boot.log
+log() { echo "$*"; echo "$*" >> $LOG; }
 
-# Populate /dev with devices the kernel already knows about
+log ""
+log "  FreeRAID — starting..."
+log ""
+
 mdev -s 2>/dev/null || true
 
-modprobe squashfs    2>/dev/null || true
-modprobe overlay     2>/dev/null || true
-modprobe vfat        2>/dev/null || true
-modprobe usb_storage 2>/dev/null || true
-modprobe uas         2>/dev/null || true
-modprobe mmc_block   2>/dev/null || true
+# USB controller drivers (xhci=USB3, ehci=USB2) — must load before usb_storage
+for mod in xhci_hcd xhci_pci ehci_hcd ehci_pci ohci_hcd \
+           squashfs overlay vfat usb_storage uas mmc_block; do
+    modprobe $mod 2>/dev/null || true
+done
 
-# Re-scan after loading storage modules
+# Give USB controller time to enumerate devices
+sleep 2
 mdev -s 2>/dev/null || true
 
-# Find the FreeRAID partition (up to 30s)
-# Mount each FAT32 partition and look for rootfs.squashfs — no blkid needed
+log "  /dev block devices:"
+ls /dev/sd* /dev/mmcblk* /dev/nvme* 2>/dev/null | while read d; do
+    log "    $d"
+done
+
+# Find the FreeRAID partition — mount each FAT32 partition, look for rootfs.squashfs
 USB_PART=""
-for i in $(seq 1 30); do
+for i in $(seq 1 20); do
     mdev -s 2>/dev/null || true
     for dev in /dev/sd?[0-9] /dev/sd?[0-9][0-9] /dev/mmcblk[0-9]p[0-9] /dev/vd?[0-9]; do
         [ -b "$dev" ] || continue
-        if mount -t vfat -o ro "$dev" /mnt/usb 2>/dev/null; then
+        log "  Trying $dev..."
+        if mount -t vfat -o ro "$dev" /mnt/usb 2>>$LOG; then
             if [ -f /mnt/usb/rootfs.squashfs ]; then
+                log "  Found FreeRAID on $dev"
                 umount /mnt/usb
                 USB_PART="$dev"
                 break
@@ -516,25 +525,34 @@ for i in $(seq 1 30); do
         fi
     done
     [ -n "$USB_PART" ] && break
-    echo "  Waiting for FreeRAID drive... ($i)"
+    log "  Waiting for FreeRAID drive... ($i)"
     sleep 1
 done
 
 if [ -z "$USB_PART" ]; then
+    log ""
+    log "  ERROR: FreeRAID drive not found!"
+    log "  Devices in /dev:"
+    ls /dev/ >> $LOG 2>&1
+    log "  /proc/partitions:"
+    cat /proc/partitions >> $LOG 2>&1
     echo ""
-    echo "  ERROR: FREERAID drive not found!"
-    echo "  Make sure the FreeRAID USB is plugged in and labeled FREERAID."
+    echo "  Boot log saved to /run/boot.log"
+    echo "  (Connect a keyboard and check the output above)"
     echo ""
     exec /bin/sh
 fi
 
-echo "  Found: $USB_PART"
+log "  Found: $USB_PART"
 
 # Mount USB read-write (config/ must be writable)
 mount -t vfat -o rw,noatime "$USB_PART" /mnt/usb || {
-    echo "  ERROR: Failed to mount $USB_PART"
+    log "  ERROR: Failed to mount $USB_PART rw"
     exec /bin/sh
 }
+
+# Save boot log to USB so it survives the boot
+cp $LOG /mnt/usb/boot.log 2>/dev/null || true
 
 # Mount squashfs OS image
 mount -t squashfs -o ro,loop /mnt/usb/rootfs.squashfs /mnt/squash || {
