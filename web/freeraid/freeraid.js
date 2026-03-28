@@ -2842,7 +2842,10 @@ function dockerOpenWebUI(name) {
   if (!c || !c.webui) return;
   // Replace [IP] with the host's IP (ports are forwarded from the host, not the internal Docker bridge IP)
   const ip = window.location.hostname;
-  let url = c.webui.replace('[IP]', ip).replace(/\[PORT:(\d+)\]/g, '$1');
+  let url = c.webui.replace('[IP]', ip).replace(/\[PORT:(\d+)\]/g, (_, containerPort) => {
+    const mapping = c.ports && c.ports.find(p => String(p.container).split('/')[0] === containerPort);
+    return mapping ? mapping.host : containerPort;
+  });
   if (!url.startsWith('http')) url = 'http://' + url;
   window.open(url, '_blank');
 }
