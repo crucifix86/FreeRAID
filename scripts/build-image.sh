@@ -153,8 +153,6 @@ apt-get install -y -qq docker-compose-plugin 2>/dev/null || true
 # Cockpit
 apt-get install -y -qq cockpit 2>/dev/null || true
 
-# Virtualization
-apt-get install -y -qq qemu-kvm libvirt-daemon-system virtinst 2>/dev/null || true
 
 # systemd-resolved for DNS
 apt-get install -y -qq systemd-resolved 2>/dev/null || true
@@ -284,7 +282,9 @@ echo "127.0.1.1  freeraid" >> /etc/hosts
 echo "root:freeraid" | chpasswd
 
 # Samba user for root (same default password)
-printf 'freeraid\nfreeraid\n' | smbpasswd -a -s root 2>/dev/null || true
+# pdbedit works without a running daemon; smbpasswd -a needs the DB initialized first
+pdbedit -a -u root -t <<< $'freeraid\nfreeraid' 2>/dev/null || \
+    (printf 'freeraid\nfreeraid\n' | smbpasswd -a -s root 2>/dev/null) || true
 smbpasswd -e root 2>/dev/null || true
 
 # SSH — allow root password login
@@ -357,7 +357,6 @@ cat > /etc/docker/daemon.json <<'DOCKEREOF'
 }
 DOCKEREOF
 systemctl enable avahi-daemon     2>/dev/null || true
-systemctl enable libvirtd         2>/dev/null || true
 
 # FreeRAID array service
 cat > /etc/systemd/system/freeraid-array.service <<'SVC'
