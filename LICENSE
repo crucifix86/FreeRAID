@@ -1,0 +1,27 @@
+FreeRAID Noncommercial License
+Copyright (c) 2026 FreeRAID Contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to use,
+copy, modify, merge, and distribute the Software for personal, educational, or
+non-commercial purposes, subject to the following conditions:
+
+1. NON-COMMERCIAL USE ONLY. You may not use the Software, in whole or in part,
+   for any commercial purpose. A "commercial purpose" means any use intended
+   for or directed toward commercial advantage or monetary compensation,
+   including but not limited to: selling the Software or devices preloaded with
+   it, offering paid hosting or managed services based on the Software, or
+   incorporating the Software into a commercial product.
+
+2. ATTRIBUTION. Any distribution or public use of the Software or derivative
+   works must retain this license, the above copyright notice, and a clear
+   reference to the original project at https://github.com/crucifix86/FreeRAID.
+
+3. SHARE-ALIKE. Any modified version of the Software that is distributed must
+   be released under this same license.
+
+4. NO WARRANTY. The Software is provided "as is", without warranty of any kind,
+   express or implied. In no event shall the authors be liable for any claim,
+   damages, or other liability arising from use of the Software.
+
+For commercial licensing inquiries, contact the project maintainers via GitHub.
