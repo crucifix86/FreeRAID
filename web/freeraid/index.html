@@ -830,6 +830,47 @@
           </div>
         </div>
 
+        <!-- ZFS Pools -->
+        <div class="settings-section">
+          <h2 class="settings-section-title">
+            ZFS Pools
+            <span style="font-size:11px;font-weight:400;color:var(--text-dim);text-transform:none;letter-spacing:0;margin-left:8px">— ZFS storage with built-in checksums, snapshots, and compression</span>
+            <button class="btn btn-sm btn-primary" style="margin-left:auto" onclick="toggleAddZfsPool()">+ Create Pool</button>
+          </h2>
+
+          <!-- Create ZFS pool form -->
+          <div id="add-zfs-pool-form" class="hidden" style="background:var(--bg3);border-radius:var(--radius);padding:16px;margin-bottom:14px">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+              <div>
+                <label class="field-label">Pool Name</label>
+                <input type="text" id="zfs-pool-name" class="text-input" placeholder="e.g. tank">
+              </div>
+              <div>
+                <label class="field-label">VDEV Type</label>
+                <select id="zfs-pool-type" class="select-input">
+                  <option value="stripe">Stripe (no redundancy)</option>
+                  <option value="mirror">Mirror (RAID-1)</option>
+                  <option value="raidz">RAIDZ-1 (RAID-5 equiv)</option>
+                  <option value="raidz2">RAIDZ-2 (RAID-6 equiv)</option>
+                </select>
+              </div>
+            </div>
+            <label class="field-label">Devices <span style="color:var(--text-dim);font-weight:400">(select one or more unassigned drives)</span></label>
+            <div id="zfs-dev-list" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;min-height:36px;padding:8px;background:var(--bg2);border-radius:6px;border:1px solid var(--border)">
+              <span style="color:var(--text-dim);font-size:12px">Loading available disks...</span>
+            </div>
+            <div style="display:flex;gap:8px">
+              <button class="btn btn-primary btn-sm" onclick="doCreateZfsPool()">Create</button>
+              <button class="btn btn-ghost btn-sm" onclick="toggleAddZfsPool()">Cancel</button>
+            </div>
+            <div id="zfs-create-msg" style="margin-top:8px;font-size:0.85em"></div>
+          </div>
+
+          <div id="zfs-pools-list">
+            <div class="loading-msg">Loading ZFS pools...</div>
+          </div>
+        </div>
+
         <!-- Spin-down -->
         <div class="settings-section">
           <h2 class="settings-section-title">

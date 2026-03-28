@@ -1417,3 +1417,52 @@ body {
   gap: 8px;
 }
 .badge-enc { background: #1a1040; color: #a78bfa; }
+
+/* ── ZFS Pool Manager ── */
+.zfs-pool-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 10px;
+}
+.zfs-pool-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.zfs-pool-name {
+  font-weight: 600;
+  font-size: 15px;
+  font-family: monospace;
+}
+.zfs-pool-meta {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.zfs-health-online   { background: #0d2b1a; color: var(--green); font-size: 11px; padding: 2px 6px; border-radius: 4px; }
+.zfs-health-degraded { background: #2a1e00; color: var(--yellow); font-size: 11px; padding: 2px 6px; border-radius: 4px; }
+.zfs-health-faulted  { background: #2a0d0d; color: var(--red); font-size: 11px; padding: 2px 6px; border-radius: 4px; }
+.zfs-datasets {
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+}
+.zfs-dataset-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+.zfs-ds-name {
+  font-family: monospace;
+  font-size: 13px;
+  min-width: 100px;
+}
+.zfs-ds-meta {
+  color: var(--text-dim);
+}

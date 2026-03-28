@@ -217,7 +217,7 @@ function switchTab(name) {
     document.getElementById('tab-'+t).classList.toggle('hidden', name !== t);
   });
   if (name === 'shares')  refreshShares();
-  if (name === 'disks')   { refreshDisks(); refreshPools(); }
+  if (name === 'disks')   { refreshDisks(); refreshPools(); refreshZfsPools(); }
   if (name === 'docker')  { refreshDocker(); refreshNetworks(); }
   if (name === 'network') { refreshNetworkTab(); refreshTailscale(); }
   if (name === 'users')   refreshUsers();
@@ -3842,4 +3842,263 @@ function _setPluginBusy(name, busy) {
     if (!card) return;
     card.querySelectorAll('button').forEach(b => { b.disabled = busy; });
   });
+}
+
+// ── ZFS Pool Manager ──────────────────────────────────────────────────────────
+
+let _zfsPools = [];
+let _zfsAddOpen = false;
+
+function refreshZfsPools() {
+  const el = document.getElementById('zfs-pools-list');
+  if (!el) return;
+  let buf = '';
+  cockpit.spawn(['freeraid', 'zfs-pool-list'], { superuser: 'require', err: 'out' })
+    .stream(d => { buf += d; })
+    .then(() => {
+      try { _zfsPools = JSON.parse(buf.trim()); } catch(_) { _zfsPools = []; }
+      renderZfsPools();
+    })
+    .catch(() => {
+      el.innerHTML = '<div class="loading-msg">ZFS not available or not installed.</div>';
+    });
+}
+
+function renderZfsPools() {
+  const el = document.getElementById('zfs-pools-list');
+  if (!el) return;
+  if (!_zfsPools.length) {
+    el.innerHTML = '<div class="loading-msg">No ZFS pools. Create one above.</div>';
+    return;
+  }
+  el.innerHTML = _zfsPools.map(p => {
+    const healthClass = p.health === 'ONLINE' ? 'zfs-health-online'
+                      : p.health === 'DEGRADED' ? 'zfs-health-degraded' : 'zfs-health-faulted';
+    const datasets = (p.datasets || []).filter(d => d.name !== p.name);
+    return `<div class="zfs-pool-card" id="zfs-pool-card-${p.name}">
+      <div class="zfs-pool-header">
+        <span class="zfs-pool-name">${p.name}</span>
+        <span class="badge ${healthClass}">${p.health}</span>
+        <span class="zfs-pool-meta">${p.size} total &bull; ${p.alloc} used &bull; ${p.free} free</span>
+        <div style="margin-left:auto;display:flex;gap:6px">
+          <button class="btn btn-xs btn-ghost" onclick="zfsPoolScrub('${p.name}')">Scrub</button>
+          <button class="btn btn-xs btn-ghost" onclick="zfsPoolStatus('${p.name}')">Status</button>
+          <button class="btn btn-xs btn-ghost" onclick="toggleZfsDatasetAdd('${p.name}')">+ Dataset</button>
+          <button class="btn btn-xs btn-danger" onclick="zfsPoolDestroy('${p.name}')">Destroy</button>
+        </div>
+      </div>
+      <div id="zfs-dataset-add-${p.name}" class="hidden" style="padding:8px 0 4px;display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+        <div>
+          <label class="field-label" style="font-size:11px">Dataset Name</label>
+          <input type="text" id="zfs-ds-name-${p.name}" class="text-input" style="width:160px" placeholder="e.g. media">
+        </div>
+        <div>
+          <label class="field-label" style="font-size:11px">Quota (optional)</label>
+          <input type="text" id="zfs-ds-quota-${p.name}" class="text-input" style="width:100px" placeholder="e.g. 500G">
+        </div>
+        <button class="btn btn-primary btn-xs" onclick="doCreateZfsDataset('${p.name}')">Create</button>
+        <button class="btn btn-ghost btn-xs" onclick="toggleZfsDatasetAdd('${p.name}')">Cancel</button>
+        <div id="zfs-ds-msg-${p.name}" style="font-size:0.85em;align-self:center"></div>
+      </div>
+      ${datasets.length ? `<div class="zfs-datasets">
+        ${datasets.map(d => {
+          const dsShort = d.name.replace(p.name + '/', '');
+          return `<div class="zfs-dataset-row">
+            <span class="zfs-ds-name">${dsShort}</span>
+            <span class="zfs-ds-meta">${d.used} used &bull; ${d.avail} free</span>
+            <span class="zfs-ds-meta" style="color:var(--accent)">comp: ${d.compression}</span>
+            ${d.quota !== 'none' ? `<span class="zfs-ds-meta">quota: ${d.quota}</span>` : ''}
+            <div style="margin-left:auto;display:flex;gap:4px">
+              <button class="btn btn-xs btn-ghost" onclick="toggleZfsSnapshots('${p.name}', '${d.name}')">Snapshots</button>
+              <button class="btn btn-xs btn-danger" onclick="zfsDatasetDestroy('${d.name}')">Delete</button>
+            </div>
+          </div>
+          <div class="hidden" id="zfs-snaps-${d.name.replace(/\//g,'-')}">
+            <div class="loading-msg" style="padding:6px 12px">Loading snapshots...</div>
+          </div>`;
+        }).join('')}
+      </div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+function toggleAddZfsPool() {
+  const form = document.getElementById('add-zfs-pool-form');
+  _zfsAddOpen = !_zfsAddOpen;
+  form.classList.toggle('hidden', !_zfsAddOpen);
+  if (_zfsAddOpen) _populateZfsDevList();
+}
+
+function _populateZfsDevList() {
+  const el = document.getElementById('zfs-dev-list');
+  if (!el) return;
+  el.innerHTML = '<span style="color:var(--text-dim);font-size:12px">Scanning...</span>';
+  let buf = '';
+  cockpit.spawn(['freeraid', 'disks-scan'], { superuser: 'require', err: 'ignore' })
+    .stream(d => { buf += d; })
+    .then(() => {
+      let disks = [];
+      try { disks = JSON.parse(buf.trim()); } catch(_) {}
+      const free = disks.filter(d => !d.role || d.role === 'unassigned');
+      if (!free.length) {
+        el.innerHTML = '<span style="color:var(--text-dim);font-size:12px">No unassigned drives available.</span>';
+        return;
+      }
+      el.innerHTML = free.map(d =>
+        `<label style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:4px 8px;background:var(--bg);border-radius:4px;border:1px solid var(--border)">
+          <input type="checkbox" class="zfs-dev-check" value="${d.device}">
+          <span style="font-family:monospace;font-size:12px">${d.device}</span>
+          <span style="color:var(--text-dim);font-size:11px">${d.size || ''}</span>
+        </label>`
+      ).join('');
+    })
+    .catch(() => { el.innerHTML = '<span style="color:var(--red)">Failed to scan disks.</span>'; });
+}
+
+function doCreateZfsPool() {
+  const name = document.getElementById('zfs-pool-name').value.trim();
+  const type = document.getElementById('zfs-pool-type').value;
+  const msg  = document.getElementById('zfs-create-msg');
+  const checked = [...document.querySelectorAll('.zfs-dev-check:checked')].map(c => c.value);
+
+  if (!name)           { msg.style.color = 'var(--red)'; msg.textContent = 'Pool name required.'; return; }
+  if (!checked.length) { msg.style.color = 'var(--red)'; msg.textContent = 'Select at least one device.'; return; }
+  if (type === 'mirror' && checked.length < 2) { msg.style.color = 'var(--red)'; msg.textContent = 'Mirror requires at least 2 devices.'; return; }
+  if (type === 'raidz'  && checked.length < 3) { msg.style.color = 'var(--red)'; msg.textContent = 'RAIDZ-1 requires at least 3 devices.'; return; }
+  if (type === 'raidz2' && checked.length < 4) { msg.style.color = 'var(--red)'; msg.textContent = 'RAIDZ-2 requires at least 4 devices.'; return; }
+
+  msg.style.color = 'var(--text-dim)'; msg.textContent = 'Creating pool...';
+  const args = ['freeraid', 'zfs-pool-create', name, type, ...checked];
+  cockpit.spawn(args, { superuser: 'require', err: 'out' })
+    .then(out => {
+      msg.style.color = 'var(--green)'; msg.textContent = 'Pool created.';
+      document.getElementById('zfs-pool-name').value = '';
+      setTimeout(() => { toggleAddZfsPool(); refreshZfsPools(); }, 1200);
+    })
+    .catch(err => { msg.style.color = 'var(--red)'; msg.textContent = String(err); });
+}
+
+function zfsPoolDestroy(name) {
+  if (!confirm('Destroy ZFS pool "' + name + '"? All data will be lost.')) return;
+  cockpit.spawn(['freeraid', 'zfs-pool-destroy', name], { superuser: 'require', err: 'out' })
+    .then(() => { log('info', 'ZFS pool ' + name + ' destroyed.'); refreshZfsPools(); })
+    .catch(err => log('error', 'Destroy failed: ' + err));
+}
+
+function zfsPoolScrub(name) {
+  cockpit.spawn(['freeraid', 'zfs-pool-scrub', name], { superuser: 'require', err: 'out' })
+    .then(out => { log('info', 'Scrub started on ' + name + ': ' + out.trim()); refreshZfsPools(); })
+    .catch(err => log('error', 'Scrub failed: ' + err));
+}
+
+function zfsPoolStatus(name) {
+  let buf = '';
+  cockpit.spawn(['freeraid', 'zfs-pool-status', name], { superuser: 'require', err: 'out' })
+    .stream(d => { buf += d; })
+    .then(() => {
+      const card = document.getElementById('zfs-pool-card-' + name);
+      if (!card) return;
+      let statusEl = document.getElementById('zfs-status-out-' + name);
+      if (!statusEl) {
+        statusEl = document.createElement('pre');
+        statusEl.id = 'zfs-status-out-' + name;
+        statusEl.style.cssText = 'font-size:11px;color:var(--text-dim);background:var(--bg);padding:10px;border-radius:4px;overflow-x:auto;margin-top:8px;white-space:pre-wrap';
+        card.appendChild(statusEl);
+      }
+      statusEl.textContent = buf;
+    })
+    .catch(err => log('error', 'Status failed: ' + err));
+}
+
+function toggleZfsDatasetAdd(pool) {
+  const el = document.getElementById('zfs-dataset-add-' + pool);
+  if (el) el.classList.toggle('hidden');
+}
+
+function doCreateZfsDataset(pool) {
+  const name  = document.getElementById('zfs-ds-name-' + pool).value.trim();
+  const quota = document.getElementById('zfs-ds-quota-' + pool).value.trim() || 'none';
+  const msg   = document.getElementById('zfs-ds-msg-' + pool);
+  if (!name) { msg.style.color = 'var(--red)'; msg.textContent = 'Name required.'; return; }
+  msg.style.color = 'var(--text-dim)'; msg.textContent = 'Creating...';
+  cockpit.spawn(['freeraid', 'zfs-dataset-create', pool, name, quota], { superuser: 'require', err: 'out' })
+    .then(() => {
+      msg.style.color = 'var(--green)'; msg.textContent = 'Created.';
+      setTimeout(() => { refreshZfsPools(); }, 1000);
+    })
+    .catch(err => { msg.style.color = 'var(--red)'; msg.textContent = String(err); });
+}
+
+function zfsDatasetDestroy(full) {
+  if (!confirm('Delete dataset "' + full + '"? All data in this dataset will be lost.')) return;
+  cockpit.spawn(['freeraid', 'zfs-dataset-destroy', full], { superuser: 'require', err: 'out' })
+    .then(() => { log('info', 'Dataset ' + full + ' deleted.'); refreshZfsPools(); })
+    .catch(err => log('error', 'Delete failed: ' + err));
+}
+
+function toggleZfsSnapshots(pool, dataset) {
+  const id = 'zfs-snaps-' + dataset.replace(/\//g, '-');
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (!el.classList.contains('hidden')) { el.classList.add('hidden'); return; }
+  el.classList.remove('hidden');
+  _loadZfsSnapshots(pool, dataset, el);
+}
+
+function _loadZfsSnapshots(pool, dataset, el) {
+  el.innerHTML = '<div class="loading-msg" style="padding:6px 12px">Loading snapshots...</div>';
+  let buf = '';
+  cockpit.spawn(['freeraid', 'zfs-snapshot-list', dataset], { superuser: 'require', err: 'out' })
+    .stream(d => { buf += d; })
+    .then(() => {
+      let snaps = [];
+      try { snaps = JSON.parse(buf.trim()); } catch(_) {}
+      const datasetJson = JSON.stringify(dataset);
+      const poolJson    = JSON.stringify(pool);
+      if (!snaps.length) {
+        el.innerHTML = `<div style="padding:6px 12px;display:flex;gap:8px;align-items:center">
+          <span style="color:var(--text-dim);font-size:12px">No snapshots.</span>
+          <button class="btn btn-xs btn-secondary" onclick="_takeSnapshot(${datasetJson})">Take Snapshot</button>
+        </div>`;
+        return;
+      }
+      el.innerHTML = `<div style="padding:6px 12px">
+        <div style="display:flex;justify-content:flex-end;margin-bottom:6px">
+          <button class="btn btn-xs btn-secondary" onclick="_takeSnapshot(${datasetJson})">Take Snapshot</button>
+        </div>
+        ${snaps.map(s => {
+          const sn = JSON.stringify(s.name);
+          return `<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-top:1px solid var(--border);font-size:12px">
+            <span style="font-family:monospace;flex:1">${s.name}</span>
+            <span style="color:var(--text-dim)">${s.used}</span>
+            <button class="btn btn-xs btn-ghost" onclick="_rollbackSnapshot(${sn})">Rollback</button>
+            <button class="btn btn-xs btn-danger" onclick="_deleteSnapshot(${sn})">Delete</button>
+          </div>`;
+        }).join('')}
+      </div>`;
+    })
+    .catch(() => { el.innerHTML = '<div style="padding:6px 12px;color:var(--red)">Failed to load snapshots.</div>'; });
+}
+
+function _takeSnapshot(dataset) {
+  const label = prompt('Snapshot label (leave blank for timestamp):') || '';
+  const args = label ? ['freeraid', 'zfs-snapshot-create', dataset, label]
+                     : ['freeraid', 'zfs-snapshot-create', dataset];
+  cockpit.spawn(args, { superuser: 'require', err: 'out' })
+    .then(out => { log('info', out.trim()); refreshZfsPools(); })
+    .catch(err => log('error', 'Snapshot failed: ' + err));
+}
+
+function _deleteSnapshot(snap) {
+  if (!confirm('Delete snapshot ' + snap + '?')) return;
+  cockpit.spawn(['freeraid', 'zfs-snapshot-delete', snap], { superuser: 'require', err: 'out' })
+    .then(() => { log('info', 'Snapshot deleted: ' + snap); refreshZfsPools(); })
+    .catch(err => log('error', 'Delete failed: ' + err));
+}
+
+function _rollbackSnapshot(snap) {
+  if (!confirm('Roll back to ' + snap + '? All changes since this snapshot will be lost.')) return;
+  cockpit.spawn(['freeraid', 'zfs-snapshot-rollback', snap], { superuser: 'require', err: 'out' })
+    .then(out => { log('info', out.trim()); refreshZfsPools(); })
+    .catch(err => log('error', 'Rollback failed: ' + err));
 }

@@ -884,6 +884,188 @@ cmd_pool_stop_all() {
     done < <(jq -r '.pools // [] | .[] | .name' "$CONFIG_FILE" 2>/dev/null)
 }
 
+## ── ZFS ──────────────────────────────────────────────────────────────────────
+
+cmd_zfs_check() {
+    command -v zpool &>/dev/null || die "ZFS is not installed. Run: apt-get install -y zfsutils-linux"
+}
+
+cmd_zfs_pool_list() {
+    cmd_zfs_check
+    # Return list of all zpools with health, size, used, free
+    if ! zpool list -H -o name 2>/dev/null | grep -q .; then
+        echo "[]"
+        return
+    fi
+    local out="["
+    local first=1
+    while IFS=$'\t' read -r name size alloc free ckpoint expandsz frag cap dedup health altroot; do
+        [ "$first" = "1" ] && first=0 || out+=","
+        # Get datasets for this pool
+        local datasets
+        datasets=$(zfs list -H -o name,used,avail,mountpoint,compression,quota -t filesystem -r "$name" 2>/dev/null \
+            | awk -v OFS='\t' '{print $0}' | head -20)
+        local ds_json="["
+        local df=1
+        while IFS=$'\t' read -r dsname dsused dsavail dsmount dscomp dsquota; do
+            [ "$df" = "1" ] && df=0 || ds_json+=","
+            dsname=$(echo "$dsname" | sed 's/"/\\"/g')
+            ds_json+="{\"name\":\"${dsname}\",\"used\":\"${dsused}\",\"avail\":\"${dsavail}\",\"mountpoint\":\"${dsmount}\",\"compression\":\"${dscomp}\",\"quota\":\"${dsquota}\"}"
+        done <<< "$datasets"
+        ds_json+="]"
+        out+="{\"name\":\"${name}\",\"size\":\"${size}\",\"alloc\":\"${alloc}\",\"free\":\"${free}\",\"health\":\"${health}\",\"datasets\":${ds_json}}"
+    done < <(zpool list -H -o name,size,alloc,free,checkpoint,expandsz,frag,cap,dedup,health,altroot 2>/dev/null)
+    out+="]"
+    echo "$out"
+}
+
+cmd_zfs_pool_status() {
+    # Usage: freeraid zfs-pool-status <name>
+    cmd_zfs_check
+    local name="${1:-}"
+    [ -z "$name" ] && die "Usage: freeraid zfs-pool-status <name>"
+    zpool status "$name" 2>&1
+}
+
+cmd_zfs_pool_create() {
+    # Usage: freeraid zfs-pool-create <name> <type:stripe|mirror|raidz|raidz2> <dev1> [dev2 ...]
+    cmd_zfs_check
+    local name="${1:-}" vdev_type="${2:-stripe}"
+    shift 2 2>/dev/null || true
+    local devs=("$@")
+    [ -z "$name" ] && die "Usage: freeraid zfs-pool-create <name> <type> <dev1> [dev2...]"
+    [ ${#devs[@]} -eq 0 ] && die "At least one device required"
+
+    local mount_point="/mnt/zfs/${name}"
+    mkdir -p "$mount_point"
+
+    local cmd_args=("zpool" "create" "-f" "-m" "$mount_point" "$name")
+    if [ "$vdev_type" = "stripe" ]; then
+        cmd_args+=("${devs[@]}")
+    else
+        cmd_args+=("$vdev_type" "${devs[@]}")
+    fi
+
+    "${cmd_args[@]}" 2>&1 || die "zpool create failed"
+
+    # Enable compression by default
+    zfs set compression=lz4 "$name" 2>/dev/null || true
+    zfs set atime=off "$name" 2>/dev/null || true
+
+    info "ZFS pool '$name' created at $mount_point (compression=lz4, atime=off)"
+}
+
+cmd_zfs_pool_destroy() {
+    # Usage: freeraid zfs-pool-destroy <name>
+    cmd_zfs_check
+    local name="${1:-}"
+    [ -z "$name" ] && die "Usage: freeraid zfs-pool-destroy <name>"
+    zpool export "$name" 2>/dev/null || true
+    zpool destroy -f "$name" 2>&1 || die "zpool destroy failed"
+    info "ZFS pool '$name' destroyed."
+}
+
+cmd_zfs_pool_scrub() {
+    # Usage: freeraid zfs-pool-scrub <name>
+    cmd_zfs_check
+    local name="${1:-}"
+    [ -z "$name" ] && die "Usage: freeraid zfs-pool-scrub <name>"
+    zpool scrub "$name" 2>&1 || die "Scrub failed"
+    info "Scrub started on '$name'."
+}
+
+cmd_zfs_dataset_create() {
+    # Usage: freeraid zfs-dataset-create <pool> <dataset_name> [quota]
+    cmd_zfs_check
+    local pool="${1:-}" dsname="${2:-}" quota="${3:-none}"
+    [ -z "$pool" ] || [ -z "$dsname" ] && die "Usage: freeraid zfs-dataset-create <pool> <name> [quota]"
+    local full="${pool}/${dsname}"
+    zfs create "$full" 2>&1 || die "zfs create failed"
+    [ "$quota" != "none" ] && zfs set quota="$quota" "$full" 2>/dev/null || true
+    info "Dataset '$full' created."
+}
+
+cmd_zfs_dataset_destroy() {
+    # Usage: freeraid zfs-dataset-destroy <pool/dataset>
+    cmd_zfs_check
+    local full="${1:-}"
+    [ -z "$full" ] && die "Usage: freeraid zfs-dataset-destroy <pool/dataset>"
+    zfs destroy -r "$full" 2>&1 || die "zfs destroy failed"
+    info "Dataset '$full' destroyed."
+}
+
+cmd_zfs_snapshot_list() {
+    # Usage: freeraid zfs-snapshot-list <pool_or_dataset>
+    cmd_zfs_check
+    local target="${1:-}"
+    [ -z "$target" ] && die "Usage: freeraid zfs-snapshot-list <pool_or_dataset>"
+    local out="["
+    local first=1
+    while IFS=$'\t' read -r name used creation; do
+        [ "$first" = "1" ] && first=0 || out+=","
+        name=$(echo "$name" | sed 's/"/\\"/g')
+        out+="{\"name\":\"${name}\",\"used\":\"${used}\",\"creation\":\"${creation}\"}"
+    done < <(zfs list -H -o name,used,creation -t snapshot -r "$target" 2>/dev/null)
+    out+="]"
+    echo "$out"
+}
+
+cmd_zfs_snapshot_create() {
+    # Usage: freeraid zfs-snapshot-create <pool/dataset> [label]
+    cmd_zfs_check
+    local target="${1:-}" label="${2:-}"
+    [ -z "$target" ] && die "Usage: freeraid zfs-snapshot-create <pool/dataset> [label]"
+    local ts
+    ts=$(date +%Y%m%d-%H%M%S)
+    local snap_name="${target}@${label:-auto-${ts}}"
+    zfs snapshot "$snap_name" 2>&1 || die "Snapshot failed"
+    info "Snapshot created: $snap_name"
+}
+
+cmd_zfs_snapshot_delete() {
+    # Usage: freeraid zfs-snapshot-delete <pool/dataset@snap>
+    cmd_zfs_check
+    local snap="${1:-}"
+    [ -z "$snap" ] && die "Usage: freeraid zfs-snapshot-delete <snapshot>"
+    zfs destroy "$snap" 2>&1 || die "Snapshot delete failed"
+    info "Snapshot '$snap' deleted."
+}
+
+cmd_zfs_snapshot_rollback() {
+    # Usage: freeraid zfs-snapshot-rollback <pool/dataset@snap>
+    cmd_zfs_check
+    local snap="${1:-}"
+    [ -z "$snap" ] && die "Usage: freeraid zfs-snapshot-rollback <snapshot>"
+    zfs rollback -r "$snap" 2>&1 || die "Rollback failed"
+    info "Rolled back to $snap."
+}
+
+cmd_zfs_set_prop() {
+    # Usage: freeraid zfs-set-prop <pool/dataset> <property> <value>
+    cmd_zfs_check
+    local target="${1:-}" prop="${2:-}" val="${3:-}"
+    [ -z "$target" ] || [ -z "$prop" ] || [ -z "$val" ] && die "Usage: freeraid zfs-set-prop <target> <property> <value>"
+    zfs set "${prop}=${val}" "$target" 2>&1 || die "zfs set failed"
+    info "Set ${prop}=${val} on ${target}"
+}
+
+cmd_zfs_import_scan() {
+    # Scan for importable pools
+    cmd_zfs_check
+    zpool import 2>&1 || true
+}
+
+cmd_zfs_pool_import() {
+    # Usage: freeraid zfs-pool-import <name>
+    cmd_zfs_check
+    local name="${1:-}"
+    [ -z "$name" ] && die "Usage: freeraid zfs-pool-import <name>"
+    local mount_point="/mnt/zfs/${name}"
+    mkdir -p "$mount_point"
+    zpool import -f "$name" 2>&1 || die "zpool import failed"
+    info "Pool '$name' imported."
+}
+
 cmd_shares_list() {
     jq -c '.shares // []' "$CONFIG_FILE"
 }
@@ -3844,6 +4026,20 @@ case "${1:-help}" in
     plugin-install)       cmd_plugin_install "${2:-}" ;;
     plugin-remove)        cmd_plugin_remove "${2:-}" ;;
     plugin-update)        cmd_plugin_update "${2:-}" ;;
+    zfs-pool-list)        cmd_zfs_pool_list ;;
+    zfs-pool-status)      cmd_zfs_pool_status "${2:-}" ;;
+    zfs-pool-create)      cmd_zfs_pool_create "${2:-}" "${3:-stripe}" "${@:4}" ;;
+    zfs-pool-destroy)     cmd_zfs_pool_destroy "${2:-}" ;;
+    zfs-pool-scrub)       cmd_zfs_pool_scrub "${2:-}" ;;
+    zfs-pool-import)      cmd_zfs_pool_import "${2:-}" ;;
+    zfs-import-scan)      cmd_zfs_import_scan ;;
+    zfs-dataset-create)   cmd_zfs_dataset_create "${2:-}" "${3:-}" "${4:-none}" ;;
+    zfs-dataset-destroy)  cmd_zfs_dataset_destroy "${2:-}" ;;
+    zfs-snapshot-list)    cmd_zfs_snapshot_list "${2:-}" ;;
+    zfs-snapshot-create)  cmd_zfs_snapshot_create "${2:-}" "${3:-}" ;;
+    zfs-snapshot-delete)  cmd_zfs_snapshot_delete "${2:-}" ;;
+    zfs-snapshot-rollback) cmd_zfs_snapshot_rollback "${2:-}" ;;
+    zfs-set-prop)         cmd_zfs_set_prop "${2:-}" "${3:-}" "${4:-}" ;;
     setup-status)         cmd_setup_status ;;
     setup-complete)       cmd_setup_complete ;;
     install-deps)  cmd_install_deps ;;
