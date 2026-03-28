@@ -281,6 +281,10 @@ echo "127.0.1.1  freeraid" >> /etc/hosts
 # Root password: freeraid (user changes at first login)
 echo "root:freeraid" | chpasswd
 
+# Samba user for root (same default password)
+printf 'freeraid\nfreeraid\n' | smbpasswd -a -s root 2>/dev/null || true
+smbpasswd -e root 2>/dev/null || true
+
 # SSH — allow root password login
 mkdir -p /etc/ssh/sshd_config.d
 cat > /etc/ssh/sshd_config.d/freeraid.conf <<'SSHCONF'
