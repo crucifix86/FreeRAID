@@ -239,6 +239,7 @@ cp "$BUILD_DIR/rootfs.squashfs" "$MNT/live/filesystem.squashfs"
 step "5/5" "Setting up persistent config directory"
 
 mkdir -p "$MNT/config"
+mkdir -p "$MNT/config/compose"
 
 if [ -n "$UNRAID_ZIP" ] && [ -f "$UNRAID_ZIP" ]; then
     cp "$UNRAID_ZIP" "$MNT/config/unraid-backup.zip"

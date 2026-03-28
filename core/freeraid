@@ -9,7 +9,7 @@ FREERAID_VERSION="$(cat "$VERSION_FILE" 2>/dev/null | tr -d '[:space:]' || echo 
 CONFIG_FILE="${FREERAID_CONFIG:-/boot/config/freeraid.conf.json}"
 SNAPRAID_CONF="/etc/snapraid.conf"
 LOG_FILE="/var/log/freeraid.log"
-COMPOSE_DIR="/etc/freeraid/compose"
+COMPOSE_DIR="${FREERAID_COMPOSE_DIR:-/boot/config/compose}"
 GITHUB_REPO="crucifix86/FreeRAID"
 GITHUB_API="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
 

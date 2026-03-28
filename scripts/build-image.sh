@@ -226,9 +226,10 @@ echo 'WSDD_PARAMS="-w WORKGROUP"' > "$ROOTFS/etc/default/wsdd"
 mkdir -p "$ROOTFS/etc/freeraid"
 echo "$FREERAID_VERSION" > "$ROOTFS/etc/freeraid/VERSION"
 
-# Compose files
-mkdir -p "$ROOTFS/etc/freeraid/compose" "$ROOTFS/etc/freeraid/plugins"
-cp "$REPO_DIR/compose/"*.docker-compose.yml "$ROOTFS/etc/freeraid/compose/" 2>/dev/null || true
+# Compose files — point to /boot/config/compose (persists to USB FAT32)
+# /etc/freeraid/compose is a symlink so installed containers survive reboots
+mkdir -p "$ROOTFS/etc/freeraid/plugins"
+ln -sf /boot/config/compose "$ROOTFS/etc/freeraid/compose"
 
 # VM and ZFS directories
 mkdir -p "$ROOTFS/var/lib/freeraid/vms"
