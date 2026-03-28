@@ -616,9 +616,12 @@ cmd_disks_scan() {
     ' "$CONFIG_FILE" 2>/dev/null || echo "[]")
 
     # Detect the live boot medium device to exclude it.
-    # With toram, /run/live/medium is a tmpfs — use FREERAID label instead.
+    # With toram, /run/live/medium is a tmpfs (/dev/shm) not the USB.
+    # Fall back to blkid FREERAID label to find the real boot device.
     local live_dev=""
-    live_dev=$(findmnt -n -o SOURCE /run/live/medium 2>/dev/null | grep -v tmpfs | sed 's/[0-9]*$//' || echo "")
+    local _src
+    _src=$(findmnt -n -o SOURCE /run/live/medium 2>/dev/null | sed 's/[0-9]*$//' || echo "")
+    [ -b "$_src" ] && live_dev="$_src"
     if [ -z "$live_dev" ]; then
         local label_dev
         label_dev=$(blkid -L FREERAID 2>/dev/null || echo "")
