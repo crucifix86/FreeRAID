@@ -615,9 +615,15 @@ cmd_disks_scan() {
         ]
     ' "$CONFIG_FILE" 2>/dev/null || echo "[]")
 
-    # Detect the live boot medium device to exclude it
+    # Detect the live boot medium device to exclude it.
+    # With toram, /run/live/medium is a tmpfs — use FREERAID label instead.
     local live_dev=""
-    live_dev=$(findmnt -n -o SOURCE /run/live/medium 2>/dev/null | sed 's/[0-9]*$//' || echo "")
+    live_dev=$(findmnt -n -o SOURCE /run/live/medium 2>/dev/null | grep -v tmpfs | sed 's/[0-9]*$//' || echo "")
+    if [ -z "$live_dev" ]; then
+        local label_dev
+        label_dev=$(blkid -L FREERAID 2>/dev/null || echo "")
+        [ -n "$label_dev" ] && live_dev=$(echo "$label_dev" | sed 's/[0-9]*$//')
+    fi
 
     local disks_json="["
     local first=true
