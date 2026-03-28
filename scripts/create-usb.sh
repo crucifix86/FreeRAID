@@ -131,7 +131,6 @@ if $HAVE_GRUB; then
 
     # Embed a minimal config: just load grub.cfg from the same directory as
     # the EFI binary. $cmdpath is always set by GRUB (no label search needed).
-    local GRUB_EMBED
     GRUB_EMBED=$(mktemp /tmp/grub-embed-XXXXXX.cfg)
     cat > "$GRUB_EMBED" <<'EMBEDEOF'
 configfile $cmdpath/grub.cfg
