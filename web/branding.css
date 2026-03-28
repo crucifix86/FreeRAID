@@ -29,13 +29,19 @@ body.login-pf {
 #nav-system,
 #sidebar-toggle,
 #hosts-sel,
-.pf-c-page__sidebar,
-.ct-switcher,
-.header-actions,
 #nav-hosts,
 #topnav,
+.ct-switcher,
+.ct-topbar,
+.ct-nav-toggle,
+.header-actions,
 .pf-c-masthead,
-.ct-topbar {
+.pf-c-page__header,
+.pf-c-page__sidebar,
+.pf-c-page__sidebar-body,
+.navbar-pf-vertical,
+.nav-system-menu,
+.nav-hosts-menu {
   display: none !important;
 }
 #content,
@@ -44,11 +50,14 @@ body.login-pf {
 .pf-c-page__main {
   margin-left: 0 !important;
   padding-left: 0 !important;
+  margin-top: 0 !important;
+  padding-top: 0 !important;
 }
 
-/* Collapse the Cockpit grid sidebar column so our iframe fills everything */
+/* Collapse sidebar column */
 .page { --nav-width: 0 !important; }
 .page .sidebar, .page .area-ct-subnav { display: none !important; }
+.pf-c-page { grid-template-rows: 0 1fr !important; }
 
 /* ── FreeRAID Login Page Theme ── */
 body.login-pf {

@@ -159,13 +159,13 @@ regexp --set=1:root '^\(([^)]+)\)' "\$cmdpath"
 
 menuentry "FreeRAID v${FREERAID_VER}" {
     regexp --set=1:root '^\(([^)]+)\)' "\$cmdpath"
-    linux  (\$root)/vmlinuz boot=live quiet loglevel=3
+    linux  (\$root)/vmlinuz boot=live toram quiet loglevel=3
     initrd (\$root)/initrd.gz
 }
 
 menuentry "FreeRAID v${FREERAID_VER} (verbose)" {
     regexp --set=1:root '^\(([^)]+)\)' "\$cmdpath"
-    linux  (\$root)/vmlinuz boot=live loglevel=7
+    linux  (\$root)/vmlinuz boot=live toram loglevel=7
     initrd (\$root)/initrd.gz
 }
 
@@ -201,12 +201,12 @@ label freeraid
   menu label FreeRAID v${FREERAID_VER}
   menu default
   kernel /vmlinuz
-  append initrd=/initrd.gz boot=live quiet loglevel=3
+  append initrd=/initrd.gz boot=live toram quiet loglevel=3
 
 label freeraid-verbose
   menu label FreeRAID v${FREERAID_VER} (verbose boot)
   kernel /vmlinuz
-  append initrd=/initrd.gz boot=live loglevel=7
+  append initrd=/initrd.gz boot=live toram loglevel=7
 
 label local
   menu label Boot from local disk

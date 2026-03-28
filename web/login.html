@@ -331,6 +331,17 @@
   </script>
 
   <script>
+    /* Redirect to FreeRAID plugin directly after login (bypasses shell sidebar) */
+    (function() {
+      var target = '/cockpit/@localhost/freeraid/index.html';
+      var url = new URL(window.location.href);
+      if (!url.searchParams.get('path')) {
+        url.searchParams.set('path', target);
+        window.location.replace(url.toString());
+      }
+    })();
+  </script>
+  <script>
     (function() {
       var STORAGE_KEY = 'freeraid_remember';
       function load() {

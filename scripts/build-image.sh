@@ -181,8 +181,8 @@ mkdir -p "$INSTALL_DIR"
 cp "$REPO_DIR/core/freeraid"             "$INSTALL_DIR/freeraid"
 cp "$REPO_DIR/importer/unraid-import.py" "$INSTALL_DIR/unraid-import"
 chmod +x "$INSTALL_DIR/freeraid" "$INSTALL_DIR/unraid-import"
-ln -sf "$INSTALL_DIR/freeraid"      "$ROOTFS/usr/local/bin/freeraid"
-ln -sf "$INSTALL_DIR/unraid-import" "$ROOTFS/usr/local/bin/freeraid-import"
+ln -sf /usr/local/lib/freeraid/freeraid      "$ROOTFS/usr/local/bin/freeraid"
+ln -sf /usr/local/lib/freeraid/unraid-import "$ROOTFS/usr/local/bin/freeraid-import"
 
 # Cockpit plugin
 COCKPIT_DIR="$ROOTFS/usr/share/cockpit/freeraid"
@@ -198,10 +198,12 @@ cp "$REPO_DIR/web/freeraid/manifest.json" \
    "$COCKPIT_DIR/"
 
 # Branding — hide Cockpit chrome
-BRANDING_DIR="$ROOTFS/usr/share/cockpit/branding/default"
-mkdir -p "$BRANDING_DIR"
-cp "$REPO_DIR/web/branding.css" "$BRANDING_DIR/branding.css"
-cp "$REPO_DIR/web/login.html"   "$BRANDING_DIR/login.html"
+# Install to both default/ and debian/ since Cockpit prefers OS-specific branding
+for BRANDING_DIR in "$ROOTFS/usr/share/cockpit/branding/default" "$ROOTFS/usr/share/cockpit/branding/debian"; do
+    mkdir -p "$BRANDING_DIR"
+    cp "$REPO_DIR/web/branding.css" "$BRANDING_DIR/branding.css"
+    cp "$REPO_DIR/web/login.html"   "$BRANDING_DIR/login.html"
+done
 
 # Avahi SMB advertisement
 mkdir -p "$ROOTFS/etc/avahi/services"
@@ -263,7 +265,7 @@ python3 /usr/local/lib/freeraid/unraid-import \
     || echo "FreeRAID: import had errors — check /boot/config/freeraid.conf.json"
 FIRSTBOOT
 chmod +x "$INSTALL_DIR/freeraid-firstboot"
-ln -sf "$INSTALL_DIR/freeraid-firstboot" "$ROOTFS/usr/local/bin/freeraid-firstboot"
+ln -sf /usr/local/lib/freeraid/freeraid-firstboot "$ROOTFS/usr/local/bin/freeraid-firstboot"
 
 info "FreeRAID installed into rootfs"
 
@@ -279,12 +281,32 @@ echo "127.0.1.1  freeraid" >> /etc/hosts
 # Root password: freeraid (user changes at first login)
 echo "root:freeraid" | chpasswd
 
+# SSH — allow root password login
+mkdir -p /etc/ssh/sshd_config.d
+cat > /etc/ssh/sshd_config.d/freeraid.conf <<'SSHCONF'
+PermitRootLogin yes
+PasswordAuthentication yes
+SSHCONF
+
+# Cockpit PAM — minimal config for live/USB systems
+# Default Debian cockpit PAM has pam_selinux (no-op but can fail) and
+# pam_env reading /etc/default/locale which doesn't exist on live systems.
+cat > /etc/pam.d/cockpit <<'PAMEOF'
+#%PAM-1.0
+auth       required     pam_unix.so
+auth       required     pam_listfile.so item=user sense=deny file=/etc/cockpit/disallowed-users onerr=succeed
+account    required     pam_unix.so
+account    required     pam_nologin.so
+session    optional     pam_loginuid.so
+session    required     pam_unix.so
+session    optional     pam_env.so
+PAMEOF
+
 # Cockpit — allow root, clear disallowed-users
 mkdir -p /etc/cockpit
 cat > /etc/cockpit/cockpit.conf <<'CONF'
 [WebService]
 LoginTitle = FreeRAID
-Origins = *
 CONF
 # Empty disallowed-users so root can log in
 > /etc/cockpit/disallowed-users
@@ -440,10 +462,12 @@ systemctl enable freeraid-mover.timer          2>/dev/null || true
 systemctl enable freeraid-docker-update.timer  2>/dev/null || true
 systemctl enable freeraid-firstboot.service    2>/dev/null || true
 
-# Bind-mount config/ from USB live medium to /boot/config (persistent config)
+# Mount config/ from USB flash drive to /boot/config (persistent config)
+# With toram, live-boot copies squashfs to RAM and releases the USB device.
+# We then mount the USB partition (by FREERAID label) rw at /boot/config.
 cat > /etc/systemd/system/freeraid-config-mount.service <<'SVC'
 [Unit]
-Description=FreeRAID persistent config bind mount
+Description=FreeRAID persistent config mount (USB rw)
 DefaultDependencies=no
 After=live-boot.service local-fs.target
 Before=freeraid-array.service
@@ -451,7 +475,16 @@ Before=freeraid-array.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c 'mkdir -p /run/live/medium/config /boot/config && mount --bind /run/live/medium/config /boot/config'
+ExecStart=/bin/bash -c '\
+    mkdir -p /boot/config; \
+    DEV=$(blkid -L FREERAID 2>/dev/null || findfs LABEL=FREERAID 2>/dev/null || echo ""); \
+    if [ -n "$DEV" ]; then \
+        mount -o rw,uid=0,gid=0 "$DEV" /boot/config || \
+        mount --bind /run/live/medium/config /boot/config || true; \
+    else \
+        mount --bind /run/live/medium/config /boot/config || true; \
+    fi; \
+    mkdir -p /boot/config'
 
 [Install]
 WantedBy=multi-user.target
@@ -498,14 +531,11 @@ rm -f "$BUILD_DIR/rootfs.squashfs"
 mksquashfs "$ROOTFS" "$BUILD_DIR/rootfs.squashfs" \
     -comp xz \
     -e "$ROOTFS/boot" \
-    -e "$ROOTFS/proc" \
-    -e "$ROOTFS/sys" \
-    -e "$ROOTFS/dev" \
-    -e "$ROOTFS/run" \
-    -e "$ROOTFS/tmp" \
     -noappend \
     -quiet \
     2>/dev/null
+# Ensure empty mount-point dirs exist in squashfs (live-boot needs them)
+# proc/sys/run/tmp are empty after chroot unmount — mksquashfs above includes them
 
 info "rootfs.squashfs: $(du -sh "$BUILD_DIR/rootfs.squashfs" | cut -f1)"
 

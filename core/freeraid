@@ -326,12 +326,15 @@ cmd_start() {
             continue
         fi
         mkdir -p "$mnt"
-        if ! blkid "$dev" &>/dev/null; then
+        local cur_fs
+        cur_fs=$(blkid -o value -s TYPE "$dev" 2>/dev/null || echo "")
+        if [ "$cur_fs" != "$fstype" ]; then
             info "Formatting parity $dev as $fstype..."
+            wipefs -af "$dev" &>/dev/null || true
             case "$fstype" in
                 xfs)  mkfs.xfs -f -L "parity" "$dev" ;;
                 ext4) mkfs.ext4 -F -L "parity" "$dev" ;;
-                *) mkfs.xfs -f "$dev" ;;
+                *) mkfs.xfs -f -L "parity" "$dev" ;;
             esac
         fi
         if ! mountpoint -q "$mnt"; then
@@ -366,8 +369,11 @@ cmd_start() {
 
         mkdir -p "$mnt"
 
-        if ! blkid "$actual_dev" &>/dev/null; then
+        local cur_data_fs
+        cur_data_fs=$(blkid -o value -s TYPE "$actual_dev" 2>/dev/null || echo "")
+        if [ "$cur_data_fs" != "$fstype" ]; then
             info "Formatting $actual_dev as $fstype..."
+            wipefs -af "$actual_dev" &>/dev/null || true
             case "$fstype" in
                 xfs)  mkfs.xfs -f -L "$(basename "$mnt")" "$actual_dev" ;;
                 ext4) mkfs.ext4 -F -L "$(basename "$mnt")" "$actual_dev" ;;
@@ -402,8 +408,11 @@ cmd_start() {
 
     if [ -n "$cache_dev" ] && [ -b "$cache_dev" ]; then
         mkdir -p "$cache_mnt"
-        if ! blkid "$cache_dev" &>/dev/null; then
+        local cur_cache_fs
+        cur_cache_fs=$(blkid -o value -s TYPE "$cache_dev" 2>/dev/null || echo "")
+        if [ "$cur_cache_fs" != "$cache_fs" ]; then
             info "Formatting cache $cache_dev as $cache_fs..."
+            wipefs -af "$cache_dev" &>/dev/null || true
             mkfs."$cache_fs" -F "$cache_dev" 2>/dev/null || mkfs."$cache_fs" "$cache_dev"
         fi
         if ! mountpoint -q "$cache_mnt"; then
@@ -580,12 +589,19 @@ cmd_disks_scan() {
         ]
     ' "$CONFIG_FILE" 2>/dev/null || echo "[]")
 
+    # Detect the live boot medium device to exclude it
+    local live_dev=""
+    live_dev=$(findmnt -n -o SOURCE /run/live/medium 2>/dev/null | sed 's/[0-9]*$//' || echo "")
+
     local disks_json="["
     local first=true
 
     while read -r name size rota type; do
         [ "$type" != "disk" ] && continue
         local dev="/dev/${name}"
+
+        # Skip the live boot medium
+        [ -n "$live_dev" ] && [ "$dev" = "$live_dev" ] && continue
 
         # Get model separately to handle blank/spaces safely
         local model
