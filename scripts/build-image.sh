@@ -486,8 +486,7 @@ echo ""
 echo "  FreeRAID — starting..."
 echo ""
 
-# Populate /dev with all devices the kernel already knows about
-echo /bin/mdev > /proc/sys/kernel/hotplug 2>/dev/null || true
+# Populate /dev with devices the kernel already knows about
 mdev -s 2>/dev/null || true
 
 modprobe squashfs    2>/dev/null || true
@@ -497,13 +496,24 @@ modprobe usb_storage 2>/dev/null || true
 modprobe uas         2>/dev/null || true
 modprobe mmc_block   2>/dev/null || true
 
-# Re-scan after loading storage modules (USB/MMC devices may now be visible)
+# Re-scan after loading storage modules
 mdev -s 2>/dev/null || true
 
-# Find FREERAID USB by label (up to 30s)
+# Find the FREERAID partition (up to 30s)
+# Try blkid -L first; if that fails scan each block device directly
 USB_PART=""
 for i in $(seq 1 30); do
-    USB_PART=$(blkid -L FREERAID 2>/dev/null || /sbin/blkid -L FREERAID 2>/dev/null || true)
+    # Method 1: blkid label lookup
+    USB_PART=$(/sbin/blkid -L FREERAID 2>/dev/null || true)
+    [ -z "$USB_PART" ] && USB_PART=$(blkid -L FREERAID 2>/dev/null || true)
+    # Method 2: scan each partition for the FREERAID label
+    if [ -z "$USB_PART" ]; then
+        for dev in /dev/sd?[0-9] /dev/mmcblk[0-9]p[0-9] /dev/vd?[0-9]; do
+            [ -b "$dev" ] || continue
+            lbl=$(/sbin/blkid -o value -s LABEL "$dev" 2>/dev/null || true)
+            if [ "$lbl" = "FREERAID" ]; then USB_PART="$dev"; break; fi
+        done
+    fi
     [ -n "$USB_PART" ] && break
     echo "  Waiting for FREERAID drive... ($i)"
     sleep 1
