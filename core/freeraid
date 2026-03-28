@@ -458,6 +458,32 @@ cmd_start() {
     # Apply spin-down settings (only for drives that have it explicitly set)
     cmd_spindown_apply 2>/dev/null || true
 
+    # Configure Docker to use overlay2 on first real data disk (not mergerfs pool)
+    if command -v docker &>/dev/null; then
+        local first_disk_mnt=""
+        first_disk_mnt=$(jq -r '.array.disks[] | select(.enabled==true) | .mountpoint' "$CONFIG_FILE" 2>/dev/null | head -1)
+        if [ -n "$first_disk_mnt" ] && mountpoint -q "$first_disk_mnt" 2>/dev/null; then
+            local docker_data="${first_disk_mnt}/appdata/docker"
+            local cur_driver=""
+            cur_driver=$(docker info --format '{{.Driver}}' 2>/dev/null || echo "")
+            local cur_root=""
+            cur_root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo "")
+            if [ "$cur_driver" != "overlay2" ] || [ "$cur_root" != "$docker_data" ]; then
+                info "Switching Docker to overlay2 at $docker_data ..."
+                systemctl stop docker 2>/dev/null || true
+                mkdir -p "$docker_data"
+                cat > /etc/docker/daemon.json <<DOCKERCFG
+{
+  "storage-driver": "overlay2",
+  "data-root": "$docker_data"
+}
+DOCKERCFG
+                systemctl start docker 2>/dev/null || true
+                info "Docker: overlay2 at $docker_data"
+            fi
+        fi
+    fi
+
     info "Array started. Pool at ${pool}"
 
     # Start any extra pools
