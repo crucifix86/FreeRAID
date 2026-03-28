@@ -129,18 +129,15 @@ step "3/5" "Installing bootloaders"
 if $HAVE_GRUB; then
     mkdir -p "$MNT/EFI/BOOT"
 
-    # Embed a minimal config that searches for the FREERAID label at boot.
-    # This means GRUB finds the USB regardless of which disk slot it's in.
+    # Embed a minimal config: just load grub.cfg from the same directory as
+    # the EFI binary. $cmdpath is always set by GRUB (no label search needed).
     local GRUB_EMBED
     GRUB_EMBED=$(mktemp /tmp/grub-embed-XXXXXX.cfg)
     cat > "$GRUB_EMBED" <<'EMBEDEOF'
-search --no-floppy --label --set=root FREERAID
-set prefix=($root)/EFI/BOOT
-configfile ($root)/EFI/BOOT/grub.cfg
+configfile $cmdpath/grub.cfg
 EMBEDEOF
 
-    # Build standalone GRUB EFI image with all needed modules embedded.
-    # --prefix is overridden by the embedded config's set prefix= line.
+    # Build standalone GRUB EFI image with regexp module for cmdpath parsing.
     grub-mkimage \
         --format=x86_64-efi \
         --output="$MNT/EFI/BOOT/BOOTX64.EFI" \
@@ -148,7 +145,7 @@ EMBEDEOF
         --prefix='/EFI/BOOT' \
         boot linux normal configfile \
         part_msdos part_gpt fat \
-        echo ls cat search search_label \
+        echo ls cat search search_label regexp \
         2>/dev/null || warn "grub-mkimage failed — EFI boot may not work"
     rm -f "$GRUB_EMBED"
 
@@ -157,17 +154,18 @@ set default=0
 set timeout=5
 set gfxpayload=keep
 
-# Find the FREERAID partition by label regardless of disk order
-search --no-floppy --label --set=root FREERAID
+# Derive root device from cmdpath -- GRUB always knows this, no network needed
+# cmdpath = (hd2,msdos1)/EFI/BOOT  ->  root = hd2,msdos1
+regexp --set=1:root '^\(([^)]+)\)' "\$cmdpath"
 
 menuentry "FreeRAID v${FREERAID_VER}" {
-    search --no-floppy --label --set=root FREERAID
+    regexp --set=1:root '^\(([^)]+)\)' "\$cmdpath"
     linux  (\$root)/vmlinuz quiet loglevel=3
     initrd (\$root)/initrd.gz
 }
 
 menuentry "FreeRAID v${FREERAID_VER} (verbose)" {
-    search --no-floppy --label --set=root FREERAID
+    regexp --set=1:root '^\(([^)]+)\)' "\$cmdpath"
     linux  (\$root)/vmlinuz loglevel=7
     initrd (\$root)/initrd.gz
 }
