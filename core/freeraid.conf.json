@@ -12,7 +12,7 @@
     "disks": [],
     "cache": [],
     "pool_mountpoint": "/mnt/user",
-    "mergerfs_options": "defaults,allow_other,use_ino,cache.files=off,dropcacheonclose=true,category.create=mfs"
+    "mergerfs_options": "defaults,allow_other,cache.files=partial,dropcacheonclose=true,category.create=mfs"
   },
   "snapraid": {
     "sync_schedule": "0 3 * * *",
