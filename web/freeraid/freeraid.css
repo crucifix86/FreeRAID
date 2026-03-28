@@ -1416,3 +1416,4 @@ body {
   display: flex;
   gap: 8px;
 }
+.badge-enc { background: #1a1040; color: #a78bfa; }

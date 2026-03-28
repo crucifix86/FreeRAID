@@ -1203,16 +1203,18 @@ function renderShares(shares) {
     const cacheBadge  = s.cache_mode ? `<span class="badge badge-cache">Cache: ${s.cache_mode}</span>` : '';
     const unraidBadge = s._imported_from_unraid ? `<span class="badge badge-unraid">Unraid</span>` : '';
     const pwBadge     = s.share_password_set ? `<span class="badge badge-pw">Password</span>` : '';
+    const encBadge    = s.encrypted ? `<span class="badge badge-enc">Encrypted</span>` : '';
     const nameSafe    = s.name.replace(/'/g, "\\'");
     const nameJson    = JSON.stringify(s.name);
     return `<div class="share-card" id="share-card-${s.name}">
       <div class="share-name">${s.name}</div>
       <div class="share-path">${s.path}</div>
-      <div class="share-badges">${smbBadge}${nfsBadge}${secBadge}${cacheBadge}${unraidBadge}${pwBadge}</div>
+      <div class="share-badges">${smbBadge}${nfsBadge}${secBadge}${cacheBadge}${unraidBadge}${pwBadge}${encBadge}</div>
       <div class="share-actions">
         <button class="btn btn-sm btn-secondary" onclick="toggleSharePerms(${nameJson})">Permissions</button>
         <button class="btn btn-sm btn-secondary" onclick="toggleShareNfs(${nameJson})">NFS</button>
         <button class="btn btn-sm btn-secondary" onclick="toggleSharePassword(${nameJson})">Password</button>
+        <button class="btn btn-sm btn-secondary" onclick="toggleShareEnc(${nameJson})">Encryption</button>
         <button class="btn btn-sm btn-ghost" onclick="removeShare('${nameSafe}')">Remove</button>
       </div>
     </div>
@@ -1232,6 +1234,11 @@ function renderShares(shares) {
           <button class="btn btn-ghost btn-sm" onclick="document.getElementById('share-pw-${s.name}').classList.add('hidden')">Cancel</button>
         </div>
         <div id="share-pw-msg-${s.name}" style="margin-top:8px;font-size:0.85em"></div>
+      </div>
+    </div>
+    <div class="share-perms-panel hidden" id="share-enc-${s.name}">
+      <div class="share-panel-inner" id="share-enc-inner-${s.name}">
+        <div class="loading-msg">Loading encryption status...</div>
       </div>
     </div>`;
   }).join('');
@@ -1449,6 +1456,147 @@ function saveSharePassword(name) {
     .catch(err => {
       msg.style.color = 'var(--red)';
       msg.textContent = String(err);
+    });
+}
+
+function toggleShareEnc(name) {
+  const panel = document.getElementById('share-enc-' + name);
+  if (!panel.classList.contains('hidden')) {
+    panel.classList.add('hidden');
+    return;
+  }
+  panel.classList.remove('hidden');
+  _loadEncPanel(name);
+}
+
+function _loadEncPanel(name) {
+  const inner = document.getElementById('share-enc-inner-' + name);
+  inner.innerHTML = '<div class="loading-msg">Checking encryption status...</div>';
+  let buf = '';
+  cockpit.spawn(['freeraid', 'share-encrypt-status', name], { superuser: 'require', err: 'out' })
+    .stream(d => { buf += d; })
+    .then(() => {
+      let status = { encrypted: false, unlocked: false };
+      try { status = JSON.parse(buf.trim()); } catch(_) {}
+      _renderEncPanel(name, status);
+    })
+    .catch(err => {
+      inner.innerHTML = `<div style="padding:8px;color:var(--red)">Error: ${err}</div>`;
+    });
+}
+
+function _renderEncPanel(name, status) {
+  const inner = document.getElementById('share-enc-inner-' + name);
+  const nameJson = JSON.stringify(name);
+  if (!status.encrypted) {
+    inner.innerHTML = `
+      <div class="panel-title">Encryption — ${name}</div>
+      <p style="font-size:0.85em;color:var(--text-dim);margin:0 0 12px">
+        Enable per-share encryption using gocryptfs. Files on disk will be encrypted at rest.
+        You will need to unlock the share after each reboot. Requires <code>gocryptfs</code> installed.
+      </p>
+      <label class="field-label">Encryption Password</label>
+      <input type="password" id="share-enc-pw-${name}" class="text-input" placeholder="Set a strong password" autocomplete="new-password">
+      <label class="field-label" style="margin-top:8px">Confirm Password</label>
+      <input type="password" id="share-enc-pw2-${name}" class="text-input" placeholder="Confirm password" autocomplete="new-password">
+      <div style="display:flex;gap:8px;margin-top:12px">
+        <button class="btn btn-primary btn-sm" onclick="doShareEncEnable(${nameJson})">Enable Encryption</button>
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('share-enc-${name}').classList.add('hidden')">Cancel</button>
+      </div>
+      <div id="share-enc-msg-${name}" style="margin-top:8px;font-size:0.85em"></div>`;
+  } else if (!status.unlocked) {
+    inner.innerHTML = `
+      <div class="panel-title">Encryption — ${name} <span class="badge badge-enc">Encrypted</span> <span class="badge" style="background:#2a1a1a;color:#f87171">Locked</span></div>
+      <p style="font-size:0.85em;color:var(--text-dim);margin:0 0 12px">
+        This share is encrypted and currently locked. Enter the password to unlock it and make files accessible.
+      </p>
+      <label class="field-label">Password</label>
+      <input type="password" id="share-enc-pw-${name}" class="text-input" placeholder="Encryption password" autocomplete="current-password">
+      <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+        <button class="btn btn-primary btn-sm" onclick="doShareEncUnlock(${nameJson})">Unlock</button>
+        <button class="btn btn-danger btn-sm" onclick="doShareEncDisable(${nameJson})">Remove Encryption</button>
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('share-enc-${name}').classList.add('hidden')">Cancel</button>
+      </div>
+      <div id="share-enc-msg-${name}" style="margin-top:8px;font-size:0.85em"></div>`;
+  } else {
+    inner.innerHTML = `
+      <div class="panel-title">Encryption — ${name} <span class="badge badge-enc">Encrypted</span> <span class="badge" style="background:#0d2b1a;color:var(--green)">Unlocked</span></div>
+      <p style="font-size:0.85em;color:var(--text-dim);margin:0 0 12px">
+        Share is encrypted and unlocked. Files are accessible. You can lock it now or remove encryption entirely.
+      </p>
+      <div style="display:flex;gap:8px;margin-top:4px;flex-wrap:wrap">
+        <button class="btn btn-secondary btn-sm" onclick="doShareEncLock(${nameJson})">Lock Now</button>
+        <button class="btn btn-danger btn-sm" onclick="doShareEncDisable(${nameJson})">Remove Encryption</button>
+        <button class="btn btn-ghost btn-sm" onclick="document.getElementById('share-enc-${name}').classList.add('hidden')">Cancel</button>
+      </div>
+      <div id="share-enc-msg-${name}" style="margin-top:8px;font-size:0.85em"></div>`;
+  }
+}
+
+function doShareEncEnable(name) {
+  const pw  = document.getElementById('share-enc-pw-'  + name).value;
+  const pw2 = document.getElementById('share-enc-pw2-' + name).value;
+  const msg = document.getElementById('share-enc-msg-' + name);
+  if (!pw) { msg.style.color = 'var(--red)'; msg.textContent = 'Password is required.'; return; }
+  if (pw !== pw2) { msg.style.color = 'var(--red)'; msg.textContent = 'Passwords do not match.'; return; }
+  msg.style.color = 'var(--text-dim)';
+  msg.textContent = 'Initialising vault... this may take a moment.';
+  cockpit.spawn(['freeraid', 'share-encrypt-enable', name, pw], { superuser: 'require', err: 'out' })
+    .then(() => {
+      msg.style.color = 'var(--green)';
+      msg.textContent = 'Encryption enabled. Share is now encrypted and unlocked.';
+      setTimeout(() => { refreshShares(); _loadEncPanel(name); }, 1500);
+    })
+    .catch(err => { msg.style.color = 'var(--red)'; msg.textContent = String(err); });
+}
+
+function doShareEncDisable(name) {
+  const inner = document.getElementById('share-enc-inner-' + name);
+  const pw = inner.querySelector('input[type="password"]') ? inner.querySelector('input[type="password"]').value : '';
+  if (!confirm('Remove encryption from "' + name + '"? All files will be decrypted and stored in plaintext.')) return;
+  if (!pw) {
+    const p = prompt('Enter the encryption password to decrypt files:');
+    if (!p) return;
+    _runEncCommand('share-encrypt-disable', name, p);
+  } else {
+    _runEncCommand('share-encrypt-disable', name, pw);
+  }
+}
+
+function doShareEncUnlock(name) {
+  const pw  = document.getElementById('share-enc-pw-' + name).value;
+  const msg = document.getElementById('share-enc-msg-' + name);
+  if (!pw) { msg.style.color = 'var(--red)'; msg.textContent = 'Password required.'; return; }
+  msg.style.color = 'var(--text-dim)'; msg.textContent = 'Unlocking...';
+  cockpit.spawn(['freeraid', 'share-encrypt-unlock', name, pw], { superuser: 'require', err: 'out' })
+    .then(() => {
+      msg.style.color = 'var(--green)'; msg.textContent = 'Unlocked.';
+      setTimeout(() => { refreshShares(); _loadEncPanel(name); }, 1000);
+    })
+    .catch(err => { msg.style.color = 'var(--red)'; msg.textContent = String(err); });
+}
+
+function doShareEncLock(name) {
+  const msg = document.getElementById('share-enc-msg-' + name);
+  msg.style.color = 'var(--text-dim)'; msg.textContent = 'Locking...';
+  cockpit.spawn(['freeraid', 'share-encrypt-lock', name], { superuser: 'require', err: 'out' })
+    .then(() => {
+      msg.style.color = 'var(--green)'; msg.textContent = 'Locked.';
+      setTimeout(() => { refreshShares(); _loadEncPanel(name); }, 1000);
+    })
+    .catch(err => { msg.style.color = 'var(--red)'; msg.textContent = String(err); });
+}
+
+function _runEncCommand(cmd, name, pw) {
+  const msg = document.getElementById('share-enc-msg-' + name);
+  if (msg) { msg.style.color = 'var(--text-dim)'; msg.textContent = 'Working...'; }
+  cockpit.spawn(['freeraid', cmd, name, pw], { superuser: 'require', err: 'out' })
+    .then(() => {
+      if (msg) { msg.style.color = 'var(--green)'; msg.textContent = 'Done.'; }
+      setTimeout(() => { refreshShares(); _loadEncPanel(name); }, 1200);
+    })
+    .catch(err => {
+      if (msg) { msg.style.color = 'var(--red)'; msg.textContent = String(err); }
     });
 }
 

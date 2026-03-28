@@ -1096,6 +1096,189 @@ cmd_shares_set_password() {
     fi
 }
 
+cmd_share_encrypt_enable() {
+    # Usage: freeraid share-encrypt-enable <name> <password>
+    # Creates a gocryptfs vault for the share and marks it encrypted.
+    # The vault lives at <share_path>/.vault and mounts back onto <share_path>.
+    local name="${1:-}" password="${2:-}"
+    [ -z "$name" ] || [ -z "$password" ] && die "Usage: freeraid share-encrypt-enable <name> <password>"
+
+    command -v gocryptfs &>/dev/null || die "gocryptfs is not installed. Run: apt-get install -y gocryptfs"
+
+    local existing
+    existing=$(jq -r --arg n "$name" '.shares[] | select(.name==$n) | .name' "$CONFIG_FILE" 2>/dev/null || true)
+    [ -z "$existing" ] && die "Share '$name' not found"
+
+    local already_enc
+    already_enc=$(jq -r --arg n "$name" '.shares[] | select(.name==$n) | .encrypted // false' "$CONFIG_FILE")
+    [ "$already_enc" = "true" ] && die "Share '$name' is already encrypted."
+
+    local share_path
+    share_path=$(jq -r --arg n "$name" '.shares[] | select(.name==$n) | .pool // "array"' "$CONFIG_FILE")
+    local pool_mnt
+    pool_mnt=$(cfg_pool_mountpoint)
+    if [ "$share_path" = "array" ] || [ -z "$share_path" ]; then
+        share_path="${pool_mnt}/${name}"
+    else
+        local extra_mnt
+        extra_mnt=$(jq -r --arg p "$share_path" '.pools // [] | .[] | select(.name==$p) | .mountpoint' "$CONFIG_FILE" 2>/dev/null || echo "")
+        share_path="${extra_mnt:-$pool_mnt}/${name}"
+    fi
+
+    local vault_dir="${share_path}/.vault"
+    mkdir -p "$vault_dir" "$share_path"
+
+    # Move existing share contents into vault staging area so they aren't lost
+    local staging="/tmp/freeraid_enc_stage_${name}"
+    mkdir -p "$staging"
+    shopt -s dotglob nullglob
+    local files=("${share_path}"/*)
+    for f in "${files[@]}"; do
+        [[ "$f" == "${vault_dir}" ]] && continue
+        mv "$f" "$staging/" 2>/dev/null || true
+    done
+    shopt -u dotglob nullglob
+
+    # Initialise the gocryptfs vault
+    echo "$password" | gocryptfs -init -passfile /dev/stdin "$vault_dir" 2>&1 \
+        || die "gocryptfs init failed"
+
+    # Mount vault onto share path
+    echo "$password" | gocryptfs -passfile /dev/stdin "$vault_dir" "$share_path" 2>&1 \
+        || die "gocryptfs mount failed"
+
+    # Restore files into the now-encrypted mount
+    if [ -d "$staging" ]; then
+        cp -a "$staging"/. "$share_path"/ 2>/dev/null || true
+        rm -rf "$staging"
+    fi
+
+    # Record in config
+    jq --arg n "$name" \
+       '(.shares[] | select(.name==$n)) |= . + {"encrypted":true}' \
+       "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+
+    info "Share '$name' is now encrypted and unlocked."
+}
+
+cmd_share_encrypt_disable() {
+    # Usage: freeraid share-encrypt-disable <name> <password>
+    local name="${1:-}" password="${2:-}"
+    [ -z "$name" ] || [ -z "$password" ] && die "Usage: freeraid share-encrypt-disable <name> <password>"
+
+    local share_path
+    share_path=$(_share_resolve_path "$name")
+
+    local vault_dir="${share_path}/.vault"
+    [ ! -d "$vault_dir" ] && die "No vault found for share '$name'"
+
+    # Unlock if not already mounted so we can decrypt files out
+    if ! mountpoint -q "$share_path" 2>/dev/null; then
+        echo "$password" | gocryptfs -passfile /dev/stdin "$vault_dir" "$share_path" 2>&1 \
+            || die "Could not unlock vault to decrypt — wrong password?"
+    fi
+
+    # Copy files out to a temp location
+    local staging="/tmp/freeraid_dec_stage_${name}"
+    mkdir -p "$staging"
+    shopt -s dotglob nullglob
+    local files=("${share_path}"/*)
+    for f in "${files[@]}"; do
+        cp -a "$f" "$staging/" 2>/dev/null || true
+    done
+    shopt -u dotglob nullglob
+
+    # Unmount
+    fusermount -u "$share_path" 2>/dev/null || umount "$share_path" 2>/dev/null || true
+
+    # Remove vault directory
+    rm -rf "$vault_dir"
+
+    # Restore plaintext files
+    cp -a "$staging"/. "$share_path"/ 2>/dev/null || true
+    rm -rf "$staging"
+
+    # Update config
+    jq --arg n "$name" \
+       '(.shares[] | select(.name==$n)) |= del(.encrypted)' \
+       "$CONFIG_FILE" > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+
+    info "Encryption removed from share '$name'. Files are now unencrypted."
+}
+
+cmd_share_encrypt_unlock() {
+    # Usage: freeraid share-encrypt-unlock <name> <password>
+    local name="${1:-}" password="${2:-}"
+    [ -z "$name" ] || [ -z "$password" ] && die "Usage: freeraid share-encrypt-unlock <name> <password>"
+
+    local share_path
+    share_path=$(_share_resolve_path "$name")
+    local vault_dir="${share_path}/.vault"
+    [ ! -d "$vault_dir" ] && die "No vault found for share '$name'. Is encryption enabled?"
+
+    if mountpoint -q "$share_path" 2>/dev/null; then
+        info "Share '$name' is already unlocked."
+        exit 0
+    fi
+
+    echo "$password" | gocryptfs -passfile /dev/stdin "$vault_dir" "$share_path" 2>&1 \
+        || die "Failed to unlock share '$name' — wrong password?"
+
+    info "Share '$name' unlocked."
+}
+
+cmd_share_encrypt_lock() {
+    # Usage: freeraid share-encrypt-lock <name>
+    local name="${1:-}"
+    [ -z "$name" ] && die "Usage: freeraid share-encrypt-lock <name>"
+
+    local share_path
+    share_path=$(_share_resolve_path "$name")
+
+    if ! mountpoint -q "$share_path" 2>/dev/null; then
+        info "Share '$name' is already locked."
+        exit 0
+    fi
+
+    fusermount -u "$share_path" 2>/dev/null || umount "$share_path" 2>/dev/null \
+        || die "Failed to lock share '$name' — files may still be open."
+
+    info "Share '$name' locked."
+}
+
+cmd_share_encrypt_status() {
+    # Usage: freeraid share-encrypt-status <name>
+    local name="${1:-}"
+    [ -z "$name" ] && die "Usage: freeraid share-encrypt-status <name>"
+
+    local encrypted
+    encrypted=$(jq -r --arg n "$name" '.shares[] | select(.name==$n) | .encrypted // false' "$CONFIG_FILE" 2>/dev/null || echo "false")
+
+    local share_path
+    share_path=$(_share_resolve_path "$name")
+    local unlocked="false"
+    if mountpoint -q "$share_path" 2>/dev/null; then
+        unlocked="true"
+    fi
+
+    echo "{\"encrypted\":${encrypted},\"unlocked\":${unlocked}}"
+}
+
+_share_resolve_path() {
+    local name="${1:-}"
+    local share_pool
+    share_pool=$(jq -r --arg n "$name" '.shares[] | select(.name==$n) | .pool // "array"' "$CONFIG_FILE" 2>/dev/null || echo "array")
+    local pool_mnt
+    pool_mnt=$(cfg_pool_mountpoint)
+    if [ "$share_pool" = "array" ] || [ -z "$share_pool" ]; then
+        echo "${pool_mnt}/${name}"
+    else
+        local extra_mnt
+        extra_mnt=$(jq -r --arg p "$share_pool" '.pools // [] | .[] | select(.name==$p) | .mountpoint' "$CONFIG_FILE" 2>/dev/null || echo "")
+        echo "${extra_mnt:-$pool_mnt}/${name}"
+    fi
+}
+
 cmd_shares_set_nfs() {
     # Usage: freeraid shares-set-nfs <name> <enabled:true|false> [clients] [options]
     local name="${1:-}" enabled="${2:-false}"
@@ -3586,6 +3769,11 @@ case "${1:-help}" in
     shares-set-perms) cmd_shares_set_perms "${2:-}" "${3:-}" "${4:-}" "${5:-}" ;;
     shares-set-password) cmd_shares_set_password "${2:-}" "${3:-}" ;;
     shares-import)    cmd_shares_import "${2:-}" ;;
+    share-encrypt-enable)   cmd_share_encrypt_enable "${2:-}" "${3:-}" ;;
+    share-encrypt-disable)  cmd_share_encrypt_disable "${2:-}" "${3:-}" ;;
+    share-encrypt-unlock)   cmd_share_encrypt_unlock "${2:-}" "${3:-}" ;;
+    share-encrypt-lock)     cmd_share_encrypt_lock "${2:-}" ;;
+    share-encrypt-status)   cmd_share_encrypt_status "${2:-}" ;;
     apps-fetch)        cmd_apps_fetch ;;
     apps-search)       cmd_apps_search "${2:-}" "${3:-50}" ;;
     apps-get)          cmd_apps_get "${2:-}" ;;
