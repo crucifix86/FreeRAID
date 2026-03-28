@@ -369,6 +369,7 @@ DefaultDependencies=no
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/bin/freeraid start
+ExecStartPost=/usr/local/bin/freeraid shares-apply
 ExecStop=/usr/local/bin/freeraid stop
 TimeoutStopSec=120
 
@@ -500,7 +501,9 @@ ExecStart=/bin/bash -c '\
     else \
         mount --bind /run/live/medium/config /boot/config || true; \
     fi; \
-    mkdir -p /boot/config /boot/config/compose'
+    mkdir -p /boot/config /boot/config/compose /boot/config/samba; \
+    mkdir -p /var/lib/samba; \
+    ln -sf /boot/config/samba/passdb.tdb /var/lib/samba/passdb.tdb 2>/dev/null || true'
 
 [Install]
 WantedBy=multi-user.target
