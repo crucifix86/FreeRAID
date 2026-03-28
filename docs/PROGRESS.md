@@ -281,6 +281,8 @@ Run `sudo vm/setup-vm-network.sh` once before starting the VM to set up TAP + pr
 
 ## What's Next (Planned)
 
+- [ ] **Bootable USB image** — single `dd`-able image that boots straight to FreeRAID (no Debian installer needed). Runs from RAM, config persists on USB. Optional "Install to disk" in Settings. Eliminates BIOS SD card boot issues and installer complexity entirely. v2.0 distribution target.
+- [ ] **Local GUI** — Chromium kiosk mode pointing at localhost:9090, for users who boot with a monitor attached. Same UI, zero extra code.
 - [x] Docker tab — list containers, start/stop/logs per app
 - [x] Multi-select delete for Docker containers
 - [x] Installer — `scripts/install.sh` installs onto any Debian 12 system
