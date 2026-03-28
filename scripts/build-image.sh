@@ -5,7 +5,7 @@
 #
 # Usage: sudo bash scripts/build-image.sh
 #
-# Requires: debootstrap mksquashfs busybox-static cpio gzip
+# Requires: debootstrap squashfs-tools busybox-static
 #   apt-get install -y debootstrap squashfs-tools busybox-static
 
 set -euo pipefail
@@ -28,13 +28,15 @@ for tool in debootstrap mksquashfs cpio gzip; do
         die "Missing: $tool — run: apt-get install -y debootstrap squashfs-tools busybox-static"
 done
 
+FREERAID_VERSION=$(cat "$REPO_DIR/VERSION" 2>/dev/null | tr -d '[:space:]' || echo "0.0.0")
+
 echo -e "${BOLD}"
 echo "  ███████╗██████╗ ███████╗███████╗██████╗  █████╗ ██╗██████╗ "
 echo "  ██╔════╝██╔══██╗██╔════╝██╔════╝██╔══██╗██╔══██╗██║██╔══██╗"
 echo "  █████╗  ██████╔╝█████╗  █████╗  ██████╔╝███████║██║██║  ██║"
 echo "  ██╔══╝  ██╔══██╗██╔══╝  ██╔══╝  ██╔══██╗██╔══██║██║██║  ██║"
 echo "  ██║     ██║  ██║███████╗███████╗██║  ██║██║  ██║██║██████╔╝"
-echo "  ╚═╝     ╚═╝  ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝╚═════╝"
+echo "  ╚═╝     ╚═╝  ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝╚═════╝ v${FREERAID_VERSION}"
 echo -e "${NC}  Live Image Builder"
 echo ""
 
@@ -61,8 +63,9 @@ else
         --arch=amd64 \
         --include=systemd,systemd-sysv,udev,kmod,iproute2,iputils-ping,\
 dnsutils,curl,wget,ca-certificates,openssh-server,sudo,\
-jq,xfsprogs,btrfs-progs,e2fsprogs,parted,hdparm,smartmontools,\
+jq,xfsprogs,btrfs-progs,e2fsprogs,fuse3,parted,hdparm,smartmontools,\
 samba,wsdd,avahi-daemon,nfs-kernel-server,unzip,python3,\
+snapraid,gocryptfs,msmtp,nut,nut-client,\
 linux-image-amd64,busybox,initramfs-tools \
         bookworm \
         "$ROOTFS" \
@@ -82,36 +85,45 @@ mount -t tmpfs tmpfs  "$ROOTFS/run"
 
 step "2/6" "Installing packages inside rootfs"
 
-# Copy resolv.conf for network access
 cp /etc/resolv.conf "$ROOTFS/etc/resolv.conf"
 
 chroot "$ROOTFS" bash -s <<'CHROOT'
 export DEBIAN_FRONTEND=noninteractive
 
-# Add non-free-firmware for NIC firmware (Intel, Realtek, etc.)
-grep -q non-free-firmware /etc/apt/sources.list || \
-    sed -i 's/^deb http.*bookworm main$/& contrib non-free-firmware/' /etc/apt/sources.list
+# Enable contrib + non-free-firmware for NIC firmware
+sed -i 's|^deb http://deb.debian.org/debian bookworm main$|deb http://deb.debian.org/debian bookworm main contrib non-free-firmware|' /etc/apt/sources.list
+
+# Add backports (for ZFS)
+echo "deb http://deb.debian.org/debian bookworm-backports main contrib non-free" \
+    > /etc/apt/sources.list.d/backports.list
 
 apt-get update -qq
 
-# Snapraid
-apt-get install -y -qq snapraid || \
-    echo "WARN: snapraid not in repos — install manually after boot"
+# NIC firmware (Intel, Realtek, Broadcom, etc.)
+apt-get install -y -qq firmware-linux firmware-realtek firmware-iwlwifi \
+    firmware-bnx2 firmware-atheros 2>/dev/null || true
 
-# NIC firmware (covers Intel i210/i350, Realtek, Broadcom, etc.)
-apt-get install -y -qq firmware-linux-free \
-    firmware-realtek firmware-iwlwifi firmware-bnx2 2>/dev/null || true
-
-# MergerFS (download latest deb)
+# MergerFS — detect arch and download correct deb
+ARCH=$(dpkg --print-architecture)
+MERGERFS_VER="2.40.2"
+case "$ARCH" in
+    amd64) MERGERFS_ARCH="amd64" ;;
+    arm64) MERGERFS_ARCH="arm64" ;;
+    armhf) MERGERFS_ARCH="armhf" ;;
+    *)     MERGERFS_ARCH="$ARCH" ;;
+esac
 if ! command -v mergerfs &>/dev/null; then
-    MERGERFS_VER="2.40.2"
-    MERGERFS_DEB="mergerfs_${MERGERFS_VER}.debian-bookworm_amd64.deb"
+    MERGERFS_DEB="mergerfs_${MERGERFS_VER}.debian-bookworm_${MERGERFS_ARCH}.deb"
     MERGERFS_URL="https://github.com/trapexit/mergerfs/releases/download/${MERGERFS_VER}/${MERGERFS_DEB}"
-    apt-get install -y -qq fuse
-    curl -fsSL "$MERGERFS_URL" -o /tmp/mergerfs.deb
-    dpkg -i /tmp/mergerfs.deb
-    rm /tmp/mergerfs.deb
+    curl -fsSL "$MERGERFS_URL" -o /tmp/mergerfs.deb \
+        && dpkg -i /tmp/mergerfs.deb \
+        && rm /tmp/mergerfs.deb \
+        || warn "mergerfs download failed — install manually after boot"
 fi
+
+# ZFS from backports
+apt-get install -y -t bookworm-backports zfsutils-linux 2>/dev/null || \
+    warn "ZFS install failed — may need reboot for kernel modules"
 
 # Docker
 if ! command -v docker &>/dev/null; then
@@ -119,12 +131,14 @@ if ! command -v docker &>/dev/null; then
 fi
 apt-get install -y -qq docker-compose-plugin 2>/dev/null || true
 
-# systemd-resolved for DNS
-apt-get install -y -qq systemd-resolved
-
 # Cockpit
-apt-get install -y -qq cockpit cockpit-networkmanager 2>/dev/null || \
-    apt-get install -y -qq cockpit
+apt-get install -y -qq cockpit 2>/dev/null || true
+
+# Virtualization
+apt-get install -y -qq qemu-kvm libvirt-daemon-system virtinst 2>/dev/null || true
+
+# systemd-resolved for DNS
+apt-get install -y -qq systemd-resolved 2>/dev/null || true
 
 apt-get clean
 rm -rf /var/lib/apt/lists/*
@@ -136,17 +150,17 @@ info "Packages installed"
 
 step "3/6" "Installing FreeRAID"
 
-# Copy FreeRAID files into rootfs
 INSTALL_DIR="$ROOTFS/usr/local/lib/freeraid"
 mkdir -p "$INSTALL_DIR"
-cp "$REPO_DIR/core/freeraid"            "$INSTALL_DIR/freeraid"
+cp "$REPO_DIR/core/freeraid"             "$INSTALL_DIR/freeraid"
 cp "$REPO_DIR/importer/unraid-import.py" "$INSTALL_DIR/unraid-import"
 chmod +x "$INSTALL_DIR/freeraid" "$INSTALL_DIR/unraid-import"
-ln -sf "$INSTALL_DIR/freeraid"    "$ROOTFS/usr/local/bin/freeraid"
+ln -sf "$INSTALL_DIR/freeraid"      "$ROOTFS/usr/local/bin/freeraid"
 ln -sf "$INSTALL_DIR/unraid-import" "$ROOTFS/usr/local/bin/freeraid-import"
 
 # Cockpit plugin
-mkdir -p "$ROOTFS/usr/share/cockpit/freeraid"
+COCKPIT_DIR="$ROOTFS/usr/share/cockpit/freeraid"
+mkdir -p "$COCKPIT_DIR"
 cp "$REPO_DIR/web/freeraid/manifest.json" \
    "$REPO_DIR/web/freeraid/index.html" \
    "$REPO_DIR/web/freeraid/freeraid.css" \
@@ -155,93 +169,75 @@ cp "$REPO_DIR/web/freeraid/manifest.json" \
    "$REPO_DIR/web/freeraid/xterm.js" \
    "$REPO_DIR/web/freeraid/xterm.css" \
    "$REPO_DIR/web/freeraid/xterm-addon-fit.js" \
-   "$ROOTFS/usr/share/cockpit/freeraid/"
+   "$COCKPIT_DIR/"
 
-# Hide Cockpit chrome — FreeRAID owns the UI
-cp "$REPO_DIR/web/branding.css" "$ROOTFS/usr/share/cockpit/branding/debian/branding.css"
+# Branding — hide Cockpit chrome
+BRANDING_DIR="$ROOTFS/usr/share/cockpit/branding/default"
+mkdir -p "$BRANDING_DIR"
+cp "$REPO_DIR/web/branding.css" "$BRANDING_DIR/branding.css"
+cp "$REPO_DIR/web/login.html"   "$BRANDING_DIR/login.html"
 
-# Custom login page (themed + remember-login)
-cp "$REPO_DIR/web/login.html" "$ROOTFS/usr/share/cockpit/static/login.html"
-
-# Avahi SMB advertisement (network discovery in Linux file managers)
+# Avahi SMB advertisement
 mkdir -p "$ROOTFS/etc/avahi/services"
-cp "$REPO_DIR/config/avahi-smb.service" "$ROOTFS/etc/avahi/services/smb.service"
+cat > "$ROOTFS/etc/avahi/services/smb.service" <<'EOF'
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<service-group>
+  <name replace-wildcards="yes">%h</name>
+  <service>
+    <type>_smb._tcp</type>
+    <port>445</port>
+  </service>
+</service-group>
+EOF
 
-# wsdd workgroup config (no hardcoded interface — works on any hardware)
+# wsdd config
 echo 'WSDD_PARAMS="-w WORKGROUP"' > "$ROOTFS/etc/default/wsdd"
 
-# VERSION
+# Version file
 mkdir -p "$ROOTFS/etc/freeraid"
-cp "$REPO_DIR/VERSION" "$ROOTFS/etc/freeraid/VERSION"
+echo "$FREERAID_VERSION" > "$ROOTFS/etc/freeraid/VERSION"
 
-# First-boot import script
-cat > "$ROOTFS/usr/local/lib/freeraid/freeraid-firstboot" <<'FIRSTBOOT'
+# Compose files
+mkdir -p "$ROOTFS/etc/freeraid/compose" "$ROOTFS/etc/freeraid/plugins"
+cp "$REPO_DIR/compose/"*.docker-compose.yml "$ROOTFS/etc/freeraid/compose/" 2>/dev/null || true
+
+# VM and ZFS directories
+mkdir -p "$ROOTFS/var/lib/freeraid/vms"
+mkdir -p "$ROOTFS/mnt/user/isos"
+mkdir -p "$ROOTFS/mnt/zfs"
+
+# First-boot importer
+cat > "$INSTALL_DIR/freeraid-firstboot" <<'FIRSTBOOT'
 #!/bin/bash
-# FreeRAID first-boot importer
-# Runs once on first boot if /boot/config/unraid-backup.zip exists.
-# Extracts the Unraid backup, imports shares + docker apps + network config,
-# and writes the result to /boot/config/freeraid.conf.json.
-
 BACKUP="/boot/config/unraid-backup.zip"
 FLAG="/boot/config/.unraid-imported"
 COMPOSE_DIR="/etc/freeraid/compose"
 
-[ -f "$BACKUP" ] || { echo "FreeRAID: no Unraid backup found, skipping first-boot import"; exit 0; }
-[ -f "$FLAG"   ] && { echo "FreeRAID: already imported, skipping"; exit 0; }
+[ -f "$BACKUP" ] || exit 0
+[ -f "$FLAG"   ] && exit 0
 
-echo ""
-echo "  ┌─────────────────────────────────────────────┐"
-echo "  │  FreeRAID: importing Unraid backup...        │"
-echo "  └─────────────────────────────────────────────┘"
-echo ""
-
+echo "FreeRAID: importing Unraid backup..."
 TMPDIR=$(mktemp -d /tmp/freeraid-firstboot-XXXXXX)
 trap "rm -rf '$TMPDIR'" EXIT
-
-echo "  Extracting backup..."
 unzip -q "$BACKUP" -d "$TMPDIR" 2>/dev/null || true
 
-# Find the config directory (contains disk.cfg or ident.cfg)
 CONFDIR=$(find "$TMPDIR" \( -name "disk.cfg" -o -name "ident.cfg" \) 2>/dev/null \
     | head -1 | xargs dirname 2>/dev/null || echo "")
-[ -z "$CONFDIR" ] && CONFDIR=$(find "$TMPDIR" -type d -name "config" 2>/dev/null | head -1 || echo "")
+[ -z "$CONFDIR" ] && CONFDIR=$(find "$TMPDIR" -type d -name "config" | head -1 || echo "")
+[ -z "$CONFDIR" ] && { echo "FreeRAID: could not find config in backup"; exit 1; }
 
-if [ -z "$CONFDIR" ] || [ ! -d "$CONFDIR" ]; then
-    echo "  ERROR: could not find Unraid config directory in backup"
-    echo "  Import skipped. Assign drives manually via the web UI."
-    exit 1
-fi
-
-echo "  Config directory: $CONFDIR"
-
-# Count what we found
-SHARES=$(ls "$CONFDIR/shares/"*.cfg 2>/dev/null | wc -l || echo 0)
-DOCKER=$(ls "$CONFDIR/plugins/dockerMan/templates-user/"*.xml 2>/dev/null | wc -l || echo 0)
-echo "  Found: $SHARES shares, $DOCKER Docker apps"
-
-# Run full importer — writes freeraid.conf.json + compose files
 mkdir -p "$COMPOSE_DIR"
 python3 /usr/local/lib/freeraid/unraid-import \
     "$CONFDIR" \
     --out /boot/config/freeraid.conf.json \
     --compose-dir "$COMPOSE_DIR" \
-    && echo "  Import complete!" \
-    || { echo "  WARN: importer returned error — partial import may have succeeded"; }
-
-# Mark as done so we don't re-run on next boot
-date -Iseconds > "$FLAG"
-
-echo ""
-echo "  Unraid config imported. Your shares and Docker apps are ready."
-echo "  Assign your drives in the web UI, then start the array."
-echo ""
+    && date -Iseconds > "$FLAG" \
+    && echo "FreeRAID: import complete." \
+    || echo "FreeRAID: import had errors — check /boot/config/freeraid.conf.json"
 FIRSTBOOT
-chmod +x "$ROOTFS/usr/local/lib/freeraid/freeraid-firstboot"
-ln -sf /usr/local/lib/freeraid/freeraid-firstboot "$ROOTFS/usr/local/bin/freeraid-firstboot"
-
-# Compose files dir
-mkdir -p "$ROOTFS/etc/freeraid/compose"
-cp "$REPO_DIR/compose/"*.docker-compose.yml "$ROOTFS/etc/freeraid/compose/" 2>/dev/null || true
+chmod +x "$INSTALL_DIR/freeraid-firstboot"
+ln -sf "$INSTALL_DIR/freeraid-firstboot" "$ROOTFS/usr/local/bin/freeraid-firstboot"
 
 info "FreeRAID installed into rootfs"
 
@@ -249,56 +245,35 @@ info "FreeRAID installed into rootfs"
 
 step "4/6" "Configuring live system"
 
-FREERAID_VERSION=$(cat "$REPO_DIR/VERSION" | tr -d '[:space:]')
-
 chroot "$ROOTFS" bash -s <<CHROOT
 # Hostname
 echo "freeraid" > /etc/hostname
 echo "127.0.1.1  freeraid" >> /etc/hosts
 
-# freeraid user, password freeraid
-useradd -m -s /bin/bash -G sudo,docker freeraid 2>/dev/null || true
-echo "freeraid:freeraid" | chpasswd
-echo "root:freeraid"     | chpasswd
-echo "freeraid ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/freeraid
+# Root password: freeraid (user changes at first login)
+echo "root:freeraid" | chpasswd
 
-# Allow root cockpit login
+# Cockpit — allow root, clear disallowed-users
 mkdir -p /etc/cockpit
 cat > /etc/cockpit/cockpit.conf <<'CONF'
 [WebService]
 LoginTitle = FreeRAID
 Origins = *
-ProtocolHeader = X-Forwarded-Proto
-
-[Login]
-# Allow freeraid user without pam restrictions
 CONF
-[ -f /etc/cockpit/disallowed-users ] && sed -i '/^root$/d' /etc/cockpit/disallowed-users || true
+# Empty disallowed-users so root can log in
+> /etc/cockpit/disallowed-users
 
-# Hide built-in Cockpit nav pages that FreeRAID replaces
-for pkg in networkmanager storaged packagekit apps; do
-    mkdir -p /usr/local/share/cockpit/$pkg
-    echo '{"hidden": true}' > /usr/local/share/cockpit/$pkg/manifest.json
-done
+# MOTD at SSH login
+cat > /etc/profile.d/freeraid-motd.sh <<'MOTD'
+IP=\$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print \$7; exit}' || hostname -I | awk '{print \$1}')
+echo ""
+echo "  FreeRAID \$(cat /etc/freeraid/VERSION 2>/dev/null)"
+echo "  Web UI : https://\${IP}:9090"
+echo "  Login  : root / freeraid"
+echo ""
+MOTD
 
-# Hide entire Cockpit sidebar/chrome — FreeRAID owns the UI
-mkdir -p /usr/local/share/cockpit/branding-debian
-cat > /usr/local/share/cockpit/branding-debian/branding.css << 'BRANDEOF'
-/* FreeRAID — hide Cockpit chrome, FreeRAID owns the UI */
-#nav-system, #sidebar-toggle, #hosts-sel,
-.pf-c-page__sidebar, .ct-switcher, .header-actions, #nav-hosts {
-  display: none !important;
-}
-#content, .area-ct-content, .ct-page-fill, .pf-c-page__main {
-  margin-left: 0 !important;
-  padding-left: 0 !important;
-}
-#topnav, .pf-c-masthead, .ct-topbar {
-  display: none !important;
-}
-BRANDEOF
-
-# Network: DHCP on all interfaces via networkd
+# Network: DHCP on all wired interfaces
 mkdir -p /etc/systemd/network
 cat > /etc/systemd/network/20-wired.network <<'NET'
 [Match]
@@ -312,13 +287,16 @@ MulticastDNS=yes
 RouteMetric=10
 NET
 
-systemctl enable systemd-networkd  || true
-systemctl enable systemd-resolved  || true
-systemctl enable ssh               || true
-systemctl enable cockpit.socket    || true
-systemctl enable docker            || true
+# Systemd services
+systemctl enable systemd-networkd 2>/dev/null || true
+systemctl enable systemd-resolved 2>/dev/null || true
+systemctl enable ssh              2>/dev/null || true
+systemctl enable cockpit.socket   2>/dev/null || true
+systemctl enable docker           2>/dev/null || true
+systemctl enable avahi-daemon     2>/dev/null || true
+systemctl enable libvirtd         2>/dev/null || true
 
-# FreeRAID array auto-start
+# FreeRAID array service
 cat > /etc/systemd/system/freeraid-array.service <<'SVC'
 [Unit]
 Description=FreeRAID Array
@@ -336,32 +314,82 @@ TimeoutStopSec=120
 WantedBy=multi-user.target
 SVC
 
-cat > /etc/systemd/system/freeraid-sync.timer <<'SVC'
-[Unit]
-Description=FreeRAID SnapRAID daily sync
-
-[Timer]
-OnCalendar=*-*-* 03:00:00
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-SVC
-
 cat > /etc/systemd/system/freeraid-sync.service <<'SVC'
 [Unit]
 Description=FreeRAID SnapRAID Sync
 After=freeraid-array.service
-
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/freeraid sync
 SVC
 
-systemctl enable freeraid-array.service    || true
-systemctl enable freeraid-sync.timer       || true
+cat > /etc/systemd/system/freeraid-sync.timer <<'SVC'
+[Unit]
+Description=FreeRAID nightly SnapRAID sync
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+[Install]
+WantedBy=timers.target
+SVC
 
-# First-boot import service (runs once if unraid-backup.zip is on the USB)
+cat > /etc/systemd/system/freeraid-scrub.service <<'SVC'
+[Unit]
+Description=FreeRAID SnapRAID Scrub
+After=freeraid-array.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/freeraid scrub
+SVC
+
+cat > /etc/systemd/system/freeraid-scrub.timer <<'SVC'
+[Unit]
+Description=FreeRAID weekly SnapRAID scrub
+[Timer]
+OnCalendar=Sun *-*-* 04:00:00
+Persistent=true
+[Install]
+WantedBy=timers.target
+SVC
+
+cat > /etc/systemd/system/freeraid-mover.service <<'SVC'
+[Unit]
+Description=FreeRAID Cache Mover
+After=freeraid-array.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/freeraid cache-move
+SVC
+
+cat > /etc/systemd/system/freeraid-mover.timer <<'SVC'
+[Unit]
+Description=FreeRAID nightly cache mover
+[Timer]
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+[Install]
+WantedBy=timers.target
+SVC
+
+cat > /etc/systemd/system/freeraid-docker-update.service <<'SVC'
+[Unit]
+Description=FreeRAID Docker Auto-Update
+After=docker.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/freeraid docker-update-all
+SVC
+
+cat > /etc/systemd/system/freeraid-docker-update.timer <<'SVC'
+[Unit]
+Description=FreeRAID nightly Docker auto-update
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+[Install]
+WantedBy=timers.target
+SVC
+
 cat > /etc/systemd/system/freeraid-firstboot.service <<'SVC'
 [Unit]
 Description=FreeRAID First Boot Import
@@ -369,106 +397,66 @@ After=local-fs.target
 Before=freeraid-array.service
 ConditionPathExists=/boot/config/unraid-backup.zip
 ConditionPathExists=!/boot/config/.unraid-imported
-
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/bin/freeraid-firstboot
 StandardOutput=journal+console
 StandardError=journal+console
-
 [Install]
 WantedBy=multi-user.target
 SVC
-systemctl enable freeraid-firstboot.service || true
 
-# Default FreeRAID config — will be overwritten by USB config/ on boot
-mkdir -p /boot/config
-# (actual config/ comes from USB mount at boot time)
-
-# Show IP and web UI URL at login
-cat > /etc/profile.d/freeraid-motd.sh <<'MOTD'
-if [ -f /run/freeraid-ip ]; then
-    IP=\$(cat /run/freeraid-ip)
-    echo ""
-    echo "  FreeRAID v\$(cat /etc/freeraid/VERSION 2>/dev/null)"
-    echo "  Web UI: https://\${IP}:9090"
-    echo "  Login:  freeraid / freeraid"
-    echo ""
-fi
-MOTD
-
-# Service that writes IP to /run/freeraid-ip after network is up
-cat > /etc/systemd/system/freeraid-announce.service <<'SVC'
-[Unit]
-Description=FreeRAID IP Announce
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/bin/bash -c 'IP=\$(ip -4 route get 1.1.1.1 2>/dev/null | awk "{print \$7; exit}"); echo "\$IP" > /run/freeraid-ip; echo "FreeRAID ready: https://\$IP:9090"'
-
-[Install]
-WantedBy=multi-user.target
-SVC
-systemctl enable freeraid-announce.service || true
-
-# Write login banner (updated on first boot when IP is known)
-cat > /etc/issue <<'ISSUE'
-
-  FreeRAID — Open source NAS OS
-  Web UI: https://<server-ip>:9090   Login: freeraid / freeraid
-
-ISSUE
+systemctl enable freeraid-array.service        2>/dev/null || true
+systemctl enable freeraid-sync.timer           2>/dev/null || true
+systemctl enable freeraid-scrub.timer          2>/dev/null || true
+systemctl enable freeraid-mover.timer          2>/dev/null || true
+systemctl enable freeraid-docker-update.timer  2>/dev/null || true
+systemctl enable freeraid-firstboot.service    2>/dev/null || true
 
 CHROOT
 
 info "Live system configured"
 
-# ── Step 5: Create custom initrd ──────────────────────────────────────────────
+# ── Step 5: Build custom initrd ───────────────────────────────────────────────
 
 step "5/6" "Building custom initrd (live boot)"
 
 INITRD_DIR=$(mktemp -d /tmp/freeraid-initrd-XXXXXX)
 mkdir -p "$INITRD_DIR"/{bin,sbin,lib,lib64,lib/x86_64-linux-gnu,dev,proc,sys,run,mnt/usb,mnt/squash,mnt/overlay,newroot}
 
-# Busybox provides all the tools we need (sh, mount, blkid, switch_root, etc)
-cp /usr/lib/busybox/busybox-x86_64 "$INITRD_DIR/bin/busybox" 2>/dev/null || \
-    cp $(which busybox) "$INITRD_DIR/bin/busybox"
+# Busybox
+BUSYBOX_BIN=$(find /usr/lib/busybox /usr/bin -name "busybox*" -type f 2>/dev/null | head -1)
+[ -z "$BUSYBOX_BIN" ] && BUSYBOX_BIN=$(which busybox 2>/dev/null)
+[ -z "$BUSYBOX_BIN" ] && die "busybox not found — install busybox-static"
+cp "$BUSYBOX_BIN" "$INITRD_DIR/bin/busybox"
 chmod +x "$INITRD_DIR/bin/busybox"
 
-# Create busybox symlinks
 for cmd in sh ash mount umount mkdir mknod modprobe insmod sleep \
-           blkid switch_root echo cat ls grep awk sed; do
+           blkid switch_root echo cat ls grep awk sed find; do
     ln -sf busybox "$INITRD_DIR/bin/$cmd" 2>/dev/null || true
 done
-ln -sf ../bin/busybox "$INITRD_DIR/sbin/init" 2>/dev/null || true
+ln -sf ../bin/sh "$INITRD_DIR/sbin/init" 2>/dev/null || true
 
-# Copy blkid (real binary — busybox blkid may not support -L)
+# Real blkid for reliable label lookups
 if [ -f /sbin/blkid ]; then
     cp /sbin/blkid "$INITRD_DIR/sbin/blkid"
-    # Copy its library deps
     ldd /sbin/blkid 2>/dev/null | awk '/=>/{print $3}' | while read lib; do
         [ -f "$lib" ] && cp "$lib" "$INITRD_DIR/lib/x86_64-linux-gnu/" 2>/dev/null || true
     done
-    cp /lib/x86_64-linux-gnu/libblkid.so.1  "$INITRD_DIR/lib/x86_64-linux-gnu/" 2>/dev/null || true
-    cp /lib/x86_64-linux-gnu/libmount.so.1  "$INITRD_DIR/lib/x86_64-linux-gnu/" 2>/dev/null || true
-    cp /lib/x86_64-linux-gnu/libuuid.so.1   "$INITRD_DIR/lib/x86_64-linux-gnu/" 2>/dev/null || true
-    cp /lib/x86_64-linux-gnu/libc.so.6      "$INITRD_DIR/lib/x86_64-linux-gnu/" 2>/dev/null || true
-    ln -sf x86_64-linux-gnu/ld-linux-x86-64.so.2 "$INITRD_DIR/lib64/ld-linux-x86-64.so.2" 2>/dev/null || \
-    cp /lib64/ld-linux-x86-64.so.2 "$INITRD_DIR/lib64/" 2>/dev/null || true
+    for lib in libblkid.so.1 libmount.so.1 libuuid.so.1 libc.so.6; do
+        find /lib /usr/lib -name "$lib" 2>/dev/null | head -1 | \
+            xargs -I{} cp {} "$INITRD_DIR/lib/x86_64-linux-gnu/" 2>/dev/null || true
+    done
+    find /lib64 /usr/lib64 /lib -name "ld-linux-x86-64.so.2" 2>/dev/null | head -1 | \
+        xargs -I{} cp {} "$INITRD_DIR/lib64/" 2>/dev/null || true
 fi
 
-# Write the init script
 cat > "$INITRD_DIR/init" <<'INIT'
 #!/bin/sh
 export PATH=/bin:/sbin
 
-# Basic mounts
-mount -t devtmpfs devtmpfs /dev     2>/dev/null || \
-    mknod /dev/null c 1 3 2>/dev/null || true
+mount -t devtmpfs devtmpfs /dev  2>/dev/null || true
 mount -t proc     proc     /proc
 mount -t sysfs    sysfs    /sys
 mount -t tmpfs    tmpfs    /run
@@ -477,57 +465,54 @@ echo ""
 echo "  FreeRAID — starting..."
 echo ""
 
-# Load needed modules
 modprobe squashfs  2>/dev/null || true
 modprobe overlay   2>/dev/null || true
 modprobe vfat      2>/dev/null || true
 modprobe usb_storage 2>/dev/null || true
 modprobe uas       2>/dev/null || true
+modprobe mmc_block 2>/dev/null || true
 
-# Wait for the FREERAID USB to appear (up to 30s)
+# Find FREERAID USB by label (up to 30s)
 USB_PART=""
 for i in $(seq 1 30); do
     USB_PART=$(blkid -L FREERAID 2>/dev/null || /sbin/blkid -L FREERAID 2>/dev/null || true)
     [ -n "$USB_PART" ] && break
-    echo "  Waiting for FREERAID USB... ($i)"
+    echo "  Waiting for FREERAID drive... ($i)"
     sleep 1
 done
 
 if [ -z "$USB_PART" ]; then
-    echo "ERROR: FREERAID USB drive not found!"
-    echo "       Make sure the USB labeled FREERAID is plugged in."
+    echo ""
+    echo "  ERROR: FREERAID drive not found!"
+    echo "  Make sure the FreeRAID USB is plugged in and labeled FREERAID."
+    echo ""
     exec /bin/sh
 fi
 
-echo "  Found FREERAID USB: $USB_PART"
+echo "  Found: $USB_PART"
 
-# Mount USB
-mount -t vfat -o ro,noatime "$USB_PART" /mnt/usb
-echo "  USB mounted"
+# Mount USB read-write (config/ must be writable)
+mount -t vfat -o rw,noatime "$USB_PART" /mnt/usb || {
+    echo "  ERROR: Failed to mount $USB_PART"
+    exec /bin/sh
+}
 
-# Mount squashfs (the live OS)
-mount -t squashfs -o ro,loop /mnt/usb/rootfs.squashfs /mnt/squash
-echo "  OS image mounted"
+# Mount squashfs OS image
+mount -t squashfs -o ro,loop /mnt/usb/rootfs.squashfs /mnt/squash || {
+    echo "  ERROR: Failed to mount rootfs.squashfs"
+    exec /bin/sh
+}
 
-# Overlay: read-only squash + tmpfs for writes (changes lost on reboot)
-mount -t tmpfs -o size=512m tmpfs /mnt/overlay
+# Overlay: squashfs (ro) + tmpfs (rw writes, lost on reboot)
+mount -t tmpfs -o size=1g tmpfs /mnt/overlay
 mkdir -p /mnt/overlay/upper /mnt/overlay/work
 mount -t overlay overlay \
     -o lowerdir=/mnt/squash,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work \
     /newroot
-echo "  Overlay filesystem ready"
 
-# Mount the USB config/ directory at /boot/config (PERSISTENT)
-mkdir -p /newroot/boot/config /mnt/usb/config
-mount -t vfat -o rw,noatime "$USB_PART" /mnt/usb-rw 2>/dev/null && \
-    mount --bind /mnt/usb-rw/config /newroot/boot/config 2>/dev/null || {
-    # Remount USB rw for config writes
-    umount /mnt/usb 2>/dev/null || true
-    mount -t vfat -o rw,noatime "$USB_PART" /mnt/usb
-    mkdir -p /mnt/usb/config
-    mount --bind /mnt/usb/config /newroot/boot/config
-}
-echo "  Config directory: /boot/config (persists to USB)"
+# Config directory — bind USB config/ to /boot/config (PERSISTENT across reboots)
+mkdir -p /mnt/usb/config /newroot/boot/config
+mount --bind /mnt/usb/config /newroot/boot/config
 
 # Move essential mounts into newroot
 mkdir -p /newroot/proc /newroot/sys /newroot/dev /newroot/run
@@ -538,19 +523,17 @@ mount --move /run  /newroot/run
 
 echo "  Booting FreeRAID..."
 echo ""
-
 exec switch_root /newroot /sbin/init
 INIT
 
 chmod +x "$INITRD_DIR/init"
 
-# Package as initrd
 info "Packing initrd..."
 ( cd "$INITRD_DIR"; find . | cpio -o --format=newc --quiet | gzip -9 ) > "$BUILD_DIR/initrd.gz"
 rm -rf "$INITRD_DIR"
 info "initrd.gz: $(du -sh "$BUILD_DIR/initrd.gz" | cut -f1)"
 
-# ── Unmount chroot mounts before squashfs ─────────────────────────────────────
+# ── Unmount chroot before squashfs ────────────────────────────────────────────
 
 umount -lf "$ROOTFS/proc"    2>/dev/null || true
 umount -lf "$ROOTFS/sys"     2>/dev/null || true
@@ -563,13 +546,11 @@ trap - EXIT
 
 step "6/6" "Building squashfs and copying kernel"
 
-# Copy the kernel out of the rootfs
-KERNEL=$(ls "$ROOTFS/boot/vmlinuz-"* 2>/dev/null | head -1)
+KERNEL=$(ls "$ROOTFS/boot/vmlinuz-"* 2>/dev/null | tail -1)
 [ -f "$KERNEL" ] || die "No kernel found in $ROOTFS/boot/"
 cp "$KERNEL" "$BUILD_DIR/vmlinuz"
 info "Kernel: $(basename $KERNEL)"
 
-# Build squashfs (exclude things that don't need to be in the image)
 info "Building rootfs.squashfs (this takes a few minutes)..."
 rm -f "$BUILD_DIR/rootfs.squashfs"
 mksquashfs "$ROOTFS" "$BUILD_DIR/rootfs.squashfs" \
@@ -591,10 +572,10 @@ info "rootfs.squashfs: $(du -sh "$BUILD_DIR/rootfs.squashfs" | cut -f1)"
 echo ""
 echo -e "${GREEN}${BOLD}Build complete!${NC}"
 echo ""
-echo "  Build artifacts in $BUILD_DIR:"
+echo "  Artifacts in $BUILD_DIR:"
 ls -lh "$BUILD_DIR/"
 echo ""
-echo "  Now write to a USB drive:"
+echo "  Write to USB:"
 echo "    sudo bash scripts/create-usb.sh /dev/sdX"
 echo "    sudo bash scripts/create-usb.sh /dev/sdX /path/to/unraid-backup.zip"
 echo ""
