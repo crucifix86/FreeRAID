@@ -491,14 +491,14 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/bin/bash -c '\
     mkdir -p /boot/config; \
-    DEV=$(blkid -L FREERAID 2>/dev/null || findfs LABEL=FREERAID 2>/dev/null || echo ""); \
-    if [ -n "$DEV" ]; then \
-        mount -o rw,uid=0,gid=0 "$DEV" /boot/config || \
+    DEV=\$(blkid -L FREERAID 2>/dev/null || findfs LABEL=FREERAID 2>/dev/null || echo ""); \
+    if [ -n "\$DEV" ]; then \
+        mount -o rw,uid=0,gid=0 "\$DEV" /boot/config || \
         mount --bind /run/live/medium/config /boot/config || true; \
     else \
         mount --bind /run/live/medium/config /boot/config || true; \
     fi; \
-    mkdir -p /boot/config'
+    mkdir -p /boot/config /boot/config/compose'
 
 [Install]
 WantedBy=multi-user.target
