@@ -4111,6 +4111,14 @@ cmd_setup_status() {
 cmd_setup_complete() {
     jq '.setup_complete = true' "$CONFIG_FILE" > /tmp/freeraid.conf.tmp \
         && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+
+    # Ensure root has a Samba account so shares are accessible immediately
+    if ! pdbedit -L -u root &>/dev/null; then
+        printf 'freeraid\nfreeraid\n' | pdbedit -a -u root -t &>/dev/null || \
+            printf 'freeraid\nfreeraid\n' | smbpasswd -a -s root &>/dev/null || true
+    fi
+    smbpasswd -e root &>/dev/null || true
+
     info "Setup marked as complete."
 }
 
