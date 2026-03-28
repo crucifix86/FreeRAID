@@ -444,9 +444,9 @@ step "5/6" "Building custom initrd (live boot)"
 INITRD_DIR=$(mktemp -d /tmp/freeraid-initrd-XXXXXX)
 mkdir -p "$INITRD_DIR"/{bin,sbin,lib,lib64,lib/x86_64-linux-gnu,dev,proc,sys,run,mnt/usb,mnt/squash,mnt/overlay,newroot}
 
-# Busybox
-BUSYBOX_BIN=$(find /usr/lib/busybox /usr/bin -name "busybox*" -type f 2>/dev/null | head -1)
-[ -z "$BUSYBOX_BIN" ] && BUSYBOX_BIN=$(which busybox 2>/dev/null)
+# Busybox — search common locations, use || true to prevent pipefail killing script
+BUSYBOX_BIN=$(which busybox 2>/dev/null || true)
+[ -z "$BUSYBOX_BIN" ] && BUSYBOX_BIN=$(find /usr/bin /bin /usr/lib/busybox -name "busybox" -type f 2>/dev/null | head -1 || true)
 [ -z "$BUSYBOX_BIN" ] && die "busybox not found — install busybox-static"
 cp "$BUSYBOX_BIN" "$INITRD_DIR/bin/busybox"
 chmod +x "$INITRD_DIR/bin/busybox"
@@ -458,16 +458,18 @@ done
 ln -sf ../bin/sh "$INITRD_DIR/sbin/init" 2>/dev/null || true
 
 # Real blkid for reliable label lookups
-if [ -f /sbin/blkid ]; then
-    cp /sbin/blkid "$INITRD_DIR/sbin/blkid"
-    ldd /sbin/blkid 2>/dev/null | awk '/=>/{print $3}' | while read lib; do
+BLKID_BIN=$(which blkid 2>/dev/null || true)
+if [ -n "$BLKID_BIN" ] && [ -f "$BLKID_BIN" ]; then
+    cp "$BLKID_BIN" "$INITRD_DIR/sbin/blkid"
+    # Copy shared library deps
+    ldd "$BLKID_BIN" 2>/dev/null | awk '/=>/{print $3}' | while read lib; do
         [ -f "$lib" ] && cp "$lib" "$INITRD_DIR/lib/x86_64-linux-gnu/" 2>/dev/null || true
-    done
+    done || true
     for lib in libblkid.so.1 libmount.so.1 libuuid.so.1 libc.so.6; do
         find /lib /usr/lib -name "$lib" 2>/dev/null | head -1 | \
             xargs -I{} cp {} "$INITRD_DIR/lib/x86_64-linux-gnu/" 2>/dev/null || true
     done
-    find /lib64 /usr/lib64 /lib -name "ld-linux-x86-64.so.2" 2>/dev/null | head -1 | \
+    find /lib64 /usr/lib64 /lib/x86_64-linux-gnu -name "ld-linux-x86-64.so.2" 2>/dev/null | head -1 | \
         xargs -I{} cp {} "$INITRD_DIR/lib64/" 2>/dev/null || true
 fi
 
