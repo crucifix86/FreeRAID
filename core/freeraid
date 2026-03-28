@@ -617,15 +617,16 @@ cmd_disks_scan() {
 
     # Detect the live boot medium device to exclude it.
     # With toram, /run/live/medium is a tmpfs (/dev/shm) not the USB.
-    # Fall back to blkid FREERAID label to find the real boot device.
+    # Primary: blkid FREERAID label (reliable regardless of live-boot state).
+    # Secondary: findmnt live medium (works before toram releases USB).
     local live_dev=""
-    local _src
-    _src=$(findmnt -n -o SOURCE /run/live/medium 2>/dev/null | sed 's/[0-9]*$//' || echo "")
-    [ -b "$_src" ] && live_dev="$_src"
+    local label_dev
+    label_dev=$(blkid -L FREERAID 2>/dev/null || echo "")
+    [ -n "$label_dev" ] && live_dev=$(echo "$label_dev" | sed 's/[0-9]*$//')
     if [ -z "$live_dev" ]; then
-        local label_dev
-        label_dev=$(blkid -L FREERAID 2>/dev/null || echo "")
-        [ -n "$label_dev" ] && live_dev=$(echo "$label_dev" | sed 's/[0-9]*$//')
+        local _src
+        _src=$(findmnt -n -o SOURCE /run/live/medium 2>/dev/null | sed 's/[0-9]*$//' || echo "")
+        [ -b "$_src" ] && live_dev="$_src"
     fi
 
     local disks_json="["
@@ -635,8 +636,10 @@ cmd_disks_scan() {
         [ "$type" != "disk" ] && continue
         local dev="/dev/${name}"
 
-        # Skip the live boot medium
+        # Skip the live boot medium (by detected device path)
         [ -n "$live_dev" ] && [ "$dev" = "$live_dev" ] && continue
+        # Skip if any partition on this disk is labeled FREERAID (belt-and-suspenders)
+        lsblk -no LABEL "$dev" 2>/dev/null | grep -qi "^FREERAID$" && continue
 
         # Get model separately to handle blank/spaces safely
         local model
