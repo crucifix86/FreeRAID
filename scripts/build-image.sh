@@ -182,6 +182,7 @@ cp "$REPO_DIR/core/freeraid"             "$INSTALL_DIR/freeraid"
 cp "$REPO_DIR/importer/unraid-import.py" "$INSTALL_DIR/unraid-import"
 chmod +x "$INSTALL_DIR/freeraid" "$INSTALL_DIR/unraid-import"
 ln -sf /usr/local/lib/freeraid/freeraid      "$ROOTFS/usr/local/bin/freeraid"
+ln -sf /usr/local/lib/freeraid/freeraid      "$ROOTFS/usr/bin/freeraid"
 ln -sf /usr/local/lib/freeraid/unraid-import "$ROOTFS/usr/local/bin/freeraid-import"
 
 # Cockpit plugin
