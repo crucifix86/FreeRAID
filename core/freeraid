@@ -3444,6 +3444,99 @@ cmd_logs_get() {
     esac
 }
 
+# ── Plugin system ────────────────────────────────────────────────────────────────
+
+PLUGIN_DIR="/etc/freeraid/plugins"
+PLUGIN_INDEX_URL="https://raw.githubusercontent.com/crucifix86/FreeRAID/main/plugins/index.json"
+
+cmd_plugin_list() {
+    local out="["
+    local first=true
+    mkdir -p "$PLUGIN_DIR"
+    for manifest in "$PLUGIN_DIR"/*/manifest.json; do
+        [ -f "$manifest" ] || continue
+        $first || out+=","
+        first=false
+        out+=$(cat "$manifest")
+    done
+    out+="]"
+    echo "$out"
+}
+
+cmd_plugin_available() {
+    info "Fetching plugin index..."
+    curl -fsSL "$PLUGIN_INDEX_URL" 2>/dev/null || die "Could not fetch plugin index. Check internet connection."
+}
+
+cmd_plugin_install() {
+    local name="${1:-}"
+    [ -z "$name" ] && die "Usage: freeraid plugin-install <name>"
+
+    # Check not already installed
+    [ -f "$PLUGIN_DIR/$name/manifest.json" ] && die "Plugin '$name' is already installed. Use plugin-update to upgrade."
+
+    info "Fetching plugin index..."
+    local index
+    index=$(curl -fsSL "$PLUGIN_INDEX_URL" 2>/dev/null) || die "Could not fetch plugin index."
+
+    local plugin_entry
+    plugin_entry=$(echo "$index" | jq -c --arg n "$name" '.[] | select(.name==$n)' 2>/dev/null || true)
+    [ -z "$plugin_entry" ] && die "Plugin '$name' not found in index."
+
+    local install_url
+    install_url=$(echo "$plugin_entry" | jq -r '.install_url')
+    [ -z "$install_url" ] || [ "$install_url" = "null" ] && die "Plugin '$name' has no install URL."
+
+    info "Installing plugin: $name"
+    local plugin_tmp="/tmp/freeraid-plugin-$name"
+    rm -rf "$plugin_tmp"
+    mkdir -p "$plugin_tmp"
+
+    # Download and run install script
+    curl -fsSL "$install_url" -o "$plugin_tmp/install.sh" || die "Failed to download install script."
+    chmod +x "$plugin_tmp/install.sh"
+
+    mkdir -p "$PLUGIN_DIR/$name"
+    PLUGIN_INSTALL_DIR="$PLUGIN_DIR/$name" bash "$plugin_tmp/install.sh" || die "Plugin install script failed."
+
+    # Write manifest from index entry
+    echo "$plugin_entry" | jq '. + {"installed_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","status":"installed"}' \
+        > "$PLUGIN_DIR/$name/manifest.json"
+
+    rm -rf "$plugin_tmp"
+    info "Plugin '$name' installed successfully."
+}
+
+cmd_plugin_remove() {
+    local name="${1:-}"
+    [ -z "$name" ] && die "Usage: freeraid plugin-remove <name>"
+    [ -f "$PLUGIN_DIR/$name/manifest.json" ] || die "Plugin '$name' is not installed."
+
+    info "Removing plugin: $name"
+
+    # Run uninstall script if present
+    if [ -f "$PLUGIN_DIR/$name/uninstall.sh" ]; then
+        bash "$PLUGIN_DIR/$name/uninstall.sh" || warn "Uninstall script returned errors."
+    fi
+
+    rm -rf "$PLUGIN_DIR/$name"
+    info "Plugin '$name' removed."
+}
+
+cmd_plugin_update() {
+    local name="${1:-}"
+    [ -z "$name" ] && die "Usage: freeraid plugin-update <name>"
+    [ -f "$PLUGIN_DIR/$name/manifest.json" ] || die "Plugin '$name' is not installed."
+
+    info "Updating plugin: $name"
+    # Run uninstall first (keep config if uninstall script is careful)
+    if [ -f "$PLUGIN_DIR/$name/uninstall.sh" ]; then
+        bash "$PLUGIN_DIR/$name/uninstall.sh" 2>/dev/null || true
+    fi
+    rm -rf "$PLUGIN_DIR/$name"
+    cmd_plugin_install "$name"
+}
+
 # ── Setup wizard ─────────────────────────────────────────────────────────────────
 
 cmd_setup_status() {
@@ -3558,6 +3651,11 @@ case "${1:-help}" in
     notify-send)          cmd_notify_send "${2:-}" "${3:-}" ;;
     notify-test)          cmd_notify_test "${2:-}" ;;
     temp-check)           cmd_temp_check "${2:-55}" ;;
+    plugin-list)          cmd_plugin_list ;;
+    plugin-available)     cmd_plugin_available ;;
+    plugin-install)       cmd_plugin_install "${2:-}" ;;
+    plugin-remove)        cmd_plugin_remove "${2:-}" ;;
+    plugin-update)        cmd_plugin_update "${2:-}" ;;
     setup-status)         cmd_setup_status ;;
     setup-complete)       cmd_setup_complete ;;
     install-deps)  cmd_install_deps ;;

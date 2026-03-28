@@ -1347,3 +1347,72 @@ body {
 }
 .ups-bar-load { background: var(--accent); }
 .ups-stat-pct { width: 32px; text-align: right; color: var(--text-dim); }
+
+/* ── Plugin Manager ── */
+.plugin-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 10px;
+}
+.plugin-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.plugin-name {
+  font-weight: 600;
+  font-size: 14px;
+  text-transform: capitalize;
+}
+.plugin-version {
+  background: var(--bg3);
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.badge-installed {
+  background: #0d2b1a;
+  color: var(--green);
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.badge-update {
+  background: #2a1e00;
+  color: var(--yellow);
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.badge-cat {
+  background: var(--bg3);
+  color: var(--accent);
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  text-transform: capitalize;
+}
+.plugin-desc {
+  color: var(--text-dim);
+  font-size: 13px;
+  margin-bottom: 8px;
+  line-height: 1.4;
+}
+.plugin-homepage {
+  font-size: 11px;
+  margin-bottom: 8px;
+}
+.plugin-homepage a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.plugin-homepage a:hover { text-decoration: underline; }
+.plugin-actions {
+  display: flex;
+  gap: 8px;
+}

@@ -223,6 +223,7 @@ function switchTab(name) {
   if (name === 'users')   refreshUsers();
   if (name === 'logs')    fetchLog();
   if (name === 'settings') { loadNotifSettings(); loadUpsConfig(); }
+  if (name === 'plugins') refreshPlugins();
 }
 
 // ── Logging ──────────────────────────────────────────────────────────────────
@@ -3540,4 +3541,157 @@ function applyIoStats(stats) {
 function fmtKbs(kbs) {
   if (kbs >= 1024) return (kbs / 1024).toFixed(1) + ' M';
   return kbs + ' K';
+}
+
+// ── Plugin Manager ────────────────────────────────────────────────────────────
+
+let _pluginsInstalled = [];
+let _pluginsAvailable = [];
+
+function plog(level, text) { appendLog('plugins-log-panel', level, text); }
+
+function refreshPlugins() {
+  const el = document.getElementById('plugins-installed');
+  if (el) el.innerHTML = '<div class="loading-msg">Loading...</div>';
+  let buf = '';
+  cockpit.spawn(['freeraid', 'plugin-list'], { superuser: 'require', err: 'out' })
+    .stream(d => { buf += d; })
+    .then(() => {
+      try { _pluginsInstalled = JSON.parse(buf.trim()); } catch (_) { _pluginsInstalled = []; }
+      renderInstalledPlugins();
+    })
+    .catch(err => {
+      plog('error', 'Failed to load installed plugins: ' + err);
+      if (el) el.innerHTML = '<div class="loading-msg">Failed to load plugins.</div>';
+    });
+}
+
+function fetchAvailablePlugins() {
+  const el = document.getElementById('plugins-available');
+  if (el) el.innerHTML = '<div class="loading-msg">Fetching plugin index...</div>';
+  let buf = '';
+  cockpit.spawn(['freeraid', 'plugin-available'], { superuser: 'require', err: 'out' })
+    .stream(d => { buf += d; })
+    .then(() => {
+      try { _pluginsAvailable = JSON.parse(buf.trim()); } catch (_) { _pluginsAvailable = []; }
+      renderAvailablePlugins();
+      plog('info', 'Plugin index fetched — ' + _pluginsAvailable.length + ' plugin(s) available.');
+    })
+    .catch(err => {
+      plog('error', 'Failed to fetch plugin index: ' + err);
+      if (el) el.innerHTML = '<div class="loading-msg">Failed to fetch plugin index.</div>';
+    });
+}
+
+function renderInstalledPlugins() {
+  const el = document.getElementById('plugins-installed');
+  if (!el) return;
+  if (!_pluginsInstalled.length) {
+    el.innerHTML = '<div class="loading-msg">No plugins installed.</div>';
+    return;
+  }
+  el.innerHTML = _pluginsInstalled.map(p => {
+    const canUpdate = _pluginsAvailable.find(a => a.name === p.name &&
+      a.version !== p.version);
+    return `<div class="plugin-card" id="plugin-card-${p.name}">
+      <div class="plugin-card-header">
+        <span class="plugin-name">${p.name}</span>
+        <span class="plugin-version badge">v${p.version || '?'}</span>
+        <span class="badge badge-installed">Installed</span>
+      </div>
+      <div class="plugin-desc">${p.description || ''}</div>
+      <div class="plugin-actions">
+        ${canUpdate ? `<button class="btn btn-sm btn-primary" onclick="updatePlugin('${p.name}')">Update</button>` : ''}
+        <button class="btn btn-sm btn-danger" onclick="removePlugin('${p.name}')">Remove</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function renderAvailablePlugins() {
+  const el = document.getElementById('plugins-available');
+  if (!el) return;
+  if (!_pluginsAvailable.length) {
+    el.innerHTML = '<div class="loading-msg">No plugins found in index.</div>';
+    return;
+  }
+  el.innerHTML = _pluginsAvailable.map(p => {
+    const installed = _pluginsInstalled.find(i => i.name === p.name);
+    const hasUpdate = installed && installed.version !== p.version;
+    return `<div class="plugin-card" id="plugin-avail-${p.name}">
+      <div class="plugin-card-header">
+        <span class="plugin-name">${p.name}</span>
+        <span class="plugin-version badge">v${p.version}</span>
+        ${installed ? `<span class="badge badge-installed">Installed</span>` : ''}
+        ${hasUpdate ? `<span class="badge badge-update">Update Available</span>` : ''}
+        <span class="badge badge-cat">${p.category || ''}</span>
+      </div>
+      <div class="plugin-desc">${p.description || ''}</div>
+      ${p.homepage ? `<div class="plugin-homepage"><a href="${p.homepage}" target="_blank" rel="noopener">${p.homepage}</a></div>` : ''}
+      <div class="plugin-actions">
+        ${!installed
+          ? `<button class="btn btn-sm btn-primary" onclick="installPlugin('${p.name}')">Install</button>`
+          : hasUpdate
+            ? `<button class="btn btn-sm btn-primary" onclick="updatePlugin('${p.name}')">Update</button>`
+            : `<button class="btn btn-sm" disabled>Up to date</button>`}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function installPlugin(name) {
+  plog('info', 'Installing ' + name + '...');
+  _setPluginBusy(name, true);
+  let buf = '';
+  cockpit.spawn(['freeraid', 'plugin-install', name], { superuser: 'require', err: 'out' })
+    .stream(d => { buf += d; plog('info', d.trim()); })
+    .then(() => {
+      plog('info', name + ' installed successfully.');
+      refreshPlugins();
+    })
+    .catch(err => {
+      plog('error', 'Install failed: ' + err);
+      _setPluginBusy(name, false);
+    });
+}
+
+function removePlugin(name) {
+  if (!confirm('Remove plugin "' + name + '"? This will stop and remove the service.')) return;
+  plog('info', 'Removing ' + name + '...');
+  _setPluginBusy(name, true);
+  let buf = '';
+  cockpit.spawn(['freeraid', 'plugin-remove', name], { superuser: 'require', err: 'out' })
+    .stream(d => { buf += d; plog('info', d.trim()); })
+    .then(() => {
+      plog('info', name + ' removed.');
+      refreshPlugins();
+    })
+    .catch(err => {
+      plog('error', 'Remove failed: ' + err);
+      _setPluginBusy(name, false);
+    });
+}
+
+function updatePlugin(name) {
+  plog('info', 'Updating ' + name + '...');
+  _setPluginBusy(name, true);
+  let buf = '';
+  cockpit.spawn(['freeraid', 'plugin-update', name], { superuser: 'require', err: 'out' })
+    .stream(d => { buf += d; plog('info', d.trim()); })
+    .then(() => {
+      plog('info', name + ' updated.');
+      refreshPlugins();
+    })
+    .catch(err => {
+      plog('error', 'Update failed: ' + err);
+      _setPluginBusy(name, false);
+    });
+}
+
+function _setPluginBusy(name, busy) {
+  ['plugin-card-' + name, 'plugin-avail-' + name].forEach(id => {
+    const card = document.getElementById(id);
+    if (!card) return;
+    card.querySelectorAll('button').forEach(b => { b.disabled = busy; });
+  });
 }

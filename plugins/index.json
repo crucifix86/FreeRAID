@@ -1,0 +1,47 @@
+[
+  {
+    "name": "scrutiny",
+    "version": "1.0.0",
+    "description": "Hard drive health monitoring with SMART data, historical tracking, and failure prediction.",
+    "author": "FreeRAID Community",
+    "category": "monitoring",
+    "homepage": "https://github.com/AnalogJ/scrutiny",
+    "install_url": "https://raw.githubusercontent.com/crucifix86/FreeRAID/main/plugins/scrutiny/install.sh"
+  },
+  {
+    "name": "netdata",
+    "version": "1.0.0",
+    "description": "Real-time performance monitoring dashboard — CPU, RAM, network, disk, and more.",
+    "author": "FreeRAID Community",
+    "category": "monitoring",
+    "homepage": "https://netdata.cloud",
+    "install_url": "https://raw.githubusercontent.com/crucifix86/FreeRAID/main/plugins/netdata/install.sh"
+  },
+  {
+    "name": "filebrowser",
+    "version": "1.0.0",
+    "description": "Web-based file manager for your array. Browse, upload, download, and manage files from the browser.",
+    "author": "FreeRAID Community",
+    "category": "files",
+    "homepage": "https://filebrowser.org",
+    "install_url": "https://raw.githubusercontent.com/crucifix86/FreeRAID/main/plugins/filebrowser/install.sh"
+  },
+  {
+    "name": "wireguard",
+    "version": "1.0.0",
+    "description": "WireGuard VPN server — fast, modern VPN with QR code client config generation.",
+    "author": "FreeRAID Community",
+    "category": "network",
+    "homepage": "https://www.wireguard.com",
+    "install_url": "https://raw.githubusercontent.com/crucifix86/FreeRAID/main/plugins/wireguard/install.sh"
+  },
+  {
+    "name": "duplicati",
+    "version": "1.0.0",
+    "description": "Encrypted cloud backups to S3, Backblaze B2, Google Drive, and more.",
+    "author": "FreeRAID Community",
+    "category": "backup",
+    "homepage": "https://duplicati.com",
+    "install_url": "https://raw.githubusercontent.com/crucifix86/FreeRAID/main/plugins/duplicati/install.sh"
+  }
+]

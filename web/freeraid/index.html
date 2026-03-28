@@ -1142,14 +1142,38 @@
 
       <!-- ── PLUGINS TAB ── -->
       <div id="tab-plugins" class="hidden">
+
+        <!-- Installed plugins -->
         <div class="settings-section">
-          <h2 class="settings-section-title">Plugins</h2>
-          <div class="settings-card" style="text-align:center;padding:48px">
-            <div style="font-size:32px;margin-bottom:12px">🧩</div>
-            <div style="font-size:16px;font-weight:600;margin-bottom:8px">Plugin Manager</div>
-            <div style="color:var(--text-dim);font-size:13px">Coming soon — extend FreeRAID with community plugins.</div>
+          <h2 class="settings-section-title">
+            Installed Plugins
+            <button class="btn btn-sm btn-ghost" style="margin-left:auto" onclick="refreshPlugins()">Refresh</button>
+          </h2>
+          <div id="plugins-installed">
+            <div class="loading-msg">Loading...</div>
           </div>
         </div>
+
+        <!-- Available plugins -->
+        <div class="settings-section">
+          <h2 class="settings-section-title">
+            Available Plugins
+            <button class="btn btn-sm btn-secondary" style="margin-left:auto" onclick="fetchAvailablePlugins()">Check for plugins</button>
+          </h2>
+          <div id="plugins-available">
+            <div class="loading-msg">Click "Check for plugins" to load the community plugin index.</div>
+          </div>
+        </div>
+
+        <!-- Plugin log -->
+        <div class="settings-section">
+          <h2 class="settings-section-title">
+            Log
+            <button class="btn btn-sm btn-ghost" onclick="document.getElementById('plugins-log-panel').innerHTML=''">Clear</button>
+          </h2>
+          <div class="log-panel" id="plugins-log-panel"></div>
+        </div>
+
       </div><!-- end plugins -->
 
     </div>
