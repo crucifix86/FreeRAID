@@ -3246,10 +3246,10 @@ cmd_users_list() {
     python3 << 'PYEOF'
 import json, subprocess, pwd
 
-# System users with UID >= 1000 (excluding nobody)
+# System users: root (uid 0) + regular users (uid >= 1000), excluding nobody
 users = []
 for entry in pwd.getpwall():
-    if entry.pw_uid < 1000: continue
+    if entry.pw_uid != 0 and entry.pw_uid < 1000: continue
     if entry.pw_name in ('nobody',): continue
     # Check if they're a Samba user
     try:
