@@ -1466,3 +1466,34 @@ body {
 .zfs-ds-meta {
   color: var(--text-dim);
 }
+
+/* ── VM Manager ── */
+.vm-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 10px;
+}
+.vm-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.vm-name {
+  font-weight: 600;
+  font-size: 15px;
+}
+.vm-meta {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.vm-state-running { background: #0d2b1a; color: var(--green); font-size: 11px; padding: 2px 6px; border-radius: 4px; }
+.vm-state-stopped { background: var(--bg3); color: var(--text-dim); font-size: 11px; padding: 2px 6px; border-radius: 4px; }
+.vm-console-panel {
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
+  background: var(--bg3);
+  border-radius: 0 0 var(--radius) var(--radius);
+}

@@ -159,6 +159,9 @@
         <button class="sidebar-item" data-tab="plugins" onclick="switchTab('plugins')">
           <span class="si-icon">⊕</span> Plugins
         </button>
+        <button class="sidebar-item" data-tab="vms" onclick="switchTab('vms')">
+          <span class="si-icon">▷</span> VMs
+        </button>
         <button class="sidebar-item" data-tab="settings" onclick="switchTab('settings')">
           <span class="si-icon">⚙</span> Settings
         </button>
@@ -1216,6 +1219,75 @@
         </div>
 
       </div><!-- end plugins -->
+
+      <!-- ── VMs TAB ── -->
+      <div id="tab-vms" class="hidden">
+
+        <div class="settings-section">
+          <h2 class="settings-section-title">
+            Virtual Machines
+            <span style="font-size:11px;font-weight:400;color:var(--text-dim);text-transform:none;letter-spacing:0;margin-left:8px">— KVM/QEMU via libvirt</span>
+            <button class="btn btn-sm btn-primary" style="margin-left:auto" onclick="toggleCreateVm()">+ Create VM</button>
+          </h2>
+
+          <!-- Create VM form -->
+          <div id="create-vm-form" class="hidden" style="background:var(--bg3);border-radius:var(--radius);padding:16px;margin-bottom:14px">
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:12px">
+              <div>
+                <label class="field-label">VM Name</label>
+                <input type="text" id="vm-name" class="text-input" placeholder="e.g. ubuntu-server">
+              </div>
+              <div>
+                <label class="field-label">Memory (MB)</label>
+                <input type="number" id="vm-ram" class="text-input" value="2048" min="256" step="256">
+              </div>
+              <div>
+                <label class="field-label">vCPUs</label>
+                <input type="number" id="vm-cpus" class="text-input" value="2" min="1" max="32">
+              </div>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+              <div>
+                <label class="field-label">Disk Size (GB)</label>
+                <input type="number" id="vm-disk" class="text-input" value="20" min="1">
+              </div>
+              <div>
+                <label class="field-label">OS Type</label>
+                <select id="vm-os" class="select-input">
+                  <option value="linux">Linux</option>
+                  <option value="windows">Windows</option>
+                  <option value="other">Other</option>
+                </select>
+              </div>
+            </div>
+            <div style="margin-bottom:12px">
+              <label class="field-label">ISO Path <span style="color:var(--text-dim);font-weight:400">(optional — leave blank for no media)</span></label>
+              <input type="text" id="vm-iso" class="text-input" placeholder="/mnt/user/isos/ubuntu.iso">
+            </div>
+            <div style="display:flex;gap:8px">
+              <button class="btn btn-primary btn-sm" onclick="doCreateVm()">Create VM</button>
+              <button class="btn btn-ghost btn-sm" onclick="toggleCreateVm()">Cancel</button>
+            </div>
+            <div id="vm-create-msg" style="margin-top:8px;font-size:0.85em"></div>
+          </div>
+
+          <div id="vms-list">
+            <div class="loading-msg">Loading VMs...</div>
+          </div>
+        </div>
+
+        <!-- ISO / Storage section -->
+        <div class="settings-section">
+          <h2 class="settings-section-title">
+            ISO Images
+            <button class="btn btn-sm btn-ghost" style="margin-left:auto" onclick="refreshIsoList()">Refresh</button>
+          </h2>
+          <div id="iso-list">
+            <div class="loading-msg">Loading...</div>
+          </div>
+        </div>
+
+      </div><!-- end vms -->
 
     </div>
   </div>

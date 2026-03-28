@@ -213,7 +213,7 @@ function switchTab(name) {
   document.querySelectorAll('.sidebar-item[data-tab]').forEach(t => {
     t.classList.toggle('active', t.dataset.tab === name);
   });
-  ['dashboard','disks','settings','shares','docker','plugins','network','users','logs'].forEach(t => {
+  ['dashboard','disks','settings','shares','docker','plugins','network','users','logs','vms'].forEach(t => {
     document.getElementById('tab-'+t).classList.toggle('hidden', name !== t);
   });
   if (name === 'shares')  refreshShares();
@@ -224,6 +224,7 @@ function switchTab(name) {
   if (name === 'logs')    fetchLog();
   if (name === 'settings') { loadNotifSettings(); loadUpsConfig(); }
   if (name === 'plugins') refreshPlugins();
+  if (name === 'vms')     { refreshVms(); refreshIsoList(); }
 }
 
 // ── Logging ──────────────────────────────────────────────────────────────────
@@ -4101,4 +4102,182 @@ function _rollbackSnapshot(snap) {
   cockpit.spawn(['freeraid', 'zfs-snapshot-rollback', snap], { superuser: 'require', err: 'out' })
     .then(out => { log('info', out.trim()); refreshZfsPools(); })
     .catch(err => log('error', 'Rollback failed: ' + err));
+}
+
+// ── VM Manager ────────────────────────────────────────────────────────────────
+
+let _vms = [];
+
+function refreshVms() {
+  const el = document.getElementById('vms-list');
+  if (!el) return;
+  el.innerHTML = '<div class="loading-msg">Loading VMs...</div>';
+  let buf = '';
+  cockpit.spawn(['freeraid', 'vm-list'], { superuser: 'require', err: 'out' })
+    .stream(d => { buf += d; })
+    .then(() => {
+      try { _vms = JSON.parse(buf.trim()); } catch(_) { _vms = []; }
+      renderVms();
+    })
+    .catch(err => {
+      el.innerHTML = '<div class="loading-msg">KVM/libvirt not available: ' + err + '</div>';
+    });
+}
+
+function renderVms() {
+  const el = document.getElementById('vms-list');
+  if (!el) return;
+  if (!_vms.length) {
+    el.innerHTML = '<div class="loading-msg">No VMs. Create one above.</div>';
+    return;
+  }
+  el.innerHTML = _vms.map(vm => {
+    const running = vm.state === 'running';
+    const stateClass = running ? 'vm-state-running' : 'vm-state-stopped';
+    const nameJson = JSON.stringify(vm.name);
+    return `<div class="vm-card" id="vm-card-${vm.name}">
+      <div class="vm-card-header">
+        <span class="vm-name">${vm.name}</span>
+        <span class="badge ${stateClass}">${vm.state}</span>
+        <span class="vm-meta">${vm.vcpus} vCPU &bull; ${vm.maxmem}</span>
+        <div style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap">
+          ${running
+            ? `<button class="btn btn-xs btn-secondary" onclick="vmStop(${nameJson})">Shutdown</button>
+               <button class="btn btn-xs btn-ghost" onclick="vmForceStop(${nameJson})">Force Off</button>
+               <button class="btn btn-xs btn-ghost" onclick="vmOpenConsole(${nameJson})">Console</button>`
+            : `<button class="btn btn-xs btn-primary" onclick="vmStart(${nameJson})">Start</button>`}
+          <button class="btn btn-xs btn-danger" onclick="vmDelete(${nameJson})">Delete</button>
+        </div>
+      </div>
+      <div id="vm-console-${vm.name}" class="hidden vm-console-panel"></div>
+    </div>`;
+  }).join('');
+}
+
+function toggleCreateVm() {
+  document.getElementById('create-vm-form').classList.toggle('hidden');
+}
+
+function doCreateVm() {
+  const name   = document.getElementById('vm-name').value.trim();
+  const ram    = document.getElementById('vm-ram').value;
+  const cpus   = document.getElementById('vm-cpus').value;
+  const disk   = document.getElementById('vm-disk').value;
+  const os     = document.getElementById('vm-os').value;
+  const iso    = document.getElementById('vm-iso').value.trim();
+  const msg    = document.getElementById('vm-create-msg');
+
+  if (!name) { msg.style.color = 'var(--red)'; msg.textContent = 'VM name required.'; return; }
+  msg.style.color = 'var(--text-dim)'; msg.textContent = 'Creating VM... this may take a moment.';
+
+  const args = ['freeraid', 'vm-create', name, ram, cpus, disk, os];
+  if (iso) args.push(iso);
+
+  cockpit.spawn(args, { superuser: 'require', err: 'out' })
+    .then(out => {
+      msg.style.color = 'var(--green)'; msg.textContent = 'VM created.';
+      document.getElementById('vm-name').value = '';
+      setTimeout(() => { toggleCreateVm(); refreshVms(); }, 1200);
+    })
+    .catch(err => { msg.style.color = 'var(--red)'; msg.textContent = String(err); });
+}
+
+function vmStart(name) {
+  _vmSetBusy(name, true);
+  cockpit.spawn(['freeraid', 'vm-start', name], { superuser: 'require', err: 'out' })
+    .then(() => { log('info', 'VM ' + name + ' started.'); refreshVms(); })
+    .catch(err => { log('error', 'Start failed: ' + err); _vmSetBusy(name, false); });
+}
+
+function vmStop(name) {
+  _vmSetBusy(name, true);
+  cockpit.spawn(['freeraid', 'vm-stop', name], { superuser: 'require', err: 'out' })
+    .then(() => { log('info', 'VM ' + name + ' shutting down.'); setTimeout(refreshVms, 2000); })
+    .catch(err => { log('error', 'Shutdown failed: ' + err); _vmSetBusy(name, false); });
+}
+
+function vmForceStop(name) {
+  if (!confirm('Force off "' + name + '"? This is like pulling the power cord.')) return;
+  _vmSetBusy(name, true);
+  cockpit.spawn(['freeraid', 'vm-stop', name, 'force'], { superuser: 'require', err: 'out' })
+    .then(() => { log('info', 'VM ' + name + ' forced off.'); setTimeout(refreshVms, 1000); })
+    .catch(err => { log('error', 'Force off failed: ' + err); _vmSetBusy(name, false); });
+}
+
+function vmDelete(name) {
+  if (!confirm('Delete VM "' + name + '" and its disk image? This cannot be undone.')) return;
+  cockpit.spawn(['freeraid', 'vm-delete', name], { superuser: 'require', err: 'out' })
+    .then(() => { log('info', 'VM ' + name + ' deleted.'); refreshVms(); })
+    .catch(err => log('error', 'Delete failed: ' + err));
+}
+
+function vmOpenConsole(name) {
+  const panel = document.getElementById('vm-console-' + name);
+  if (!panel) return;
+  if (!panel.classList.contains('hidden')) { panel.classList.add('hidden'); return; }
+
+  // Get VNC port then open noVNC or show SSH tip
+  let buf = '';
+  cockpit.spawn(['freeraid', 'vm-vnc-port', name], { superuser: 'require', err: 'out' })
+    .stream(d => { buf += d; })
+    .then(() => {
+      const display = buf.trim(); // e.g. ":0" or ":1"
+      if (!display) {
+        panel.innerHTML = '<div style="padding:10px;color:var(--text-dim);font-size:12px">VNC not available for this VM.</div>';
+        panel.classList.remove('hidden');
+        return;
+      }
+      const displayNum = parseInt(display.replace(':', '')) || 0;
+      const vncPort = 5900 + displayNum;
+      const host = window.location.hostname;
+      panel.classList.remove('hidden');
+      panel.innerHTML = `<div style="padding:10px;font-size:12px">
+        <div style="margin-bottom:6px;color:var(--text-dim)">VNC available on port <strong style="color:var(--text)">${vncPort}</strong></div>
+        <div style="color:var(--text-dim)">Connect with any VNC client:</div>
+        <code style="display:block;margin-top:4px;padding:6px;background:var(--bg);border-radius:4px">${host}:${vncPort}</code>
+        <div style="margin-top:8px;color:var(--text-dim);font-size:11px">Or use Cockpit's built-in VM console (Machines plugin) for a full in-browser experience.</div>
+      </div>`;
+    })
+    .catch(() => {
+      panel.innerHTML = '<div style="padding:10px;color:var(--red);font-size:12px">Failed to get VNC info.</div>';
+      panel.classList.remove('hidden');
+    });
+}
+
+function _vmSetBusy(name, busy) {
+  const card = document.getElementById('vm-card-' + name);
+  if (!card) return;
+  card.querySelectorAll('button').forEach(b => { b.disabled = busy; });
+}
+
+function refreshIsoList() {
+  const el = document.getElementById('iso-list');
+  if (!el) return;
+  el.innerHTML = '<div class="loading-msg">Scanning for ISOs...</div>';
+  let buf = '';
+  cockpit.spawn(['freeraid', 'vm-iso-list'], { superuser: 'require', err: 'out' })
+    .stream(d => { buf += d; })
+    .then(() => {
+      let isos = [];
+      try { isos = JSON.parse(buf.trim()); } catch(_) {}
+      if (!isos.length) {
+        el.innerHTML = '<div class="loading-msg">No ISO files found. Drop .iso files in <code>/mnt/user/isos/</code>.</div>';
+        return;
+      }
+      el.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr style="color:var(--text-dim);font-size:11px;text-transform:uppercase;letter-spacing:.05em">
+          <th style="text-align:left;padding:4px 8px">Name</th>
+          <th style="text-align:left;padding:4px 8px">Path</th>
+          <th style="text-align:right;padding:4px 8px">Size</th>
+        </tr></thead>
+        <tbody>
+          ${isos.map(i => `<tr style="border-top:1px solid var(--border)">
+            <td style="padding:6px 8px;font-family:monospace">${i.name}</td>
+            <td style="padding:6px 8px;color:var(--text-dim);font-size:11px">${i.path}</td>
+            <td style="padding:6px 8px;text-align:right;color:var(--text-dim)">${i.size}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`;
+    })
+    .catch(() => { el.innerHTML = '<div class="loading-msg">Could not scan for ISOs.</div>'; });
 }

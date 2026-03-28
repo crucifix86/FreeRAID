@@ -884,6 +884,147 @@ cmd_pool_stop_all() {
     done < <(jq -r '.pools // [] | .[] | .name' "$CONFIG_FILE" 2>/dev/null)
 }
 
+## ── VM Manager ───────────────────────────────────────────────────────────────
+
+VM_IMAGE_DIR="/var/lib/freeraid/vms"
+VM_ISO_DIR="/mnt/user/isos"
+
+cmd_vm_check() {
+    command -v virsh &>/dev/null || die "libvirt is not installed. Run: apt-get install -y qemu-kvm libvirt-daemon-system virtinst"
+    systemctl is-active --quiet libvirtd 2>/dev/null || systemctl start libvirtd 2>/dev/null || true
+}
+
+cmd_vm_list() {
+    cmd_vm_check
+    local out="["
+    local first=1
+    # Get all domains (running + stopped)
+    while IFS= read -r line; do
+        local id name state
+        id=$(echo "$line" | awk '{print $1}')
+        name=$(echo "$line" | awk '{print $2}')
+        state=$(echo "$line" | awk '{$1=$2=""; print $0}' | xargs)
+        [ -z "$name" ] || [ "$name" = "Name" ] && continue
+        [ "$first" = "1" ] && first=0 || out+=","
+        # Get more details
+        local vcpus maxmem
+        vcpus=$(virsh dominfo "$name" 2>/dev/null | awk '/CPU\(s\)/{print $2}' || echo "?")
+        maxmem=$(virsh dominfo "$name" 2>/dev/null | awk '/Max memory/{print $3,$4}' || echo "?")
+        name=$(echo "$name" | sed 's/"/\\"/g')
+        out+="{\"id\":\"${id}\",\"name\":\"${name}\",\"state\":\"${state}\",\"vcpus\":\"${vcpus}\",\"maxmem\":\"${maxmem}\"}"
+    done < <(virsh list --all 2>/dev/null | tail -n +3 | grep -v '^$')
+    out+="]"
+    echo "$out"
+}
+
+cmd_vm_create() {
+    # Usage: freeraid vm-create <name> <ram_mb> <vcpus> <disk_gb> <os_type> [iso_path]
+    cmd_vm_check
+    local name="${1:-}" ram="${2:-2048}" vcpus="${3:-2}" disk_gb="${4:-20}" os_type="${5:-linux}" iso="${6:-}"
+    [ -z "$name" ] && die "Usage: freeraid vm-create <name> <ram_mb> <vcpus> <disk_gb> <os_type> [iso]"
+
+    mkdir -p "$VM_IMAGE_DIR"
+    local img="${VM_IMAGE_DIR}/${name}.qcow2"
+    [ -f "$img" ] && die "VM '$name' already exists at $img"
+
+    info "Creating disk image ${disk_gb}G..."
+    qemu-img create -f qcow2 "$img" "${disk_gb}G" 2>&1 || die "qemu-img failed"
+
+    local args=(
+        virt-install
+        --name "$name"
+        --memory "$ram"
+        --vcpus "$vcpus"
+        --disk "path=${img},format=qcow2"
+        --os-variant "${os_type}"
+        --network network=default
+        --graphics vnc,listen=0.0.0.0
+        --noautoconsole
+    )
+
+    if [ -n "$iso" ] && [ -f "$iso" ]; then
+        args+=(--cdrom "$iso")
+    else
+        args+=(--boot hd --import)
+    fi
+
+    info "Creating VM '$name'..."
+    "${args[@]}" 2>&1 || die "virt-install failed"
+    info "VM '$name' created."
+}
+
+cmd_vm_start() {
+    cmd_vm_check
+    local name="${1:-}"
+    [ -z "$name" ] && die "Usage: freeraid vm-start <name>"
+    virsh start "$name" 2>&1 || die "Failed to start VM '$name'"
+    info "VM '$name' started."
+}
+
+cmd_vm_stop() {
+    cmd_vm_check
+    local name="${1:-}" force="${2:-}"
+    [ -z "$name" ] && die "Usage: freeraid vm-stop <name>"
+    if [ "$force" = "force" ]; then
+        virsh destroy "$name" 2>&1 || true
+    else
+        virsh shutdown "$name" 2>&1 || die "Failed to shutdown VM '$name'"
+    fi
+    info "VM '$name' stopped."
+}
+
+cmd_vm_delete() {
+    cmd_vm_check
+    local name="${1:-}"
+    [ -z "$name" ] && die "Usage: freeraid vm-delete <name>"
+    virsh destroy "$name" 2>/dev/null || true
+    virsh undefine "$name" --remove-all-storage 2>&1 || virsh undefine "$name" 2>&1 || die "Failed to delete VM"
+    info "VM '$name' deleted."
+}
+
+cmd_vm_info() {
+    cmd_vm_check
+    local name="${1:-}"
+    [ -z "$name" ] && die "Usage: freeraid vm-info <name>"
+    local state vcpus maxmem
+    state=$(virsh domstate "$name" 2>/dev/null || echo "unknown")
+    vcpus=$(virsh dominfo "$name" 2>/dev/null | awk '/CPU\(s\)/{print $2}' || echo "?")
+    maxmem=$(virsh dominfo "$name" 2>/dev/null | awk '/Max memory/{printf "%.0f MB", $3/1024}' || echo "?")
+    # Get VNC port
+    local vnc_port
+    vnc_port=$(virsh vncdisplay "$name" 2>/dev/null || echo "")
+    state=$(echo "$state" | tr -d '[:space:]')
+    echo "{\"name\":\"${name}\",\"state\":\"${state}\",\"vcpus\":\"${vcpus}\",\"maxmem\":\"${maxmem}\",\"vnc\":\"${vnc_port}\"}"
+}
+
+cmd_vm_vnc_port() {
+    cmd_vm_check
+    local name="${1:-}"
+    [ -z "$name" ] && die "Usage: freeraid vm-vnc-port <name>"
+    virsh vncdisplay "$name" 2>/dev/null || echo ""
+}
+
+cmd_vm_iso_list() {
+    # List ISO files in common locations
+    local dirs=("$VM_ISO_DIR" "/var/lib/libvirt/images" "/tmp")
+    local out="["
+    local first=1
+    for dir in "${dirs[@]}"; do
+        [ -d "$dir" ] || continue
+        while IFS= read -r f; do
+            [ "$first" = "1" ] && first=0 || out+=","
+            local size
+            size=$(du -sh "$f" 2>/dev/null | cut -f1 || echo "?")
+            local fname
+            fname=$(basename "$f" | sed 's/"/\\"/g')
+            f=$(echo "$f" | sed 's/"/\\"/g')
+            out+="{\"path\":\"${f}\",\"name\":\"${fname}\",\"size\":\"${size}\"}"
+        done < <(find "$dir" -maxdepth 2 -name "*.iso" 2>/dev/null)
+    done
+    out+="]"
+    echo "$out"
+}
+
 ## ── ZFS ──────────────────────────────────────────────────────────────────────
 
 cmd_zfs_check() {
@@ -4026,6 +4167,14 @@ case "${1:-help}" in
     plugin-install)       cmd_plugin_install "${2:-}" ;;
     plugin-remove)        cmd_plugin_remove "${2:-}" ;;
     plugin-update)        cmd_plugin_update "${2:-}" ;;
+    vm-list)        cmd_vm_list ;;
+    vm-create)      cmd_vm_create "${2:-}" "${3:-2048}" "${4:-2}" "${5:-20}" "${6:-linux}" "${7:-}" ;;
+    vm-start)       cmd_vm_start "${2:-}" ;;
+    vm-stop)        cmd_vm_stop "${2:-}" "${3:-}" ;;
+    vm-delete)      cmd_vm_delete "${2:-}" ;;
+    vm-info)        cmd_vm_info "${2:-}" ;;
+    vm-vnc-port)    cmd_vm_vnc_port "${2:-}" ;;
+    vm-iso-list)    cmd_vm_iso_list ;;
     zfs-pool-list)        cmd_zfs_pool_list ;;
     zfs-pool-status)      cmd_zfs_pool_status "${2:-}" ;;
     zfs-pool-create)      cmd_zfs_pool_create "${2:-}" "${3:-stripe}" "${@:4}" ;;
