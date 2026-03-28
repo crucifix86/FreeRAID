@@ -144,14 +144,19 @@ set default=0
 set timeout=5
 set gfxpayload=keep
 
+# Find the FREERAID partition by label regardless of disk order
+search --no-floppy --label --set=root FREERAID
+
 menuentry "FreeRAID v${FREERAID_VER}" {
-    linux  /vmlinuz quiet loglevel=3
-    initrd /initrd.gz
+    search --no-floppy --label --set=root FREERAID
+    linux  (\$root)/vmlinuz quiet loglevel=3
+    initrd (\$root)/initrd.gz
 }
 
 menuentry "FreeRAID v${FREERAID_VER} (verbose)" {
-    linux  /vmlinuz loglevel=7
-    initrd /initrd.gz
+    search --no-floppy --label --set=root FREERAID
+    linux  (\$root)/vmlinuz loglevel=7
+    initrd (\$root)/initrd.gz
 }
 
 menuentry "Boot from local disk" {
