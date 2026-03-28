@@ -59,13 +59,12 @@ if [ -d "$ROOTFS/usr" ]; then
     warn "Rootfs already exists at $ROOTFS — skipping debootstrap"
     warn "Delete $ROOTFS to rebuild from scratch"
 else
+    # Minimal include — just enough to boot and run apt in chroot.
+    # Everything else installed via apt-get in step 2 (proper dep resolution).
     debootstrap \
         --arch=amd64 \
-        --include=systemd,systemd-sysv,udev,kmod,iproute2,iputils-ping,\
-dnsutils,curl,wget,ca-certificates,openssh-server,sudo,\
-jq,xfsprogs,btrfs-progs,e2fsprogs,fuse3,parted,hdparm,smartmontools,\
-samba,wsdd,avahi-daemon,nfs-kernel-server,unzip,python3,\
-snapraid,gocryptfs,msmtp,nut,nut-client,\
+        --include=systemd,systemd-sysv,udev,kmod,dbus,\
+iproute2,curl,wget,ca-certificates,openssh-server,sudo,\
 linux-image-amd64,busybox,initramfs-tools \
         bookworm \
         "$ROOTFS" \
@@ -101,6 +100,23 @@ echo "deb http://deb.debian.org/debian bookworm-backports main contrib non-free"
     > /etc/apt/sources.list.d/backports.list
 
 apt-get update -qq
+
+# Core utilities and storage
+apt-get install -y -qq \
+    jq python3 unzip parted util-linux \
+    xfsprogs btrfs-progs e2fsprogs fuse3 \
+    hdparm smartmontools snapraid \
+    iputils-ping dnsutils
+
+# Sharing
+apt-get install -y -qq \
+    samba wsdd avahi-daemon nfs-kernel-server
+
+# Notifications + UPS
+apt-get install -y -qq msmtp nut nut-client
+
+# Encryption
+apt-get install -y -qq gocryptfs
 
 # NIC firmware (Intel, Realtek, Broadcom, etc.)
 apt-get install -y -qq firmware-linux firmware-realtek firmware-iwlwifi \
