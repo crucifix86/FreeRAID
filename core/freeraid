@@ -2203,7 +2203,23 @@ for l in lines:
 print(json.dumps(out))
 " 2>/dev/null || echo "[]")
             ip=$(docker inspect "$container_name" --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' 2>/dev/null | tr -d '\n' | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null || echo '""')
-            webui=$(docker inspect "$container_name" --format '{{index .Config.Labels "freeraid.webui"}}' 2>/dev/null | tr -d '\n' | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null || echo '""')
+            local raw_webui
+            raw_webui=$(docker inspect "$container_name" --format '{{index .Config.Labels "freeraid.webui"}}' 2>/dev/null | tr -d '\n' || echo "")
+            # Resolve Unraid-style [IP] and [PORT:XXXX] placeholders
+            if echo "$raw_webui" | grep -q '\[IP\]\|\[PORT'; then
+                local server_ip first_host_port
+                server_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+                first_host_port=$(docker port "$container_name" 2>/dev/null | head -1 | awk -F: '{print $NF}')
+                raw_webui=$(echo "$raw_webui" | sed "s/\[IP\]/${server_ip}/g")
+                # Replace [PORT:XXXX] with the actual host port for that container port
+                while [[ "$raw_webui" =~ \[PORT:([0-9]+)\] ]]; do
+                    local cport="${BASH_REMATCH[1]}"
+                    local hport
+                    hport=$(docker port "$container_name" "${cport}/tcp" 2>/dev/null | head -1 | awk -F: '{print $NF}' || echo "$cport")
+                    raw_webui="${raw_webui/\[PORT:${cport}\]/${hport}}"
+                done
+            fi
+            webui=$(echo "$raw_webui" | tr -d '\n' | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null || echo '""')
             app_name_label=$(docker inspect "$container_name" --format '{{index .Config.Labels "freeraid.name"}}' 2>/dev/null | tr -d '\n' | python3 -c "import sys,json; print(json.dumps(sys.stdin.read()))" 2>/dev/null || echo '""')
         fi
 
