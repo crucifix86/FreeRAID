@@ -159,13 +159,13 @@ regexp --set=1:root '^\(([^)]+)\)' "\$cmdpath"
 
 menuentry "FreeRAID v${FREERAID_VER}" {
     regexp --set=1:root '^\(([^)]+)\)' "\$cmdpath"
-    linux  (\$root)/vmlinuz quiet loglevel=3
+    linux  (\$root)/vmlinuz boot=live quiet loglevel=3
     initrd (\$root)/initrd.gz
 }
 
 menuentry "FreeRAID v${FREERAID_VER} (verbose)" {
     regexp --set=1:root '^\(([^)]+)\)' "\$cmdpath"
-    linux  (\$root)/vmlinuz loglevel=7
+    linux  (\$root)/vmlinuz boot=live loglevel=7
     initrd (\$root)/initrd.gz
 }
 
@@ -201,12 +201,12 @@ label freeraid
   menu label FreeRAID v${FREERAID_VER}
   menu default
   kernel /vmlinuz
-  append initrd=/initrd.gz quiet loglevel=3
+  append initrd=/initrd.gz boot=live quiet loglevel=3
 
 label freeraid-verbose
   menu label FreeRAID v${FREERAID_VER} (verbose boot)
   kernel /vmlinuz
-  append initrd=/initrd.gz loglevel=7
+  append initrd=/initrd.gz boot=live loglevel=7
 
 label local
   menu label Boot from local disk
@@ -230,8 +230,9 @@ cp "$BUILD_DIR/vmlinuz" "$MNT/vmlinuz"
 info "initrd.gz ($(du -sh "$BUILD_DIR/initrd.gz" | cut -f1))..."
 cp "$BUILD_DIR/initrd.gz" "$MNT/initrd.gz"
 
-info "rootfs.squashfs ($(du -sh "$BUILD_DIR/rootfs.squashfs" | cut -f1)) — please wait..."
-cp "$BUILD_DIR/rootfs.squashfs" "$MNT/rootfs.squashfs"
+info "live/filesystem.squashfs ($(du -sh "$BUILD_DIR/rootfs.squashfs" | cut -f1)) — please wait..."
+mkdir -p "$MNT/live"
+cp "$BUILD_DIR/rootfs.squashfs" "$MNT/live/filesystem.squashfs"
 
 # ── Config directory ──────────────────────────────────────────────────────────
 

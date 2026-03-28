@@ -159,6 +159,13 @@ apt-get install -y -qq qemu-kvm libvirt-daemon-system virtinst 2>/dev/null || tr
 # systemd-resolved for DNS
 apt-get install -y -qq systemd-resolved 2>/dev/null || true
 
+# Live boot — handles USB enumeration, squashfs mount, and overlayfs
+apt-get install -y -qq live-boot live-boot-initramfs-tools 2>/dev/null || true
+
+# Regenerate initrd with live-boot hooks included
+KVER=$(ls /boot/vmlinuz-* 2>/dev/null | sort -V | tail -1 | sed 's|/boot/vmlinuz-||')
+[ -n "$KVER" ] && update-initramfs -u -k "$KVER" 2>/dev/null || true
+
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 CHROOT
@@ -433,162 +440,40 @@ systemctl enable freeraid-mover.timer          2>/dev/null || true
 systemctl enable freeraid-docker-update.timer  2>/dev/null || true
 systemctl enable freeraid-firstboot.service    2>/dev/null || true
 
+# Bind-mount config/ from USB live medium to /boot/config (persistent config)
+cat > /etc/systemd/system/freeraid-config-mount.service <<'SVC'
+[Unit]
+Description=FreeRAID persistent config bind mount
+DefaultDependencies=no
+After=live-boot.service local-fs.target
+Before=freeraid-array.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'mkdir -p /run/live/medium/config /boot/config && mount --bind /run/live/medium/config /boot/config'
+
+[Install]
+WantedBy=multi-user.target
+SVC
+systemctl enable freeraid-config-mount.service 2>/dev/null || true
+
 CHROOT
 
 info "Live system configured"
 
-# ── Step 5: Build custom initrd ───────────────────────────────────────────────
+# ── Step 5: Copy Debian initrd (live-boot hooks included) ─────────────────────
 
-step "5/6" "Building custom initrd (live boot)"
+step "5/6" "Copying Debian initrd (with live-boot)"
 
-INITRD_DIR=$(mktemp -d /tmp/freeraid-initrd-XXXXXX)
-mkdir -p "$INITRD_DIR"/{bin,sbin,lib,lib64,lib/x86_64-linux-gnu,dev,proc,sys,run,mnt/usb,mnt/squash,mnt/overlay,newroot}
+KVER=$(ls "$ROOTFS/boot/vmlinuz-"* 2>/dev/null | sort -V | tail -1 | sed "s|$ROOTFS/boot/vmlinuz-||")
+[ -n "$KVER" ] || die "No kernel found in $ROOTFS/boot/"
 
-# Busybox — search common locations, use || true to prevent pipefail killing script
-BUSYBOX_BIN=$(which busybox 2>/dev/null || true)
-[ -z "$BUSYBOX_BIN" ] && BUSYBOX_BIN=$(find /usr/bin /bin /usr/lib/busybox -name "busybox" -type f 2>/dev/null | head -1 || true)
-[ -z "$BUSYBOX_BIN" ] && die "busybox not found — install busybox-static"
-cp "$BUSYBOX_BIN" "$INITRD_DIR/bin/busybox"
-chmod +x "$INITRD_DIR/bin/busybox"
+DEBIAN_INITRD="$ROOTFS/boot/initrd.img-$KVER"
+[ -f "$DEBIAN_INITRD" ] || die "Debian initrd not found: $DEBIAN_INITRD"
 
-for cmd in sh ash mount umount mkdir mknod modprobe insmod sleep \
-           blkid switch_root echo cat ls grep awk sed find mdev; do
-    ln -sf busybox "$INITRD_DIR/bin/$cmd" 2>/dev/null || true
-done
-ln -sf ../bin/sh "$INITRD_DIR/sbin/init" 2>/dev/null || true
-
-# Real blkid for reliable label lookups
-BLKID_BIN=$(which blkid 2>/dev/null || true)
-if [ -n "$BLKID_BIN" ] && [ -f "$BLKID_BIN" ]; then
-    cp "$BLKID_BIN" "$INITRD_DIR/sbin/blkid"
-    # Copy shared library deps
-    ldd "$BLKID_BIN" 2>/dev/null | awk '/=>/{print $3}' | while read lib; do
-        [ -f "$lib" ] && cp "$lib" "$INITRD_DIR/lib/x86_64-linux-gnu/" 2>/dev/null || true
-    done || true
-    for lib in libblkid.so.1 libmount.so.1 libuuid.so.1 libc.so.6; do
-        find /lib /usr/lib -name "$lib" 2>/dev/null | head -1 | \
-            xargs -I{} cp {} "$INITRD_DIR/lib/x86_64-linux-gnu/" 2>/dev/null || true
-    done
-    find /lib64 /usr/lib64 /lib/x86_64-linux-gnu -name "ld-linux-x86-64.so.2" 2>/dev/null | head -1 | \
-        xargs -I{} cp {} "$INITRD_DIR/lib64/" 2>/dev/null || true
-fi
-
-cat > "$INITRD_DIR/init" <<'INIT'
-#!/bin/sh
-export PATH=/bin:/sbin
-
-mount -t devtmpfs devtmpfs /dev  2>/dev/null || true
-mount -t proc     proc     /proc
-mount -t sysfs    sysfs    /sys
-mount -t tmpfs    tmpfs    /run
-
-# Boot log — written to /run/boot.log, copied to USB once found
-LOG=/run/boot.log
-log() { echo "$*"; echo "$*" >> $LOG; }
-
-log ""
-log "  FreeRAID — starting..."
-log ""
-
-mdev -s 2>/dev/null || true
-
-# USB controller drivers (xhci=USB3, ehci=USB2) — must load before usb_storage
-for mod in xhci_hcd xhci_pci ehci_hcd ehci_pci ohci_hcd \
-           squashfs overlay vfat usb_storage uas mmc_block; do
-    modprobe $mod 2>/dev/null || true
-done
-
-# Give USB controller time to enumerate devices
-sleep 2
-mdev -s 2>/dev/null || true
-
-log "  /dev block devices:"
-ls /dev/sd* /dev/mmcblk* /dev/nvme* 2>/dev/null | while read d; do
-    log "    $d"
-done
-
-# Find the FreeRAID partition — mount each FAT32 partition, look for rootfs.squashfs
-USB_PART=""
-for i in $(seq 1 20); do
-    mdev -s 2>/dev/null || true
-    for dev in /dev/sd?[0-9] /dev/sd?[0-9][0-9] /dev/mmcblk[0-9]p[0-9] /dev/vd?[0-9]; do
-        [ -b "$dev" ] || continue
-        log "  Trying $dev..."
-        if mount -t vfat -o ro "$dev" /mnt/usb 2>>$LOG; then
-            if [ -f /mnt/usb/rootfs.squashfs ]; then
-                log "  Found FreeRAID on $dev"
-                umount /mnt/usb
-                USB_PART="$dev"
-                break
-            fi
-            umount /mnt/usb 2>/dev/null || true
-        fi
-    done
-    [ -n "$USB_PART" ] && break
-    log "  Waiting for FreeRAID drive... ($i)"
-    sleep 1
-done
-
-if [ -z "$USB_PART" ]; then
-    log ""
-    log "  ERROR: FreeRAID drive not found!"
-    log "  Devices in /dev:"
-    ls /dev/ >> $LOG 2>&1
-    log "  /proc/partitions:"
-    cat /proc/partitions >> $LOG 2>&1
-    echo ""
-    echo "  Boot log saved to /run/boot.log"
-    echo "  (Connect a keyboard and check the output above)"
-    echo ""
-    exec /bin/sh
-fi
-
-log "  Found: $USB_PART"
-
-# Mount USB read-write (config/ must be writable)
-mount -t vfat -o rw,noatime "$USB_PART" /mnt/usb || {
-    log "  ERROR: Failed to mount $USB_PART rw"
-    exec /bin/sh
-}
-
-# Save boot log to USB so it survives the boot
-cp $LOG /mnt/usb/boot.log 2>/dev/null || true
-
-# Mount squashfs OS image
-mount -t squashfs -o ro,loop /mnt/usb/rootfs.squashfs /mnt/squash || {
-    echo "  ERROR: Failed to mount rootfs.squashfs"
-    exec /bin/sh
-}
-
-# Overlay: squashfs (ro) + tmpfs (rw writes, lost on reboot)
-mount -t tmpfs -o size=1g tmpfs /mnt/overlay
-mkdir -p /mnt/overlay/upper /mnt/overlay/work
-mount -t overlay overlay \
-    -o lowerdir=/mnt/squash,upperdir=/mnt/overlay/upper,workdir=/mnt/overlay/work \
-    /newroot
-
-# Config directory — bind USB config/ to /boot/config (PERSISTENT across reboots)
-mkdir -p /mnt/usb/config /newroot/boot/config
-mount --bind /mnt/usb/config /newroot/boot/config
-
-# Move essential mounts into newroot
-mkdir -p /newroot/proc /newroot/sys /newroot/dev /newroot/run
-mount --move /proc /newroot/proc
-mount --move /sys  /newroot/sys
-mount --move /dev  /newroot/dev
-mount --move /run  /newroot/run
-
-echo "  Booting FreeRAID..."
-echo ""
-exec switch_root /newroot /sbin/init
-INIT
-
-chmod +x "$INITRD_DIR/init"
-
-info "Packing initrd..."
-( cd "$INITRD_DIR"; find . | cpio -o --format=newc --quiet | gzip -9 ) > "$BUILD_DIR/initrd.gz"
-rm -rf "$INITRD_DIR"
-info "initrd.gz: $(du -sh "$BUILD_DIR/initrd.gz" | cut -f1)"
+cp "$DEBIAN_INITRD" "$BUILD_DIR/initrd.gz"
+info "initrd.gz: $(du -sh "$BUILD_DIR/initrd.gz" | cut -f1) (Debian initrd with live-boot)"
 
 # ── Unmount chroot before squashfs ────────────────────────────────────────────
 
