@@ -490,10 +490,12 @@ Before=freeraid-array.service
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/bin/bash -c '\
-    mkdir -p /boot/config; \
+    mkdir -p /mnt/freeraid-usb /boot/config; \
     DEV=\$(blkid -L FREERAID 2>/dev/null || findfs LABEL=FREERAID 2>/dev/null || echo ""); \
     if [ -n "\$DEV" ]; then \
-        mount -o rw,uid=0,gid=0 "\$DEV" /boot/config || \
+        mount -o rw,uid=0,gid=0 "\$DEV" /mnt/freeraid-usb && \
+        mkdir -p /mnt/freeraid-usb/config /mnt/freeraid-usb/config/compose && \
+        mount --bind /mnt/freeraid-usb/config /boot/config || \
         mount --bind /run/live/medium/config /boot/config || true; \
     else \
         mount --bind /run/live/medium/config /boot/config || true; \
