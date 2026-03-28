@@ -345,6 +345,15 @@ systemctl enable systemd-resolved 2>/dev/null || true
 systemctl enable ssh              2>/dev/null || true
 systemctl enable cockpit.socket   2>/dev/null || true
 systemctl enable docker           2>/dev/null || true
+
+# Docker storage driver: vfs works on live overlayfs systems.
+# Once cache drive is mounted, freeraid array-start will switch to overlay2.
+mkdir -p /etc/docker
+cat > /etc/docker/daemon.json <<'DOCKEREOF'
+{
+  "storage-driver": "vfs"
+}
+DOCKEREOF
 systemctl enable avahi-daemon     2>/dev/null || true
 systemctl enable libvirtd         2>/dev/null || true
 
