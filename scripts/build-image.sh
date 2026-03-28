@@ -85,7 +85,10 @@ mount -t tmpfs tmpfs  "$ROOTFS/run"
 
 step "2/6" "Installing packages inside rootfs"
 
-cp /etc/resolv.conf "$ROOTFS/etc/resolv.conf"
+# resolv.conf may be a symlink in chroot (systemd-resolved) — remove and copy real file
+rm -f "$ROOTFS/etc/resolv.conf"
+cp /etc/resolv.conf "$ROOTFS/etc/resolv.conf" 2>/dev/null || \
+    echo "nameserver 8.8.8.8" > "$ROOTFS/etc/resolv.conf"
 
 chroot "$ROOTFS" bash -s <<'CHROOT'
 export DEBIAN_FRONTEND=noninteractive
