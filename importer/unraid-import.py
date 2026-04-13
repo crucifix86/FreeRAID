@@ -309,6 +309,11 @@ def main():
     parser.add_argument('--only-running', default='',
                         help='Comma-separated container names to include (from `docker ps`). '
                              'Other templates are skipped. Empty = import all templates.')
+    parser.add_argument('--skip-parity', action='store_true',
+                        help="Don't import the parity disk. Use this to test-boot FreeRAID "
+                             "without wiping Unraid's parity — you can reboot back to Unraid "
+                             "without a full parity rebuild. The array runs unprotected "
+                             "(data + cache only) until you add parity later.")
     args = parser.parse_args()
 
     only_set = {n.strip() for n in args.only_running.split(',') if n.strip()} or None
@@ -337,6 +342,10 @@ def main():
         # Parse all Unraid configs
         print("Reading disk config...")
         array_cfg = import_disks(config_dir)
+        if args.skip_parity and array_cfg['parity']:
+            print(f"  --skip-parity: dropping {len(array_cfg['parity'])} parity drive(s) "
+                  f"(Unraid parity left untouched — array will run unprotected)")
+            array_cfg['parity'] = []
         parity_count = len(array_cfg['parity'])
         disk_count   = len(array_cfg['disks'])
         cache_count  = len(array_cfg['cache'])
