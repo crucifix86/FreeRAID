@@ -12,3 +12,8 @@ build/initrd.gz
 # Temp files
 *.tmp
 *.bak
+
+# Installer build output
+dist/
+*.spec
+__pycache__/

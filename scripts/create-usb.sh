@@ -6,6 +6,7 @@
 # Usage:
 #   sudo bash scripts/create-usb.sh /dev/sdX
 #   sudo bash scripts/create-usb.sh /dev/sdX /path/to/unraid-backup.zip
+#   sudo bash scripts/create-usb.sh --skip-parity /dev/sdX /path/to/unraid-backup.zip
 #
 # Build the image first:
 #   sudo bash scripts/build-image.sh
@@ -17,7 +18,17 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
-BUILD_DIR="$REPO_DIR/build"
+BUILD_DIR="${FREERAID_BUILD_DIR:-$REPO_DIR/build}"
+
+SKIP_PARITY=false
+POSITIONAL=()
+for arg in "$@"; do
+    case "$arg" in
+        --skip-parity) SKIP_PARITY=true ;;
+        *) POSITIONAL+=("$arg") ;;
+    esac
+done
+set -- "${POSITIONAL[@]:+${POSITIONAL[@]}}"
 
 USB_DEV="${1:-}"
 UNRAID_ZIP="${2:-}"
@@ -246,9 +257,15 @@ if [ -n "$UNRAID_ZIP" ] && [ -f "$UNRAID_ZIP" ]; then
     info "Unraid backup → config/unraid-backup.zip (will import on first boot)"
 fi
 
+if $SKIP_PARITY; then
+    touch "$MNT/config/.skip-parity"
+    info "Skip-parity marker set — Unraid parity disk will NOT be reformatted (test boot)"
+fi
+
 # Write default config if none present
 if [ ! -f "$MNT/config/freeraid.conf.json" ]; then
-    cp "$REPO_DIR/core/freeraid.conf.json" "$MNT/config/freeraid.conf.json"
+    CONFIG_TEMPLATE="${FREERAID_CONFIG_TEMPLATE:-$REPO_DIR/core/freeraid.conf.json}"
+    cp "$CONFIG_TEMPLATE" "$MNT/config/freeraid.conf.json"
     info "Default config written to config/freeraid.conf.json"
 fi
 

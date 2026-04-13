@@ -240,10 +240,17 @@ cat > "$INSTALL_DIR/freeraid-firstboot" <<'FIRSTBOOT'
 #!/bin/bash
 BACKUP="/boot/config/unraid-backup.zip"
 FLAG="/boot/config/.unraid-imported"
+SKIP_PARITY_MARKER="/boot/config/.skip-parity"
 COMPOSE_DIR="/etc/freeraid/compose"
 
 [ -f "$BACKUP" ] || exit 0
 [ -f "$FLAG"   ] && exit 0
+
+IMPORT_ARGS=()
+if [ -f "$SKIP_PARITY_MARKER" ]; then
+    IMPORT_ARGS+=(--skip-parity)
+    echo "FreeRAID: skip-parity marker found — Unraid parity will be left intact"
+fi
 
 echo "FreeRAID: importing Unraid backup..."
 TMPDIR=$(mktemp -d /tmp/freeraid-firstboot-XXXXXX)
@@ -260,6 +267,7 @@ python3 /usr/local/lib/freeraid/unraid-import \
     "$CONFDIR" \
     --out /boot/config/freeraid.conf.json \
     --compose-dir "$COMPOSE_DIR" \
+    "${IMPORT_ARGS[@]}" \
     && date -Iseconds > "$FLAG" \
     && echo "FreeRAID: import complete." \
     || echo "FreeRAID: import had errors — check /boot/config/freeraid.conf.json"

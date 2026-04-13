@@ -450,6 +450,14 @@
                 <div class="settings-value" id="s-pool-mount">—</div>
               </div>
             </div>
+            <div class="settings-row" style="margin-top:16px;align-items:center;gap:12px;flex-wrap:wrap">
+              <div style="flex:1;min-width:240px">
+                <div class="settings-label" style="margin-bottom:4px">Timezone</div>
+                <select id="s-timezone" class="install-input" style="width:100%;max-width:360px"></select>
+              </div>
+              <button class="btn btn-primary" onclick="saveTimezone()" style="align-self:flex-end">Save</button>
+              <span id="s-timezone-status" style="font-size:13px;color:var(--text-dim);align-self:flex-end;padding-bottom:8px"></span>
+            </div>
           </div>
         </div>
 

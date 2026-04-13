@@ -222,7 +222,7 @@ function switchTab(name) {
   if (name === 'network') { refreshNetworkTab(); refreshTailscale(); }
   if (name === 'users')   refreshUsers();
   if (name === 'logs')    fetchLog();
-  if (name === 'settings') { loadNotifSettings(); loadUpsConfig(); }
+  if (name === 'settings') { loadNotifSettings(); loadUpsConfig(); loadTimezone(); }
   if (name === 'plugins') refreshPlugins();
   if (name === 'vms')     { refreshVms(); refreshIsoList(); }
 }
@@ -3569,6 +3569,43 @@ function setSpindown(dev, value) {
   cockpit.spawn(['freeraid', 'spindown-set', dev, value], { superuser: 'require', err: 'out' })
     .then(() => refreshSpindown())
     .catch(() => {});
+}
+
+// ── Timezone ──────────────────────────────────────────────────────────────────
+
+function loadTimezone() {
+  const sel = document.getElementById('s-timezone');
+  if (!sel) return;
+  Promise.all([
+    cockpit.spawn(['freeraid', 'timezone-list'], { err: 'out' }),
+    cockpit.spawn(['freeraid', 'timezone-get'], { err: 'out' })
+  ]).then(([listJson, curJson]) => {
+    const list = JSON.parse(listJson);
+    const cur  = JSON.parse(curJson).timezone || 'UTC';
+    sel.innerHTML = list.map(tz =>
+      `<option value="${tz}"${tz === cur ? ' selected' : ''}>${tz}</option>`
+    ).join('');
+  }).catch(e => {
+    sel.innerHTML = '<option>Error loading zones</option>';
+    console.error('timezone load:', e);
+  });
+}
+
+function saveTimezone() {
+  const tz = document.getElementById('s-timezone').value;
+  const status = document.getElementById('s-timezone-status');
+  if (!tz) return;
+  status.textContent = 'Saving…';
+  cockpit.spawn(['freeraid', 'timezone-set', tz], { superuser: 'require', err: 'out' })
+    .then(() => {
+      status.textContent = '✓ Saved';
+      slog('success', `Timezone set to ${tz}`);
+      setTimeout(() => { status.textContent = ''; }, 3000);
+    })
+    .catch(e => {
+      status.textContent = 'Error';
+      showAlert('error', `Failed to set timezone: ${e.message || e}`);
+    });
 }
 
 // ── Notifications ─────────────────────────────────────────────────────────────

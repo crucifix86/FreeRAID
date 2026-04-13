@@ -3181,6 +3181,26 @@ cmd_set_hostname() {
     echo "{\"ok\":true,\"hostname\":\"$name\"}"
 }
 
+cmd_timezone_get() {
+    local tz
+    tz=$(timedatectl show --value -p Timezone 2>/dev/null || cat /etc/timezone 2>/dev/null || echo "UTC")
+    printf '{"timezone":"%s"}\n' "$tz"
+}
+
+cmd_timezone_list() {
+    timedatectl list-timezones 2>/dev/null | jq -R . | jq -s .
+}
+
+cmd_timezone_set() {
+    local tz="${1:-}"
+    [ -z "$tz" ] && die "Usage: freeraid timezone-set <zone>"
+    [ ! -f "/usr/share/zoneinfo/$tz" ] && die "Invalid timezone: $tz"
+    timedatectl set-timezone "$tz"
+    jq --arg tz "$tz" '.system.timezone = $tz' "$CONFIG_FILE" \
+        > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+    printf '{"ok":true,"timezone":"%s"}\n' "$tz"
+}
+
 # ── Network management ────────────────────────────────────────────────────────
 
 cmd_network_info() {
@@ -4246,6 +4266,9 @@ case "${1:-help}" in
     registry-sync)       cmd_registry_sync ;;
     sysinfo)            cmd_sysinfo ;;
     set-hostname)       cmd_set_hostname "${2:-}" ;;
+    timezone-get)       cmd_timezone_get ;;
+    timezone-list)      cmd_timezone_list ;;
+    timezone-set)       cmd_timezone_set "${2:-}" ;;
     network-info)       cmd_network_info ;;
     network-set)        cmd_network_set "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" ;;
     users-list)           cmd_users_list ;;
