@@ -6,6 +6,17 @@ Inspired by Unraid. Built on Debian 12 + Cockpit + SnapRAID + mergerfs.
 
 ---
 
+## Screenshots
+
+| | |
+|---|---|
+| ![Login](docs/screenshots/01-login.png) | ![Dashboard](docs/screenshots/02-dashboard.png) |
+| **Themed login page** | **Dashboard — array status, parity schedule, cache mover** |
+| ![Shares](docs/screenshots/03-shares.png) | ![Settings](docs/screenshots/04-settings.png) |
+| **Shares — SMB/NFS per-share, Unraid config drop-in import** | **Settings — one-click updates, email/webhook notifications** |
+
+---
+
 ## Features
 
 - **Runs from USB** — boots into RAM, USB is only used for persistent config
