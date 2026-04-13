@@ -390,7 +390,37 @@ cmd_start() {
 
         if ! mountpoint -q "$mnt"; then
             info "Mounting $actual_dev → $mnt"
-            mount "$actual_dev" "$mnt" || { warn "Failed to mount $actual_dev — skipping (degraded)"; degraded=true; continue; }
+            mount_dev="$actual_dev"
+            if ! mount "$mount_dev" "$mnt" 2>/dev/null; then
+                # 4Kn drive with a 512-sector XFS (common on Unraid-era HGST He
+                # drives): wrap in a loop device that presents 512-byte sectors.
+                # XFS requires fs sector size >= device logical block size; if
+                # the fs was created on Unraid's md layer (which always reports
+                # 512-byte sectors), direct mount fails with ENOSYS. A loop
+                # device with --sector-size 512 translates the mismatch away.
+                local lbs fs_sect
+                local sysblk="/sys/block/$(basename "$(readlink -f "$actual_dev" | sed -E 's/p?[0-9]+$//')")/queue/logical_block_size"
+                lbs=$(cat "$sysblk" 2>/dev/null || echo "")
+                fs_sect=$(blkid -o value -s BLOCK_SIZE "$actual_dev" 2>/dev/null || echo "")
+                if [ -n "$lbs" ] && [ -n "$fs_sect" ] && [ "$lbs" != "$fs_sect" ] && [ "$fs_sect" = "512" ]; then
+                    info "Sector size mismatch (device=$lbs fs=$fs_sect) — wrapping in loop device"
+                    local loop_dev
+                    loop_dev=$(losetup --sector-size 512 --find --show "$actual_dev" 2>/dev/null || echo "")
+                    if [ -n "$loop_dev" ] && mount "$loop_dev" "$mnt" 2>/dev/null; then
+                        info "Mounted $actual_dev via $loop_dev (512-byte sector wrap)"
+                        mount_dev="$loop_dev"
+                    else
+                        [ -n "$loop_dev" ] && losetup -d "$loop_dev" 2>/dev/null || true
+                        warn "Failed to mount $actual_dev (even with loop wrap) — skipping (degraded)"
+                        degraded=true
+                        continue
+                    fi
+                else
+                    warn "Failed to mount $actual_dev — skipping (degraded)"
+                    degraded=true
+                    continue
+                fi
+            fi
         else
             info "$mnt already mounted"
         fi
@@ -507,11 +537,17 @@ cmd_stop() {
         umount "$pool" || umount -l "$pool"
     fi
 
-    # Unmount data disks in reverse order
+    # Unmount data disks in reverse order. If the disk was mounted via a
+    # sector-size loop wrap (4Kn fix in cmd_start), detach the loop too.
     while IFS=' ' read -r dev mnt fstype; do
         if mountpoint -q "$mnt" 2>/dev/null; then
+            local src
+            src=$(findmnt -no SOURCE "$mnt" 2>/dev/null || echo "")
             info "Unmounting $mnt"
             umount "$mnt" || umount -l "$mnt"
+            case "$src" in
+                /dev/loop*) losetup -d "$src" 2>/dev/null || true ;;
+            esac
         fi
     done < <(cfg_array_disks_enabled | tac)
 
