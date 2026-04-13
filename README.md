@@ -16,6 +16,8 @@ The fastest path is the GUI installer — it downloads the latest image, writes 
 
 **[Download the installer at getfreeraid.com](https://getfreeraid.com/download/)**
 
+> 🧪 **The GUI installer is still under testing.** If you hit a snag, [open an issue](https://github.com/crucifix86/FreeRAID/issues) and include the log output.
+
 ```bash
 sudo ./freeraid-installer
 ```
