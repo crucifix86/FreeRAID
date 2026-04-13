@@ -222,6 +222,8 @@ def import_docker_templates(config_dir: Path, only: set | None = None) -> list:
             overview = root.findtext('Overview', '')
             network  = root.findtext('Network', 'bridge')
             priv     = root.findtext('Privileged', 'false').lower() == 'true'
+            webui    = (root.findtext('WebUI', '') or '').strip()
+            icon     = (root.findtext('Icon', '') or '').strip()
 
             env_vars = {}
             for env in root.findall('Config[@Type="Variable"]'):
@@ -250,6 +252,8 @@ def import_docker_templates(config_dir: Path, only: set | None = None) -> list:
                 "name": name,
                 "image": image,
                 "overview": overview,
+                "webui": webui,
+                "icon": icon,
                 "network_mode": network,
                 "privileged": priv,
                 "environment": env_vars,
@@ -265,9 +269,45 @@ def import_docker_templates(config_dir: Path, only: set | None = None) -> list:
     return apps
 
 
-def write_compose_files(apps: list, output_dir: Path):
+def _build_cache_share_map(shares: list) -> dict:
+    """Map share-name → /mnt/cache/<name> for shares that prefer/only on cache.
+    mergerfs + SQLite doesn't mix (disk I/O errors on sonarr/radarr/plex DBs),
+    so container volumes touching these shares are rewritten to bypass the
+    mergerfs pool. This is how Unraid's shfs effectively behaves."""
+    m = {}
+    for s in shares:
+        if s.get('cache_mode') in ('prefer', 'only'):
+            m[s['name']] = f"/mnt/cache/{s['name']}"
+    return m
+
+
+def _rewrite_volume(vol_spec: str, share_map: dict) -> str:
+    """Rewrite `host:guest:mode` replacing /mnt/user/<share>/... → /mnt/cache/<share>/..."""
+    if not share_map or not vol_spec.startswith('/mnt/user/'):
+        return vol_spec
+    # vol_spec is "host:guest:mode" — only rewrite host half
+    parts = vol_spec.split(':')
+    host = parts[0]
+    rest = parts[1:]
+    # host looks like /mnt/user/<share>[/subpath]
+    tail = host[len('/mnt/user/'):]
+    if '/' in tail:
+        share, sub = tail.split('/', 1)
+        new_prefix = share_map.get(share)
+        if new_prefix:
+            host = f'{new_prefix}/{sub}'
+    else:
+        share = tail
+        new_prefix = share_map.get(share)
+        if new_prefix:
+            host = new_prefix
+    return ':'.join([host] + rest)
+
+
+def write_compose_files(apps: list, output_dir: Path, share_map: dict | None = None):
     """Generate docker-compose.yml files for each imported app."""
     output_dir.mkdir(parents=True, exist_ok=True)
+    share_map = share_map or {}
 
     for app in apps:
         name = re.sub(r'[^a-z0-9_-]', '-', app['name'].lower())
@@ -291,7 +331,17 @@ def write_compose_files(apps: list, output_dir: Path):
         if app.get("ports"):
             svc["ports"] = app["ports"]
         if app.get("volumes"):
-            svc["volumes"] = app["volumes"]
+            svc["volumes"] = [_rewrite_volume(v, share_map) for v in app["volumes"]]
+
+        # Labels for the FreeRAID web UI — the core reads freeraid.webui off
+        # the container's Config.Labels to render the "Open Web UI" button.
+        labels = {}
+        if app.get("webui"):
+            labels["freeraid.webui"] = app["webui"]
+        if app.get("icon"):
+            labels["freeraid.icon"] = app["icon"]
+        if labels:
+            svc["labels"] = labels
 
         out_file = output_dir / f'{name}.docker-compose.yml'
         # Write as YAML-ish JSON (proper YAML writer not always available)
@@ -367,8 +417,11 @@ def main():
         print(f"  Found {len(apps)} Docker apps")
 
         if apps:
+            share_map = _build_cache_share_map(shares)
+            if share_map:
+                print(f"  Cache-preferred shares (bypass mergerfs): {sorted(share_map.keys())}")
             print(f"Writing docker-compose files to {args.compose_dir}/")
-            write_compose_files(apps, Path(args.compose_dir))
+            write_compose_files(apps, Path(args.compose_dir), share_map=share_map)
 
         # Build FreeRAID config
         freeraid_conf = {
