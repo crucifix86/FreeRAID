@@ -10,7 +10,7 @@ Built on Debian Linux + MergerFS + SnapRAID + Cockpit web UI.
 
 ---
 
-## Current Version: v0.5.3
+## Current Version: v0.5.4
 
 ---
 
@@ -276,6 +276,7 @@ Run `sudo vm/setup-vm-network.sh` once before starting the VM to set up TAP + pr
 | v0.5.1 | Tailscale VPN — install, connect/disconnect, auth URL flow, status card in Network tab with IP and connection state |
 | v0.5.2 | Share-level passwords — per-share samba user, Password badge on card, inline panel to set/clear |
 | v0.5.3 | Multiple storage pools — extra MergerFS pools (no parity), assign drives to any pool, shares target any pool, auto-start/stop with array |
+| v0.5.4 | Unraid import hardened on real hardware: parse binary super.dat for array assignments, read pools/ for cache, --skip-parity for reversible test boots, --only-running filter, extract WebUI/Icon labels, rewrite cache-preferred volumes to /mnt/cache (fixes SQLite on mergerfs). Core: auto-loop-wrap 4Kn drives with 512-byte-sector XFS. Update: atomic file replacement to prevent mid-swap races. Docs: VPS CGNAT-bypass reference, Unraid-vs-FreeRAID settings catalog, UI screenshots in README. |
 
 ---
 
