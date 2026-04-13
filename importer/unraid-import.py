@@ -36,65 +36,99 @@ def parse_cfg(path: Path) -> dict:
     return result
 
 
+def parse_super_dat(path: Path) -> list:
+    """Parse Unraid's binary super.dat.
+    Layout: 128-byte header, then 128-byte slot records.
+    Per slot:
+      +0x08 u32 slot number (0=parity, 1..=data)
+      +0x0C u32 status (7 = DISK_OK, 0 = empty)
+      +0x18..+0x58 disk id (null-terminated ascii, e.g. ST18000NM003D-3DL103_ZVTAZGL6)
+    """
+    if not path.exists():
+        return []
+    data = path.read_bytes()
+    slots = []
+    for off in range(0x80, len(data), 0x80):
+        rec = data[off:off + 0x80]
+        if len(rec) < 0x58:
+            break
+        slot_num = int.from_bytes(rec[0x08:0x0C], 'little')
+        status   = int.from_bytes(rec[0x0C:0x10], 'little')
+        disk_id  = rec[0x18:0x58].split(b'\x00', 1)[0].decode('ascii', errors='replace')
+        if status == 7 and disk_id:
+            slots.append({'slot': slot_num, 'status': status, 'disk_id': disk_id})
+    return slots
+
+
+def id_to_bypath(disk_id: str) -> str:
+    """Best-effort /dev/disk/by-id/ path from Unraid's serial-style disk_id."""
+    # NVMe ids in /dev/disk/by-id/ look like: nvme-<MODEL>_<SERIAL>
+    # Unraid stores them in that exact form for NVMe, so we detect common vendor prefixes.
+    nvme_markers = ('WD_BLACK', 'WDS', 'Samsung_SSD', 'SAMSUNG_', 'KINGSTON_',
+                    'Sabrent', 'Crucial_', 'SPCC_', 'Seagate_FireCuda', 'nvme-')
+    if any(disk_id.startswith(m) for m in nvme_markers):
+        return f'/dev/disk/by-id/nvme-{disk_id}'
+    return f'/dev/disk/by-id/ata-{disk_id}'
+
+
+def import_cache_pools(config_dir: Path) -> list:
+    """Read pools/*.cfg — each pool is one cache/extra pool with one or more disks."""
+    pools_dir = config_dir / 'pools'
+    if not pools_dir.exists():
+        return []
+    cache = []
+    for cfg_file in sorted(pools_dir.glob('*.cfg')):
+        p = parse_cfg(cfg_file)
+        name = cfg_file.stem
+        disk_id = p.get('diskId', '')
+        if not disk_id:
+            continue
+        bypath = id_to_bypath(disk_id)
+        cache.append({
+            "slot": name,
+            "device": f'{bypath}-part1',  # existing btrfs lives on partition 1
+            "mountpoint": f'/mnt/{name}',
+            "fstype": p.get('diskFsType', 'btrfs'),
+            "label": name.capitalize(),
+            "enabled": True,
+            "serial": disk_id,
+        })
+    return cache
+
+
 def import_disks(config_dir: Path) -> dict:
-    """Read disk.cfg and map to FreeRAID array config."""
-    disk_cfg = parse_cfg(config_dir / 'disk.cfg')
+    """Build FreeRAID array config from Unraid's super.dat (array) + pools/ (cache)."""
+    super_slots = parse_super_dat(config_dir / 'super.dat')
 
     parity = []
     disks = []
-    cache = []
 
-    # Unraid disk.cfg keys: diskNumber.X, parity.X, cache.X
-    # diskNumber.0 is actually labeled 'parity' in Unraid
-    # disk slots start at diskNumber.1
-
-    # Parity drives
-    for key_prefix in ['parity', 'parity2', 'parity3']:
-        dev = disk_cfg.get(f'{key_prefix}')
-        if dev and dev != '':
+    for s in super_slots:
+        bypath = id_to_bypath(s['disk_id'])
+        if s['slot'] == 0:
+            # Parity gets reformatted for snapraid — use whole-disk symlink, no -part1
             parity.append({
-                "slot": key_prefix,
-                "device": dev,
-                "label": key_prefix.capitalize()
+                "slot": "parity",
+                "device": bypath,
+                "mountpoint": "/mnt/parity",
+                "fstype": "xfs",
+                "label": "Parity",
+                "serial": s['disk_id'],
+            })
+        else:
+            n = s['slot']
+            # Data disks keep their existing XFS on partition 1 (Unraid's layout)
+            disks.append({
+                "slot": f'disk{n}',
+                "device": f'{bypath}-part1',
+                "mountpoint": f'/mnt/disk{n}',
+                "fstype": "xfs",
+                "label": f'Disk {n}',
+                "enabled": True,
+                "serial": s['disk_id'],
             })
 
-    # Data disks — Unraid keys are like diskNumber.1, diskNumber.2...
-    # Also handle old format: disk1, disk2...
-    disk_nums = set()
-    for key in disk_cfg:
-        m = re.match(r'^diskNumber\.(\d+)$', key)
-        if m:
-            disk_nums.add(int(m.group(1)))
-        m = re.match(r'^disk(\d+)$', key)
-        if m:
-            disk_nums.add(int(m.group(1)))
-
-    for n in sorted(disk_nums):
-        dev = disk_cfg.get(f'diskNumber.{n}') or disk_cfg.get(f'disk{n}', '')
-        if not dev:
-            continue
-        slot = f'disk{n}'
-        disks.append({
-            "slot": slot,
-            "device": dev,
-            "mountpoint": f'/mnt/{slot}',
-            "fstype": disk_cfg.get(f'diskFsType.{n}', 'xfs'),
-            "label": f'Disk {n}',
-            "enabled": True
-        })
-
-    # Cache
-    cache_dev = disk_cfg.get('cacheNumber.1') or disk_cfg.get('cache', '')
-    if cache_dev:
-        cache.append({
-            "slot": "cache",
-            "device": cache_dev,
-            "mountpoint": "/mnt/cache",
-            "fstype": disk_cfg.get('cacheFsType.1', 'ext4'),
-            "label": "Cache",
-            "enabled": True
-        })
-
+    cache = import_cache_pools(config_dir)
     return {"parity": parity, "disks": disks, "cache": cache}
 
 
@@ -165,8 +199,9 @@ def import_shares(config_dir: Path) -> list:
     return shares
 
 
-def import_docker_templates(config_dir: Path) -> list:
-    """Convert Unraid Docker XML templates to compose-compatible app entries."""
+def import_docker_templates(config_dir: Path, only: set | None = None) -> list:
+    """Convert Unraid Docker XML templates to compose-compatible app entries.
+    If `only` is provided, templates whose <Name> isn't in that set are skipped."""
     templates_dir = config_dir / 'plugins' / 'dockerMan' / 'templates-user'
     if not templates_dir.exists():
         templates_dir = config_dir / 'docker'
@@ -181,6 +216,8 @@ def import_docker_templates(config_dir: Path) -> list:
             root = tree.getroot()
 
             name     = root.findtext('Name', xml_file.stem)
+            if only is not None and name not in only:
+                continue
             image    = root.findtext('Repository', '')
             overview = root.findtext('Overview', '')
             network  = root.findtext('Network', 'bridge')
@@ -269,7 +306,12 @@ def main():
     parser.add_argument('source', help='Path to Unraid config directory or USB device (e.g. /dev/sdb)')
     parser.add_argument('--out', default='freeraid.conf.json', help='Output config file path')
     parser.add_argument('--compose-dir', default='./compose', help='Output directory for docker-compose files')
+    parser.add_argument('--only-running', default='',
+                        help='Comma-separated container names to include (from `docker ps`). '
+                             'Other templates are skipped. Empty = import all templates.')
     args = parser.parse_args()
+
+    only_set = {n.strip() for n in args.only_running.split(',') if n.strip()} or None
 
     source = Path(args.source)
     mounted_tmp = None
@@ -310,7 +352,9 @@ def main():
         print(f"  Found {len(shares)} shares")
 
         print("Reading Docker templates...")
-        apps = import_docker_templates(config_dir)
+        apps = import_docker_templates(config_dir, only=only_set)
+        if only_set:
+            print(f"  Filtering to running set: {sorted(only_set)}")
         print(f"  Found {len(apps)} Docker apps")
 
         if apps:
@@ -335,7 +379,7 @@ def main():
                 "disks":           array_cfg['disks'],
                 "cache":           array_cfg['cache'],
                 "pool_mountpoint": "/mnt/user",
-                "mergerfs_options": "defaults,allow_other,use_ino,cache.files=off,dropcacheonclose=true,category.create=mfs"
+                "mergerfs_options": "defaults,allow_other,cache.files=off,dropcacheonclose=true,category.create=mfs"
             },
 
             "snapraid": {
