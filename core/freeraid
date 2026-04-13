@@ -2509,23 +2509,41 @@ cmd_update() {
     info "Applying update..."
     tar -xzf "$tmpdir/components.tar.gz" -C "$tmpdir"
 
+    # Atomic install: copy to <target>.new on the same filesystem, then
+    # rename into place. rename(2) is atomic, so anything that execs/opens
+    # the target (including `freeraid` itself, mid-update) sees either the
+    # old file or the new file — never a half-written one. This fixes the
+    # "syntax error near unexpected token ;;" race from prior releases.
+    _install_atomic() {
+        local src="$1" dst="$2"
+        # Resolve symlinks so we write to the real file (e.g. /usr/bin/freeraid
+        # is a symlink to /usr/local/bin/freeraid in the live image).
+        local real; real=$(readlink -f "$dst" 2>/dev/null || echo "$dst")
+        local tmp="${real}.new"
+        cp "$src" "$tmp"
+        chmod --reference="$real" "$tmp" 2>/dev/null || chmod +x "$tmp"
+        mv -f "$tmp" "$real"
+    }
+
     # Install CLI
     if [ -f "$tmpdir/freeraid" ]; then
-        cp "$tmpdir/freeraid" /usr/local/bin/freeraid
-        chmod +x /usr/local/bin/freeraid
+        _install_atomic "$tmpdir/freeraid" /usr/local/bin/freeraid
         info "CLI updated"
     fi
 
-    # Install web UI
+    # Install web UI — per-file atomic replace
     if [ -d "$tmpdir/web/freeraid" ]; then
-        cp -r "$tmpdir/web/freeraid/." /usr/share/cockpit/freeraid/
+        mkdir -p /usr/share/cockpit/freeraid
+        for f in "$tmpdir/web/freeraid/"*; do
+            [ -f "$f" ] || continue
+            _install_atomic "$f" "/usr/share/cockpit/freeraid/$(basename "$f")"
+        done
         info "Web UI updated"
     fi
 
     # Install importer
     if [ -f "$tmpdir/unraid-import" ]; then
-        cp "$tmpdir/unraid-import" /usr/local/bin/freeraid-import
-        chmod +x /usr/local/bin/freeraid-import
+        _install_atomic "$tmpdir/unraid-import" /usr/local/bin/freeraid-import
         info "Importer updated"
     fi
 
