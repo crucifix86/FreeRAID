@@ -461,6 +461,27 @@
           </div>
         </div>
 
+        <!-- Hardware -->
+        <div class="settings-section">
+          <h2 class="settings-section-title">Hardware</h2>
+          <div class="settings-card">
+            <div class="settings-row" style="align-items:flex-start;gap:16px;flex-wrap:wrap">
+              <div style="flex:1;min-width:260px">
+                <div class="settings-label">NVIDIA GPU</div>
+                <div class="settings-value" id="s-nvidia-gpu" style="font-size:14px">—</div>
+                <div id="s-nvidia-details" style="font-size:13px;color:var(--text-dim);margin-top:6px;line-height:1.5"></div>
+              </div>
+              <div style="align-self:center">
+                <button class="btn btn-primary" id="btn-nvidia-install" onclick="installNvidia()">Install NVIDIA Driver</button>
+                <div id="s-nvidia-status" style="font-size:13px;color:var(--text-dim);margin-top:6px;max-width:320px"></div>
+              </div>
+            </div>
+            <div id="nvidia-install-log-wrap" class="hidden" style="margin-top:12px">
+              <div class="log-panel" id="nvidia-install-log" style="max-height:240px;overflow:auto;font-size:12px"></div>
+            </div>
+          </div>
+        </div>
+
         <!-- Notifications -->
         <div class="settings-section">
           <h2 class="settings-section-title">Notifications</h2>

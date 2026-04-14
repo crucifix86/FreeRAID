@@ -495,12 +495,32 @@ StandardError=journal+console
 WantedBy=multi-user.target
 SVC
 
+# Re-install NVIDIA support on every boot when the user has opted in.
+# Live-boot wipes the root overlay each boot, so installs don't persist.
+cat > /etc/systemd/system/freeraid-nvidia.service <<'SVC'
+[Unit]
+Description=FreeRAID NVIDIA driver + container-toolkit installer
+After=network-online.target local-fs.target
+Wants=network-online.target
+Before=docker.service
+ConditionPathExists=/boot/config/.nvidia-enabled
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/freeraid nvidia-install
+StandardOutput=journal+console
+StandardError=journal+console
+[Install]
+WantedBy=multi-user.target
+SVC
+
 systemctl enable freeraid-array.service        2>/dev/null || true
 systemctl enable freeraid-sync.timer           2>/dev/null || true
 systemctl enable freeraid-scrub.timer          2>/dev/null || true
 systemctl enable freeraid-mover.timer          2>/dev/null || true
 systemctl enable freeraid-docker-update.timer  2>/dev/null || true
 systemctl enable freeraid-firstboot.service    2>/dev/null || true
+systemctl enable freeraid-nvidia.service       2>/dev/null || true
 
 # Mount config/ from USB flash drive to /boot/config (persistent config)
 # With toram, live-boot copies squashfs to RAM and releases the USB device.

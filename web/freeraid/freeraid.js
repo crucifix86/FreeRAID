@@ -222,7 +222,7 @@ function switchTab(name) {
   if (name === 'network') { refreshNetworkTab(); refreshTailscale(); }
   if (name === 'users')   refreshUsers();
   if (name === 'logs')    fetchLog();
-  if (name === 'settings') { loadNotifSettings(); loadUpsConfig(); loadTimezone(); }
+  if (name === 'settings') { loadNotifSettings(); loadUpsConfig(); loadTimezone(); loadNvidiaStatus(); }
   if (name === 'plugins') refreshPlugins();
   if (name === 'vms')     { refreshVms(); refreshIsoList(); }
 }
@@ -3605,6 +3605,72 @@ function saveTimezone() {
     .catch(e => {
       status.textContent = 'Error';
       showAlert('error', `Failed to set timezone: ${e.message || e}`);
+    });
+}
+
+// ── NVIDIA hardware ──────────────────────────────────────────────────────────
+
+function loadNvidiaStatus() {
+  const gpuEl    = document.getElementById('s-nvidia-gpu');
+  const detailEl = document.getElementById('s-nvidia-details');
+  const btn      = document.getElementById('btn-nvidia-install');
+  const statusEl = document.getElementById('s-nvidia-status');
+  if (!gpuEl) return;
+  cockpit.spawn(['freeraid', 'nvidia-status'], { err: 'out' })
+    .then(out => {
+      const s = JSON.parse(out);
+      if (!s.gpu_detected) {
+        gpuEl.textContent = 'No NVIDIA GPU detected';
+        detailEl.textContent = '';
+        btn.disabled = true;
+        btn.style.opacity = 0.5;
+        statusEl.textContent = '';
+        return;
+      }
+      gpuEl.textContent = s.gpu_model || 'NVIDIA GPU';
+      detailEl.innerHTML =
+        `Driver loaded: <strong>${s.driver_loaded ? 'yes' : 'no'}</strong><br>` +
+        `Container toolkit: <strong>${s.toolkit_installed ? 'installed' : 'not installed'}</strong><br>` +
+        `Docker runtime: <strong>${s.runtime_registered ? 'registered' : 'not registered'}</strong><br>` +
+        `Auto-install on boot: <strong>${s.enabled_on_boot ? 'yes' : 'no'}</strong>`;
+      const fullyReady = s.driver_loaded && s.toolkit_installed && s.runtime_registered;
+      btn.disabled = false;
+      btn.style.opacity = 1;
+      btn.textContent = fullyReady ? 'Re-install NVIDIA driver' : 'Install NVIDIA driver';
+      statusEl.textContent = fullyReady
+        ? '✓ Ready. Plex and other GPU-transcoding containers will use the GPU.'
+        : (s.enabled_on_boot
+            ? 'Will re-install on next boot (live-boot resets root fs).'
+            : 'Takes a few minutes. A reboot may be needed for the kernel module to load.');
+    })
+    .catch(e => { gpuEl.textContent = 'Status unavailable'; console.error(e); });
+}
+
+function installNvidia() {
+  const btn = document.getElementById('btn-nvidia-install');
+  const wrap = document.getElementById('nvidia-install-log-wrap');
+  const log = document.getElementById('nvidia-install-log');
+  const statusEl = document.getElementById('s-nvidia-status');
+  if (!btn) return;
+  if (!confirm('Install NVIDIA driver + container toolkit? Takes a few minutes.')) return;
+  btn.disabled = true;
+  btn.textContent = 'Installing…';
+  wrap.classList.remove('hidden');
+  log.textContent = '';
+  statusEl.textContent = '';
+
+  const proc = cockpit.spawn(['freeraid', 'nvidia-install'],
+                             { superuser: 'require', err: 'out', pty: false });
+  proc.stream(chunk => { log.textContent += chunk; log.scrollTop = log.scrollHeight; });
+  proc.then(() => {
+      log.textContent += '\n✓ Install complete.\n';
+      loadNvidiaStatus();
+      btn.disabled = false;
+    })
+    .catch(e => {
+      log.textContent += `\n✗ Failed: ${e.message || e}\n`;
+      btn.disabled = false;
+      btn.textContent = 'Install NVIDIA driver';
     });
 }
 

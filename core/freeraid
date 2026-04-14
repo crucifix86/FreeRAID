@@ -3204,6 +3204,96 @@ cmd_set_hostname() {
     echo "{\"ok\":true,\"hostname\":\"$name\"}"
 }
 
+cmd_nvidia_status() {
+    # Returns JSON: gpu_detected, gpu_model, driver_loaded, toolkit_installed,
+    #               runtime_registered, enabled_on_boot
+    local gpu_detected=false gpu_model="" driver_loaded=false
+    local toolkit_installed=false runtime_registered=false enabled_on_boot=false
+
+    # Detect via /sys (no pciutils dependency). Vendor 0x10de = NVIDIA.
+    for d in /sys/bus/pci/devices/*/; do
+        [ -f "$d/vendor" ] && [ -f "$d/class" ] || continue
+        [ "$(cat "$d/vendor" 2>/dev/null)" = "0x10de" ] || continue
+        cls=$(cat "$d/class" 2>/dev/null)
+        # VGA (0x030000) or 3D controller (0x030200)
+        case "$cls" in 0x0300*|0x0302*) ;; *) continue ;; esac
+        gpu_detected=true
+        # Resolve device ID to a friendly name via modalias/device file
+        dev_id=$(cat "$d/device" 2>/dev/null)
+        gpu_model="NVIDIA GPU (PCI ${d##*/devices/}, device $dev_id)"
+        # Prefer nvidia-smi if it's available
+        if command -v nvidia-smi &>/dev/null; then
+            m=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)
+            [ -n "$m" ] && gpu_model="$m"
+        fi
+        break
+    done
+    lsmod 2>/dev/null | grep -q '^nvidia ' && driver_loaded=true
+    command -v nvidia-container-runtime &>/dev/null && toolkit_installed=true
+    if [ -f /etc/docker/daemon.json ]; then
+        jq -e '.runtimes.nvidia' /etc/docker/daemon.json &>/dev/null && runtime_registered=true
+    fi
+    [ -f /boot/config/.nvidia-enabled ] && enabled_on_boot=true
+
+    jq -nc \
+        --argjson gpu_detected "$gpu_detected" \
+        --arg     gpu_model    "$gpu_model" \
+        --argjson driver_loaded "$driver_loaded" \
+        --argjson toolkit_installed "$toolkit_installed" \
+        --argjson runtime_registered "$runtime_registered" \
+        --argjson enabled_on_boot "$enabled_on_boot" \
+        '{gpu_detected:$gpu_detected, gpu_model:$gpu_model, driver_loaded:$driver_loaded,
+          toolkit_installed:$toolkit_installed, runtime_registered:$runtime_registered,
+          enabled_on_boot:$enabled_on_boot}'
+}
+
+cmd_nvidia_install() {
+    # Installs nvidia-driver + nvidia-container-toolkit, configures docker runtime,
+    # and drops /boot/config/.nvidia-enabled so it re-applies at every live boot.
+    export DEBIAN_FRONTEND=noninteractive
+    require apt-get
+
+    info "Installing NVIDIA driver from Debian non-free..."
+    apt-get update -qq 2>&1 | tail -3
+    apt-get install -y -qq nvidia-driver firmware-misc-nonfree 2>&1 | tail -5 || \
+        die "nvidia-driver install failed — check apt sources include 'non-free'"
+
+    info "Adding NVIDIA container-toolkit repo..."
+    local key=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+    if [ ! -f "$key" ]; then
+        curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey 2>/dev/null \
+            | gpg --dearmor -o "$key"
+    fi
+    curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list 2>/dev/null \
+        | sed "s#deb https://#deb [signed-by=$key] https://#g" \
+        > /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+    info "Installing nvidia-container-toolkit..."
+    apt-get update -qq 2>&1 | tail -3
+    apt-get install -y -qq nvidia-container-toolkit 2>&1 | tail -5 || \
+        die "nvidia-container-toolkit install failed"
+
+    info "Registering nvidia runtime with Docker..."
+    mkdir -p /etc/docker
+    local tmp=/tmp/freeraid-daemon.json.$$
+    if [ -f /etc/docker/daemon.json ]; then
+        jq '.runtimes.nvidia = {"path":"/usr/bin/nvidia-container-runtime","runtimeArgs":[]}' \
+            /etc/docker/daemon.json > "$tmp"
+    else
+        jq -n '{runtimes:{nvidia:{path:"/usr/bin/nvidia-container-runtime",runtimeArgs:[]}}}' > "$tmp"
+    fi
+    mv "$tmp" /etc/docker/daemon.json
+
+    info "Marking nvidia enabled on boot (/boot/config/.nvidia-enabled)..."
+    touch /boot/config/.nvidia-enabled
+
+    info "Restarting Docker..."
+    systemctl restart docker 2>&1 | tail -3
+
+    info "Done. If the kernel module isn't loaded yet, reboot for nvidia-smi to work."
+    echo '{"ok":true}'
+}
+
 cmd_timezone_get() {
     local tz
     tz=$(timedatectl show --value -p Timezone 2>/dev/null || cat /etc/timezone 2>/dev/null || echo "UTC")
@@ -4292,6 +4382,8 @@ case "${1:-help}" in
     timezone-get)       cmd_timezone_get ;;
     timezone-list)      cmd_timezone_list ;;
     timezone-set)       cmd_timezone_set "${2:-}" ;;
+    nvidia-status)      cmd_nvidia_status ;;
+    nvidia-install)     cmd_nvidia_install ;;
     network-info)       cmd_network_info ;;
     network-set)        cmd_network_set "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" ;;
     users-list)           cmd_users_list ;;
