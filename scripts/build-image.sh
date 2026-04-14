@@ -55,10 +55,22 @@ trap cleanup EXIT
 
 step "1/6" "Bootstrapping Debian 12 (bookworm) minimal rootfs"
 
-if [ -d "$ROOTFS/usr" ]; then
-    warn "Rootfs already exists at $ROOTFS — skipping debootstrap"
-    warn "Delete $ROOTFS to rebuild from scratch"
+# Default: always start from a fresh debootstrap. Stale rootfs trees silently
+# lose files like /etc/shadow, /root, and /etc/ssh host keys, which produces a
+# broken squashfs that kernel-panics at init. Opt in to reuse with
+# FREERAID_REUSE_ROOTFS=1 only when you know the tree is clean.
+if [ -d "$ROOTFS/usr" ] && [ "${FREERAID_REUSE_ROOTFS:-0}" = "1" ]; then
+    warn "FREERAID_REUSE_ROOTFS=1 set — reusing existing $ROOTFS (skipping debootstrap)"
 else
+    if [ -d "$ROOTFS/usr" ]; then
+        info "Removing stale $ROOTFS (set FREERAID_REUSE_ROOTFS=1 to keep)"
+        # Unmount anything still bound in the old tree before rm, or we'll
+        # trash the host.
+        for m in proc sys dev/pts dev run; do
+            umount -lf "$ROOTFS/$m" 2>/dev/null || true
+        done
+        rm -rf "$ROOTFS"
+    fi
     # Minimal include — just enough to boot and run apt in chroot.
     # Everything else installed via apt-get in step 2 (proper dep resolution).
     debootstrap \
@@ -157,8 +169,13 @@ apt-get install -y -qq cockpit 2>/dev/null || true
 # systemd-resolved for DNS
 apt-get install -y -qq systemd-resolved 2>/dev/null || true
 
-# Live boot — handles USB enumeration, squashfs mount, and overlayfs
-apt-get install -y -qq live-boot live-boot-initramfs-tools 2>/dev/null || true
+# Live boot — handles USB enumeration, squashfs mount, and overlayfs.
+# CRITICAL: if this fails the squashfs kernel-panics at init ("can't open
+# /scripts/live"). Do NOT swallow errors here.
+apt-get install -y -qq live-boot live-boot-initramfs-tools || {
+    echo "FATAL: live-boot install failed — image will not boot. Aborting." >&2
+    exit 1
+}
 
 # Regenerate initrd with live-boot hooks included
 KVER=$(ls /boot/vmlinuz-* 2>/dev/null | sort -V | tail -1 | sed 's|/boot/vmlinuz-||')

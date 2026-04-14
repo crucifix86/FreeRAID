@@ -2255,15 +2255,16 @@ try:
     svcs = d.get('services',{})
     svc = next(iter(svcs.values()),{})
     labels = svc.get('labels',[])
+    out = '\"\"'
     if isinstance(labels, list):
         for l in labels:
             if l.startswith('freeraid.webui='):
-                print(json.dumps(l.split('=',1)[1])); exit()
+                out = json.dumps(l.split('=',1)[1]); break
     elif isinstance(labels, dict):
         v = labels.get('freeraid.webui','')
-        if v: print(json.dumps(v)); exit()
-    print('\"\"')
-except: print('\"\"')
+        if v: out = json.dumps(v)
+    print(out)
+except Exception: print('\"\"')
 " 2>/dev/null || echo '""')
         fi
 
