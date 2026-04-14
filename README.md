@@ -123,6 +123,12 @@ The Unraid importer reads your flash-backup zip offline, which means it picks up
 
 Containers that aren't running are imported as **stopped** on FreeRAID — they don't consume resources, they just clutter the Docker tab. You can also just delete them from FreeRAID's UI after first boot.
 
+### Set the IP before starting containers
+
+Your imported Unraid config includes the old static IP of your Unraid box, but on the first FreeRAID boot the machine will typically come up on **DHCP** instead. Many Unraid container templates have the old IP baked into their `WebUI` URLs and some apps (Plex `customConnections`, `\*arr` app URLs, etc.) depend on it.
+
+**Before you start the containers**, go to **Settings → Network** and set a static IP that matches what your Unraid used to have. Then start containers from the Docker tab. Everything will come back up at the same URLs it had before.
+
 ---
 
 ## Feedback
