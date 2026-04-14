@@ -2301,8 +2301,30 @@ cmd_docker_start() {
     local f="${COMPOSE_DIR}/${name}.docker-compose.yml"
     [ -f "$f" ] || die "No compose file found for: $name"
     require docker
-    info "Starting $name..."
-    docker_compose -f "$f" up -d
+
+    # Resolve container_name from the compose file (falls back to $name)
+    local container_name
+    container_name=$(python3 -c "
+import json
+try:
+    d = json.load(open('$f'))
+    svcs = d.get('services', {})
+    svc = next(iter(svcs.values()), {})
+    print(svc.get('container_name', list(svcs.keys())[0] if svcs else ''))
+except Exception: print('')
+" 2>/dev/null)
+    [ -z "$container_name" ] && container_name="$name"
+
+    # If the container already exists (e.g. inherited from an Unraid import),
+    # just start it. `compose up` would try to CREATE a new one and collide on
+    # the name. Only create via compose when no container exists yet.
+    if docker inspect "$container_name" &>/dev/null; then
+        info "Starting existing container $container_name..."
+        docker start "$container_name" >/dev/null
+    else
+        info "Creating and starting $name from compose..."
+        docker_compose -f "$f" up -d
+    fi
     info "$name started."
 }
 
