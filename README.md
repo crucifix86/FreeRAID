@@ -44,7 +44,7 @@ Linux x86-64, no dependencies required. Pick a USB drive, drop in an optional Un
 - **SnapRAID + mergerfs** — scheduled parity protection (up to 6 parity disks) and unified storage pool
 - **Docker** — install and manage containers through the UI
 - **Samba + NFS** — network shares for Windows, Mac, and Linux
-- **Unraid import** — migrate existing Unraid configs, shares, and docker containers
+- **Unraid import** — migrate existing Unraid configs, shares, and docker containers [¹](#unraid-import-notes)
 - **Safe test boot** — skip-parity mode leaves your Unraid parity untouched so you can swap USBs freely
 - **UEFI + BIOS** — boots on modern and legacy hardware
 
@@ -106,6 +106,22 @@ importer/       Unraid config importer
 compose/        Default Docker compose templates
 docs/           Architecture and development notes
 ```
+
+---
+
+## Unraid Import Notes
+
+<a id="unraid-import-notes"></a>
+
+The Unraid importer reads your flash-backup zip offline, which means it picks up **every docker container template Unraid has on record** — not just the ones currently running. Unraid keeps XML templates in `/boot/config/plugins/dockerMan/templates-user/` for every container you've ever installed, even after you delete the container. So if you've been on Unraid for years, expect to see dozens of historical apps listed after import.
+
+**Before you make your flash backup**, it's worth a quick cleanup on Unraid:
+
+1. Go to **Docker → Add Container**, open the template dropdown ("User templates")
+2. Remove templates you don't use anymore (trash icon next to each)
+3. Then make your flash backup and run the FreeRAID installer
+
+Containers that aren't running are imported as **stopped** on FreeRAID — they don't consume resources, they just clutter the Docker tab. You can also just delete them from FreeRAID's UI after first boot.
 
 ---
 
