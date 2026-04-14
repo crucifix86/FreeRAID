@@ -477,6 +477,26 @@ cmd_start() {
         info "Pool already mounted at $pool"
     fi
 
+    # Route /mnt/user/appdata directly to /mnt/cache/appdata (cache-only, like
+    # Unraid's shfs behavior for appdata shares). Without this, SQLite
+    # databases (Sonarr, Plex, *arr) crash with disk I/O errors because
+    # mergerfs can scatter writes across branches or not guarantee the
+    # inode/mmap semantics SQLite needs. The data is only really on /mnt/cache
+    # anyway (cache-preferred on Unraid); this just bypasses mergerfs for that
+    # single subtree so containers inherited from Unraid "just work".
+    local cache_mnt
+    cache_mnt=$(jq -r '.array.cache[] | select(.enabled==true) | .mountpoint' "$CONFIG_FILE" 2>/dev/null | head -1)
+    if [ -n "$cache_mnt" ] && [ -d "$cache_mnt" ]; then
+        local user_appdata="$pool/appdata"
+        local cache_appdata="$cache_mnt/appdata"
+        mkdir -p "$cache_appdata" "$user_appdata"
+        if ! mountpoint -q "$user_appdata"; then
+            info "Bind-mounting $cache_appdata → $user_appdata (cache-only appdata)"
+            mount --bind "$cache_appdata" "$user_appdata" || \
+                warn "appdata bind-mount failed; SQLite-using containers may fail"
+        fi
+    fi
+
     # Generate snapraid config
     info "Generating snapraid config..."
     generate_snapraid_conf > "$SNAPRAID_CONF"
@@ -531,6 +551,12 @@ cmd_stop() {
     # Unmount pool first
     # Stop extra pools first
     cmd_pool_stop_all 2>/dev/null || true
+
+    # Unmount appdata bind-mount (set up by cmd_start for SQLite-safe path)
+    if mountpoint -q "$pool/appdata" 2>/dev/null; then
+        info "Unmounting appdata bind $pool/appdata"
+        umount "$pool/appdata" || umount -l "$pool/appdata"
+    fi
 
     if mountpoint -q "$pool" 2>/dev/null; then
         info "Unmounting pool $pool"
