@@ -21,10 +21,12 @@ REPO_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="${FREERAID_BUILD_DIR:-$REPO_DIR/build}"
 
 SKIP_PARITY=false
+ASSUME_YES=false
 POSITIONAL=()
 for arg in "$@"; do
     case "$arg" in
         --skip-parity) SKIP_PARITY=true ;;
+        --yes|-y)      ASSUME_YES=true ;;
         *) POSITIONAL+=("$arg") ;;
     esac
 done
@@ -77,8 +79,10 @@ USB_SIZE_GB=$(( USB_SIZE_BYTES / 1024 / 1024 / 1024 ))
 
 if [[ $USB_SIZE_GB -gt 256 ]]; then
     warn "$USB_DEV is ${USB_SIZE_GB}GB — are you sure this is a USB drive?"
-    read -rp "Type YES to continue: " ans
-    [[ "$ans" == "YES" ]] || { echo "Aborted."; exit 1; }
+    if ! $ASSUME_YES; then
+        read -rp "Type YES to continue: " ans
+        [[ "$ans" == "YES" ]] || { echo "Aborted."; exit 1; }
+    fi
 fi
 
 echo ""
@@ -92,8 +96,10 @@ echo -e "  BIOS boot      : $( $HAVE_SYSLINUX && echo 'syslinux MBR' || echo 'no
 echo ""
 echo -e "${RED}  !! ALL DATA ON $USB_DEV WILL BE ERASED !!${NC}"
 echo ""
-read -rp "  Type YES to write the FreeRAID USB: " confirm
-[[ "$confirm" == "YES" ]] || { echo "Aborted."; exit 1; }
+if ! $ASSUME_YES; then
+    read -rp "  Type YES to write the FreeRAID USB: " confirm
+    [[ "$confirm" == "YES" ]] || { echo "Aborted."; exit 1; }
+fi
 
 # ── Unmount ───────────────────────────────────────────────────────────────────
 

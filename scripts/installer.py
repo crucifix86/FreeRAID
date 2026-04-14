@@ -313,7 +313,7 @@ class InstallerApp:
         if tpl:
             env["FREERAID_CONFIG_TEMPLATE"] = str(tpl)
 
-        cmd = ["bash", str(script)]
+        cmd = ["bash", str(script), "--yes"]
         if self.skip_parity.get():
             cmd.append("--skip-parity")
         cmd.append(dev)
