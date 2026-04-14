@@ -3331,10 +3331,29 @@ cmd_nvidia_install() {
     export DEBIAN_FRONTEND=noninteractive
     require apt-get
 
-    info "Installing NVIDIA driver from Debian non-free..."
+    # Blacklist nouveau permanently. Without this, nouveau loads on boot and
+    # claims the GPU before nvidia can attach ("nouveau [...] obtained ownership").
+    info "Blacklisting nouveau..."
+    cat > /etc/modprobe.d/freeraid-blacklist-nouveau.conf <<'BL'
+blacklist nouveau
+options nouveau modeset=0
+BL
+
+    info "Installing NVIDIA driver from Debian non-free (this builds the kernel module via DKMS — 2-5 min)..."
     apt-get update -qq 2>&1 | tail -3
-    apt-get install -y -qq nvidia-driver firmware-misc-nonfree 2>&1 | tail -5 || \
-        die "nvidia-driver install failed — check apt sources include 'non-free'"
+    # On a live-boot system, /boot/vmlinuz-* doesn't exist in the root overlay,
+    # so initramfs-tools postinst always fails. That failure is harmless — the
+    # nvidia DKMS module still gets built and installed. Detect the real
+    # outcome by checking for the built .ko file afterwards.
+    apt-get install -y -qq nvidia-driver firmware-misc-nonfree 2>&1 | tail -10 || true
+    local kver; kver=$(uname -r)
+    if ! find "/lib/modules/$kver/updates/dkms" -name "nvidia*.ko*" 2>/dev/null | grep -q .; then
+        die "nvidia-driver install failed — no DKMS module found for kernel $kver"
+    fi
+
+    info "Live-loading nvidia module (no reboot needed)..."
+    rmmod nouveau 2>/dev/null || true
+    modprobe nvidia 2>&1 || warn "nvidia modprobe failed — reboot may be required"
 
     info "Adding NVIDIA container-toolkit repo..."
     local key=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
@@ -3348,19 +3367,13 @@ cmd_nvidia_install() {
 
     info "Installing nvidia-container-toolkit..."
     apt-get update -qq 2>&1 | tail -3
-    apt-get install -y -qq nvidia-container-toolkit 2>&1 | tail -5 || \
+    apt-get install -y --no-install-recommends -qq nvidia-container-toolkit 2>&1 | tail -5 || \
         die "nvidia-container-toolkit install failed"
 
     info "Registering nvidia runtime with Docker..."
-    mkdir -p /etc/docker
-    local tmp=/tmp/freeraid-daemon.json.$$
-    if [ -f /etc/docker/daemon.json ]; then
-        jq '.runtimes.nvidia = {"path":"/usr/bin/nvidia-container-runtime","runtimeArgs":[]}' \
-            /etc/docker/daemon.json > "$tmp"
-    else
-        jq -n '{runtimes:{nvidia:{path:"/usr/bin/nvidia-container-runtime",runtimeArgs:[]}}}' > "$tmp"
-    fi
-    mv "$tmp" /etc/docker/daemon.json
+    # nvidia-ctk writes the runtime block into daemon.json preserving other keys
+    nvidia-ctk runtime configure --runtime=docker --set-as-default=false 2>&1 | tail -3 || \
+        warn "nvidia-ctk runtime configure failed — Docker may need manual config"
 
     info "Marking nvidia enabled on boot (/boot/config/.nvidia-enabled)..."
     touch /boot/config/.nvidia-enabled
@@ -3368,7 +3381,12 @@ cmd_nvidia_install() {
     info "Restarting Docker..."
     systemctl restart docker 2>&1 | tail -3
 
-    info "Done. If the kernel module isn't loaded yet, reboot for nvidia-smi to work."
+    # Verify
+    if nvidia-smi &>/dev/null; then
+        info "✓ nvidia-smi works — GPU is ready for containers."
+    else
+        warn "nvidia-smi not responding yet — a reboot will finalize."
+    fi
     echo '{"ok":true}'
 }
 
