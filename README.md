@@ -4,25 +4,39 @@ A free, open-source NAS operating system that boots from a USB drive. No install
 
 Inspired by Unraid. Built on Debian 12 + Cockpit + SnapRAID + mergerfs.
 
-> ⚠️ **Beta — bear with us.** FreeRAID is in active development. Things work, but edges are still being sanded down. Expect rough corners, file issues, and check back often. Your feedback shapes the roadmap.
+> ⚠️ **Public Beta — expect bugs.** FreeRAID is in active development. Core functionality works (SnapRAID pool, shares, Docker, Unraid import, USB boot), but you'll hit rough edges. Things may break, require manual intervention, or need a reboot. Please [file issues](https://github.com/crucifix86/FreeRAID/issues) when something surprises you — your feedback drives the roadmap.
 
-**→ Downloads, installer, and screenshots:** [getfreeraid.com](https://getfreeraid.com)
+**→ Get the installer, images, and screenshots at [getfreeraid.com](https://getfreeraid.com)**
 
 ---
 
-## Install
+## Install (the easy way)
 
-The fastest path is the GUI installer — it downloads the latest image, writes the USB, and optionally imports your existing Unraid config:
+### 1. Get the installer
 
-**[Download the installer at getfreeraid.com](https://getfreeraid.com/download/)**
+Grab the pre-built GUI installer from the official site:
 
-> 🧪 **The GUI installer is still under testing.** If you hit a snag, [open an issue](https://github.com/crucifix86/FreeRAID/issues) and include the log output.
+**→ [https://getfreeraid.com/download/](https://getfreeraid.com/download/)**
+
+Linux x86-64, single file, no dependencies. (Windows and macOS installers are planned.)
+
+### 2. Run it
 
 ```bash
+chmod +x freeraid-installer
 sudo ./freeraid-installer
 ```
 
-Linux x86-64, no dependencies required. Pick a USB drive, drop in an optional Unraid flash-backup zip, click Write USB.
+### 3. Use it
+
+- Pick a USB drive from the list
+- (Optional) Select your Unraid flash-backup zip to carry over shares, disks, and containers
+- (Optional) Tick **Skip parity sync** to preserve Unraid's parity for a safe test boot
+- Click **Write USB**
+
+The installer always downloads the latest image from getfreeraid.com, so you can't end up with a stale one.
+
+> 🧪 **The GUI installer is still under testing.** If it fails, copy the output panel and [open an issue](https://github.com/crucifix86/FreeRAID/issues).
 
 ---
 
