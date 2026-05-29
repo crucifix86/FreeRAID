@@ -7,6 +7,15 @@
 #   sudo bash scripts/create-usb.sh /dev/sdX
 #   sudo bash scripts/create-usb.sh /dev/sdX /path/to/unraid-backup.zip
 #   sudo bash scripts/create-usb.sh --skip-parity /dev/sdX /path/to/unraid-backup.zip
+#   sudo bash scripts/create-usb.sh --nonraid /dev/sdX /path/to/unraid-backup.zip
+#
+# Flags:
+#   --skip-parity   Leave Unraid's parity disk alone (safe round-trip testing).
+#   --nonraid       Boot via qvr/nonraid's Unraid-compatible md driver
+#                   instead of SnapRAID. Firstboot stages super.dat and
+#                   flips array.parity_method to "nonraid". Marked
+#                   experimental upstream — first start is gated by
+#                   `nmdctl import` validation.
 #
 # Build the image first:
 #   sudo bash scripts/build-image.sh
@@ -21,11 +30,13 @@ REPO_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="${FREERAID_BUILD_DIR:-$REPO_DIR/build}"
 
 SKIP_PARITY=false
+NONRAID=false
 ASSUME_YES=false
 POSITIONAL=()
 for arg in "$@"; do
     case "$arg" in
         --skip-parity) SKIP_PARITY=true ;;
+        --nonraid)     NONRAID=true ;;
         --yes|-y)      ASSUME_YES=true ;;
         *) POSITIONAL+=("$arg") ;;
     esac
@@ -266,6 +277,11 @@ fi
 if $SKIP_PARITY; then
     touch "$MNT/config/.skip-parity"
     info "Skip-parity marker set — Unraid parity disk will NOT be reformatted (test boot)"
+fi
+
+if $NONRAID; then
+    touch "$MNT/config/.parity-nonraid"
+    info "NonRAID marker set — firstboot will stage super.dat and flip array.parity_method to nonraid"
 fi
 
 # Write default config if none present

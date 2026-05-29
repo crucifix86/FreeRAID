@@ -99,6 +99,7 @@ class InstallerApp:
         self.selected_disk = tk.StringVar()
         self.unraid_zip    = tk.StringVar()
         self.skip_parity   = tk.BooleanVar(value=False)
+        self.nonraid       = tk.BooleanVar(value=False)
         self.release_tag   = tk.StringVar(value="checking…")
         self.writing       = False
 
@@ -147,6 +148,13 @@ class InstallerApp:
         tk.Checkbutton(frm, variable=self.skip_parity,
             text="Skip parity sync (test boot — preserves Unraid parity so you can swap USBs freely)"
             ).pack(anchor="w", padx=6, pady=6)
+        tk.Checkbutton(frm, variable=self.nonraid,
+            text="Use NonRAID realtime parity (Unraid-compatible md driver — keeps your existing array layout, no rebuild)"
+            ).pack(anchor="w", padx=6, pady=(0, 6))
+        tk.Label(frm,
+            text="NonRAID matches Unraid's superblock format. Marked experimental upstream — first boot validates without committing.",
+            fg="#666", font=("", 9), wraplength=700, justify="left"
+            ).pack(anchor="w", padx=24, pady=(0, 6))
 
         self.btn_write = tk.Button(self.root, text="Write USB", bg="#4a7", fg="white",
                                    font=("", 12, "bold"), command=self.start_write)
@@ -316,6 +324,8 @@ class InstallerApp:
         cmd = ["bash", str(script), "--yes"]
         if self.skip_parity.get():
             cmd.append("--skip-parity")
+        if self.nonraid.get():
+            cmd.append("--nonraid")
         cmd.append(dev)
         if zip_path:
             cmd.append(zip_path)

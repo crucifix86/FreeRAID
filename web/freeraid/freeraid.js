@@ -222,7 +222,7 @@ function switchTab(name) {
   if (name === 'network') { refreshNetworkTab(); refreshTailscale(); }
   if (name === 'users')   refreshUsers();
   if (name === 'logs')    fetchLog();
-  if (name === 'settings') { loadNotifSettings(); loadUpsConfig(); loadTimezone(); loadNvidiaStatus(); }
+  if (name === 'settings') { loadNotifSettings(); loadUpsConfig(); loadTimezone(); loadNvidiaStatus(); loadParityMethod(); }
   if (name === 'plugins') refreshPlugins();
   if (name === 'vms')     { refreshVms(); refreshIsoList(); }
 }
@@ -3605,6 +3605,50 @@ function saveTimezone() {
     .catch(e => {
       status.textContent = 'Error';
       showAlert('error', `Failed to set timezone: ${e.message || e}`);
+    });
+}
+
+function loadParityMethod() {
+  const snap = document.getElementById('pm-snapraid');
+  const non  = document.getElementById('pm-nonraid');
+  const stat = document.getElementById('pm-status');
+  if (!snap || !non) return;
+  // Read current method
+  cockpit.spawn(['freeraid', 'parity-method'], { superuser: 'require', err: 'out' })
+    .then(out => {
+      const m = (out || '').trim() || 'snapraid';
+      snap.checked = (m === 'snapraid');
+      non.checked  = (m === 'nonraid');
+    })
+    .catch(() => { snap.checked = true; });
+  // Probe nmdctl availability — disable the NonRAID radio if missing
+  cockpit.spawn(['sh', '-c', 'command -v nmdctl'], { err: 'ignore' })
+    .then(p => {
+      if (!(p || '').trim()) {
+        non.disabled = true;
+        stat.textContent = 'NonRAID driver not installed in this image — option disabled.';
+      }
+    })
+    .catch(() => {
+      non.disabled = true;
+      stat.textContent = 'NonRAID driver not installed in this image — option disabled.';
+    });
+}
+
+function setParityMethod(method) {
+  const stat = document.getElementById('pm-status');
+  stat.textContent = 'Saving…';
+  cockpit.spawn(['freeraid', 'parity-method', method],
+                { superuser: 'require', err: 'out' })
+    .then(() => {
+      stat.textContent = method === 'nonraid'
+        ? '✓ Parity method = NonRAID. Stop and restart the array (freeraid stop / freeraid start) for the change to take effect. If your config was imported from Unraid, run `freeraid nonraid-import` first to validate the existing array layout.'
+        : '✓ Parity method = SnapRAID.';
+      slog('success', `Parity method set to ${method}`);
+    })
+    .catch(e => {
+      stat.textContent = 'Error: ' + (e.message || e);
+      showAlert('error', `Failed to set parity method: ${e.message || e}`);
     });
 }
 
