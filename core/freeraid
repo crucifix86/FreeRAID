@@ -3608,11 +3608,33 @@ cmd_start_nonraid() {
     require mergerfs
 
     info "Starting FreeRAID array (NonRAID realtime parity)…"
+
+    # Auto-stage the superblock from /boot/config so first boot after an
+    # Unraid import "just works" — no separate `freeraid nonraid-import`
+    # required. Safety is preserved by the nmdctl import gate below, which
+    # refuses size-mismatched layouts.
     if [ ! -f /nonraid.dat ]; then
-        die "/nonraid.dat missing — run 'freeraid nonraid-import' first"
+        if [ -f /boot/config/super.dat ]; then
+            info "Staging /boot/config/super.dat → /nonraid.dat"
+            cp /boot/config/super.dat /nonraid.dat
+            chmod 600 /nonraid.dat
+        else
+            die "/nonraid.dat missing AND no /boot/config/super.dat — copy your Unraid super.dat into /boot/config/ first"
+        fi
     fi
+
     if ! lsmod | grep -q '^md_nonraid '; then
+        info "Loading md-nonraid kernel module"
         modprobe md-nonraid super=/nonraid.dat || die "modprobe md-nonraid failed"
+    fi
+
+    # Validation gate — nmdctl import refuses to proceed on size-mismatch,
+    # which would silently corrupt data if forced. die() here causes
+    # freeraid-array.service to fail visibly; the user can SSH in, inspect
+    # the array, and file at github.com/qvr/nonraid before any commit.
+    info "Validating array layout (nmdctl import)…"
+    if ! nmdctl import; then
+        die "nmdctl import failed — the imported super.dat doesn't match the disks NonRAID sees, OR a size-mismatch warning fired. DO NOT force-start: file at github.com/qvr/nonraid first."
     fi
 
     nmdctl -u start  || die "nmdctl start failed"
