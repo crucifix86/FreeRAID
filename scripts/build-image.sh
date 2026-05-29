@@ -300,6 +300,54 @@ python3 /usr/local/lib/freeraid/unraid-import \
     && date -Iseconds > "$FLAG" \
     && echo "FreeRAID: import complete." \
     || echo "FreeRAID: import had errors — check /boot/config/freeraid.conf.json"
+
+# Apply imported network (static IP / DHCP / DNS) so the machine comes up
+# on the address the user expects — not on whatever DHCP hands out. Failure
+# is non-fatal: stale DHCP is better than no network.
+if [ -f "$FLAG" ]; then
+    /usr/local/bin/freeraid network-apply-config 2>&1 | logger -t freeraid-firstboot || true
+fi
+
+# Carry over user customizations as inert side-files for review (do not
+# execute — paths are Unraid-specific and may break). The web UI surfaces
+# these as "imported, needs review" so the user can port them deliberately.
+for src in go arr-indexer-fix.sh qbt-port-sync.sh; do
+    if [ -f "$CONFDIR/$src" ]; then
+        cp "$CONFDIR/$src" "/boot/config/imported-from-unraid-${src}" 2>/dev/null || true
+    fi
+done
+
+# Carry over SSH host keys + authorized_keys so existing clients don't get a
+# "host key changed" warning on first connect to the rebuilt box. Live USB
+# wipes /etc/ssh/ on every boot, so we restore from /boot/config on each
+# start in addition to this first-time copy.
+if [ -d "$CONFDIR/ssh" ]; then
+    mkdir -p /boot/config/ssh
+    cp -a "$CONFDIR/ssh"/. /boot/config/ssh/ 2>/dev/null || true
+fi
+# Custom SSL cert (Let's Encrypt / MyServers). Preserved for future
+# cockpit-reverse-proxy wiring.
+if [ -d "$CONFDIR/ssl" ]; then
+    mkdir -p /boot/config/ssl
+    cp -a "$CONFDIR/ssl"/. /boot/config/ssl/ 2>/dev/null || true
+fi
+# Per-disk SMART alert attributes — not consumed by FreeRAID yet but
+# preserved so we can wire them when we expose SMART thresholds in the UI.
+[ -f "$CONFDIR/smart-one.cfg" ] && cp "$CONFDIR/smart-one.cfg" /boot/config/imported-smart-one.cfg
+
+# Apply restored SSH host keys live so the running sshd uses them.
+if [ -d /boot/config/ssh ] && [ -n "$(ls /boot/config/ssh/ssh_host_*_key 2>/dev/null)" ]; then
+    cp -a /boot/config/ssh/ssh_host_*_key  /etc/ssh/ 2>/dev/null || true
+    cp -a /boot/config/ssh/ssh_host_*_key.pub /etc/ssh/ 2>/dev/null || true
+    chmod 600 /etc/ssh/ssh_host_*_key 2>/dev/null || true
+    chmod 644 /etc/ssh/ssh_host_*_key.pub 2>/dev/null || true
+    systemctl reload ssh 2>/dev/null || true
+fi
+if [ -f /boot/config/ssh/authorized_keys ]; then
+    mkdir -p /root/.ssh && chmod 700 /root/.ssh
+    cp /boot/config/ssh/authorized_keys /root/.ssh/authorized_keys
+    chmod 600 /root/.ssh/authorized_keys
+fi
 FIRSTBOOT
 chmod +x "$INSTALL_DIR/freeraid-firstboot"
 ln -sf /usr/local/lib/freeraid/freeraid-firstboot "$ROOTFS/usr/local/bin/freeraid-firstboot"

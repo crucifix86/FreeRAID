@@ -3533,6 +3533,76 @@ PYEOF
     echo "{\"ok\":true,\"iface\":\"$iface\",\"mode\":\"$mode\"}"
 }
 
+cmd_network_apply_config() {
+    # Apply .network section of /boot/config/freeraid.conf.json to systemd-networkd.
+    # Intended for first-boot after an Unraid import: takes the static IP / DHCP
+    # choice carried over from the Unraid backup and writes it as the live policy.
+    #
+    # Bridge (br0) and bond (bond0) named interfaces from Unraid aren't created
+    # here — we don't have a VM/bridge UI yet. Falls back to applying the IP on
+    # the first physical NIC named in BONDNICS (or, failing that, the first
+    # discovered en*/eth* device). VMs needing br0 still need that built out.
+    local conf_dir="/etc/systemd/network"
+    local conf_file="$conf_dir/20-wired.network"
+    mkdir -p "$conf_dir"
+
+    local dhcp ip netmask gateway iface_cfg bond_nics
+    dhcp=$(jq -r '.network.dhcp // true' "$CONFIG_FILE")
+    ip=$(jq -r '.network.ip // empty' "$CONFIG_FILE")
+    netmask=$(jq -r '.network.netmask // empty' "$CONFIG_FILE")
+    gateway=$(jq -r '.network.gateway // empty' "$CONFIG_FILE")
+    iface_cfg=$(jq -r '.network.interface // "eth0"' "$CONFIG_FILE")
+    bond_nics=$(jq -r '.network.bond_nics // empty' "$CONFIG_FILE")
+    local dns_csv
+    dns_csv=$(jq -r '.network.dns // [] | join(" ")' "$CONFIG_FILE")
+
+    # Resolve the actual phys nic to match on. Imported configs from Unraid
+    # often name br0/bond0 — we can't write a .network for an interface that
+    # doesn't exist yet, so collapse to the underlying NIC.
+    local match_iface="$iface_cfg"
+    if [[ "$iface_cfg" == br* || "$iface_cfg" == bond* ]]; then
+        if [ -n "$bond_nics" ]; then
+            match_iface="${bond_nics%% *}"
+        else
+            match_iface=$(ls /sys/class/net 2>/dev/null | grep -E '^(en|eth)' | head -1 || echo "eth0")
+        fi
+        warn "Imported interface '$iface_cfg' is a bridge/bond; applying network on physical NIC '$match_iface' (bridge not created — VMs needing br0 require manual setup)"
+    fi
+
+    if [ "$dhcp" = "true" ] || [ -z "$ip" ]; then
+        cat > "$conf_file" <<NET
+[Match]
+Name=$match_iface
+
+[Network]
+DHCP=yes
+MulticastDNS=yes
+
+[DHCPv4]
+RouteMetric=10
+NET
+        info "Network: DHCP on $match_iface"
+    else
+        local prefix
+        prefix=$(python3 -c "import ipaddress; print(ipaddress.IPv4Network('0.0.0.0/${netmask:-255.255.255.0}', strict=False).prefixlen)" 2>/dev/null || echo 24)
+        {
+            echo "[Match]"
+            echo "Name=$match_iface"
+            echo
+            echo "[Network]"
+            echo "Address=$ip/$prefix"
+            [ -n "$gateway" ] && echo "Gateway=$gateway"
+            for d in $dns_csv; do echo "DNS=$d"; done
+            echo "MulticastDNS=yes"
+        } > "$conf_file"
+        info "Network: static $ip/$prefix via $gateway on $match_iface"
+    fi
+
+    # Reload networkd — don't restart hard (would drop the current SSH session
+    # before the new config takes effect).
+    networkctl reload 2>/dev/null || systemctl reload-or-restart systemd-networkd 2>/dev/null || true
+}
+
 # ── User management ───────────────────────────────────────────────────────────
 
 cmd_users_list() {
@@ -4492,6 +4562,7 @@ case "${1:-help}" in
     nvidia-install)     cmd_nvidia_install ;;
     network-info)       cmd_network_info ;;
     network-set)        cmd_network_set "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" ;;
+    network-apply-config) cmd_network_apply_config ;;
     users-list)           cmd_users_list ;;
     users-add)            cmd_users_add "${2:-}" "${3:-}" ;;
     users-delete)         cmd_users_delete "${2:-}" ;;

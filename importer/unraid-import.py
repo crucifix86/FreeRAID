@@ -22,7 +22,15 @@ from pathlib import Path
 # ── Unraid config parsers ───────────────────────────────────────────────────────
 
 def parse_cfg(path: Path) -> dict:
-    """Parse Unraid's KEY="VALUE" style .cfg files."""
+    """Parse Unraid's KEY="VALUE" or KEY[N]="VALUE" style .cfg files.
+
+    Unraid uses array syntax for most of network.cfg / disk.cfg
+    (IFNAME[0], IPADDR[0], BRNAME[0], …). The original regex only
+    matched bareword keys so the entire network and per-disk config
+    was silently dropped on import. We now collapse the first slot
+    (`KEY[0]`) onto the bareword `KEY` — so call sites already doing
+    `cfg.get('IFNAME')` start working — and keep higher slots as
+    `KEY[1]`, `KEY[2]`, … for callers that want the rest."""
     result = {}
     if not path.exists():
         return result
@@ -30,9 +38,15 @@ def parse_cfg(path: Path) -> dict:
         line = line.strip()
         if not line or line.startswith('#'):
             continue
-        m = re.match(r'^(\w+)="?([^"]*)"?$', line)
+        # Allow . in keys so per-disk fields like `diskSpindownDelay.1`
+        # (used throughout disk.cfg) survive the parse.
+        m = re.match(r'^([\w.]+)(?:\[(\d+)\])?="?([^"]*)"?$', line)
         if m:
-            result[m.group(1)] = m.group(2)
+            key, idx, val = m.group(1), m.group(2), m.group(3)
+            if idx is None or idx == '0':
+                result[key] = val
+            else:
+                result[f'{key}[{idx}]'] = val
     return result
 
 
@@ -132,18 +146,104 @@ def import_disks(config_dir: Path) -> dict:
     return {"parity": parity, "disks": disks, "cache": cache}
 
 
+def import_disk_settings(config_dir: Path) -> dict:
+    """Read Unraid disk.cfg → per-disk + array-wide tuning.
+
+    Returns {
+        'default_fs_type': 'xfs',
+        'spindown_default': 0,
+        'shutdown_timeout': 90,
+        'per_disk': { '<slot_int>': {'spindown': int, 'warning': str, 'critical': str, 'fstype': str} },
+    }
+    """
+    d = parse_cfg(config_dir / 'disk.cfg')
+    per_disk = {}
+    # Unraid stores per-disk settings with .N suffix (diskSpindownDelay.0, ...).
+    # parse_cfg keeps these as-is because we only collapse [N] not .N.
+    for k, v in d.items():
+        if '.' not in k:
+            continue
+        base, _, idx = k.rpartition('.')
+        if not idx.isdigit():
+            continue
+        slot = int(idx)
+        per_disk.setdefault(slot, {})
+        if base == 'diskSpindownDelay':
+            try: per_disk[slot]['spindown'] = int(v)
+            except ValueError: pass
+        elif base == 'diskWarning':
+            per_disk[slot]['warning'] = v
+        elif base == 'diskCritical':
+            per_disk[slot]['critical'] = v
+        elif base == 'diskFsType':
+            per_disk[slot]['fstype'] = v
+        elif base == 'diskComment' and v:
+            per_disk[slot]['comment'] = v
+
+    return {
+        'default_fs_type': d.get('defaultFsType', 'xfs'),
+        'spindown_default': int(d.get('spindownDelay', '0') or 0),
+        'shutdown_timeout': int(d.get('shutdownTimeout', '90') or 90),
+        'per_disk': per_disk,
+    }
+
+
+def import_docker_settings(config_dir: Path) -> dict:
+    """Read Unraid docker.cfg → FreeRAID docker section.
+
+    Honours the user's APP_CONFIG_PATH (commonly /mnt/user/appdata/ lowercase)
+    instead of our previous hardcoded /mnt/user/Appdata/docker with capital A.
+    docker.img path/size are recorded but unused — FreeRAID uses overlay2."""
+    d = parse_cfg(config_dir / 'docker.cfg')
+    app_path = (d.get('DOCKER_APP_CONFIG_PATH') or '/mnt/user/appdata/').rstrip('/')
+    return {
+        'enabled':      d.get('DOCKER_ENABLED', 'yes').lower() == 'yes',
+        'data_root':    f'{app_path}/docker',
+        'compose_dir':  f'{app_path}/compose',
+        'log_rotation': d.get('DOCKER_LOG_ROTATION', 'yes').lower() == 'yes',
+        'log_size':     d.get('DOCKER_LOG_SIZE', '50m'),
+        'log_files':    int(d.get('DOCKER_LOG_FILES', '1') or 1),
+        '_unraid_docker_img':      d.get('DOCKER_IMAGE_FILE', ''),
+        '_unraid_docker_img_size': d.get('DOCKER_IMAGE_SIZE', ''),
+    }
+
+
 def import_network(config_dir: Path) -> dict:
     """Read Unraid network.cfg → FreeRAID network config."""
     net = parse_cfg(config_dir / 'network.cfg')
-    ident = parse_cfg(config_dir / 'ident.cfg')
 
     return {
         "interface": net.get('IFNAME', 'eth0'),
         "dhcp": net.get('USE_DHCP', 'yes').lower() == 'yes',
         "ip":      net.get('IPADDR', ''),
+        "netmask": net.get('NETMASK', ''),
         "gateway": net.get('GATEWAY', ''),
         "dns": [d for d in [net.get('DNS_SERVER1', ''), net.get('DNS_SERVER2', '')] if d],
-        "_hostname_from_ident": ident.get('NAME', 'freeraid')
+        "bridge":  net.get('BRNAME', ''),
+        "bond":    net.get('BONDNAME', ''),
+        "bond_mode":  net.get('BONDING_MODE', ''),
+        "bond_nics":  net.get('BONDNICS', ''),
+    }
+
+
+def import_system(config_dir: Path) -> dict:
+    """Read Unraid ident.cfg → FreeRAID system identity + Samba/NTP/web."""
+    ident = parse_cfg(config_dir / 'ident.cfg')
+    return {
+        "hostname":  ident.get('NAME', 'freeraid'),
+        "timezone":  ident.get('timeZone', 'UTC'),
+        "comment":   ident.get('COMMENT', ''),
+        "workgroup": ident.get('WORKGROUP', 'WORKGROUP'),
+        "ntp_servers": [
+            s for s in (ident.get(f'NTP_SERVER{i}', '') for i in range(1, 5)) if s
+        ],
+        "use_ntp":   ident.get('USE_NTP', 'yes').lower() == 'yes',
+        "use_ssl":   ident.get('USE_SSL', 'no').lower() == 'yes',
+        "use_ssh":   ident.get('USE_SSH', 'yes').lower() == 'yes',
+        "web_port":      ident.get('PORT', '80'),
+        "web_port_ssl":  ident.get('PORTSSL', '443'),
+        "ssh_port":      ident.get('PORTSSH', '22'),
+        "local_tld":     ident.get('LOCAL_TLD', 'local'),
     }
 
 
@@ -403,8 +503,27 @@ def main():
 
         print("Reading network config...")
         net_cfg = import_network(config_dir)
-        hostname = net_cfg.pop('_hostname_from_ident', 'freeraid')
-        print(f"  Hostname: {hostname}, DHCP: {net_cfg['dhcp']}")
+        sys_cfg = import_system(config_dir)
+        addr = net_cfg['ip'] if not net_cfg['dhcp'] and net_cfg['ip'] else ('DHCP' if net_cfg['dhcp'] else '<unset>')
+        print(f"  Hostname: {sys_cfg['hostname']}, addr: {addr}, iface: {net_cfg['interface']}, tz: {sys_cfg['timezone']}")
+
+        print("Reading disk + docker settings...")
+        disk_tuning = import_disk_settings(config_dir)
+        dock_cfg = import_docker_settings(config_dir)
+        print(f"  defaultFsType: {disk_tuning['default_fs_type']}, per-disk tuning for {len(disk_tuning['per_disk'])} slots, docker data_root: {dock_cfg['data_root']}")
+
+        # Fold per-disk tuning into the array.disks[] entries built from super.dat
+        for entry in array_cfg['disks']:
+            try:
+                slot_int = int(entry['slot'].replace('disk', ''))
+            except (ValueError, AttributeError):
+                continue
+            t = disk_tuning['per_disk'].get(slot_int) or {}
+            if 'spindown' in t and t['spindown'] >= 0:
+                entry['spindown_minutes'] = t['spindown']
+            for k in ('warning', 'critical', 'fstype', 'comment'):
+                if t.get(k):
+                    entry[k if k != 'fstype' else 'fstype_unraid'] = t[k]
 
         print("Reading shares...")
         shares = import_shares(config_dir)
@@ -430,9 +549,15 @@ def main():
             "_imported_from_unraid": True,
 
             "system": {
-                "hostname": hostname,
-                "timezone": "America/Chicago",
-                "language": "en_US"
+                "hostname":  sys_cfg['hostname'],
+                "timezone":  sys_cfg['timezone'],
+                "language":  "en_US",
+                "comment":   sys_cfg['comment'],
+                "workgroup": sys_cfg['workgroup'],
+                "ntp_servers": sys_cfg['ntp_servers'],
+                "use_ntp":   sys_cfg['use_ntp'],
+                "web_port":  sys_cfg['web_port'],
+                "ssh_port":  sys_cfg['ssh_port'],
             },
 
             "array": {
@@ -441,7 +566,9 @@ def main():
                 "disks":           array_cfg['disks'],
                 "cache":           array_cfg['cache'],
                 "pool_mountpoint": "/mnt/user",
-                "mergerfs_options": "defaults,allow_other,cache.files=off,dropcacheonclose=true,category.create=mfs"
+                "default_fs_type": disk_tuning['default_fs_type'],
+                "shutdown_timeout": disk_tuning['shutdown_timeout'],
+                "mergerfs_options": "defaults,allow_other,cache.files=partial,dropcacheonclose=true,category.create=mfs,moveonenospc=true,minfreespace=200M"
             },
 
             "snapraid": {
@@ -451,7 +578,7 @@ def main():
                 "scrub_age":           10,
                 "diff_warn_deleted":   40,
                 "diff_warn_updated":   40,
-                "content_files":       [f'/mnt/disk{i+1}/.snapraid.content' for i in range(min(disk_count, 3))],
+                "content_files":       [],
                 "exclude":             ["/lost+found/", "*.tmp", "*.!qB", "*.part"]
             },
 
@@ -459,11 +586,7 @@ def main():
 
             "network": net_cfg,
 
-            "docker": {
-                "enabled": True,
-                "data_root": "/mnt/user/Appdata/docker",
-                "compose_dir": "/mnt/user/Appdata/compose"
-            },
+            "docker": dock_cfg,
 
             "_docker_apps": apps
         }
