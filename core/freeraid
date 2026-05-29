@@ -497,6 +497,16 @@ cmd_start() {
         fi
     fi
 
+    # Seed snapraid.content_files if empty — one per data disk is the canonical
+    # SnapRAID layout. Without at least one `content` entry, sync refuses to run.
+    if [ "$(jq -r '.snapraid.content_files | length' "$CONFIG_FILE")" = "0" ]; then
+        local cfiles
+        cfiles=$(jq -r '[.array.disks[] | select(.enabled==true) | .mountpoint + "/snapraid.content"]' "$CONFIG_FILE")
+        jq --argjson cf "$cfiles" '.snapraid.content_files = $cf' "$CONFIG_FILE" \
+            > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+        info "Seeded snapraid.content_files (one per data disk)"
+    fi
+
     # Generate snapraid config
     info "Generating snapraid config..."
     generate_snapraid_conf > "$SNAPRAID_CONF"

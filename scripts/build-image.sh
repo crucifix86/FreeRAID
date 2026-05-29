@@ -103,6 +103,9 @@ cp /etc/resolv.conf "$ROOTFS/etc/resolv.conf" 2>/dev/null || \
 
 chroot "$ROOTFS" bash -s <<'CHROOT'
 export DEBIAN_FRONTEND=noninteractive
+# Host PATH carries into chroot and may lack /usr/sbin; force the Debian default
+# so chpasswd, smbpasswd, systemctl, etc. resolve.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Enable contrib + non-free-firmware for NIC firmware
 sed -i 's|^deb http://deb.debian.org/debian bookworm main$|deb http://deb.debian.org/debian bookworm main contrib non-free-firmware|' /etc/apt/sources.list
@@ -122,7 +125,7 @@ apt-get install -y -qq \
 
 # Sharing
 apt-get install -y -qq \
-    samba wsdd avahi-daemon nfs-kernel-server
+    samba smbclient wsdd avahi-daemon nfs-kernel-server
 
 # Notifications + UPS
 apt-get install -y -qq msmtp nut nut-client
@@ -149,12 +152,12 @@ if ! command -v mergerfs &>/dev/null; then
     curl -fsSL "$MERGERFS_URL" -o /tmp/mergerfs.deb \
         && dpkg -i /tmp/mergerfs.deb \
         && rm /tmp/mergerfs.deb \
-        || warn "mergerfs download failed — install manually after boot"
+        || echo "WARN: mergerfs download failed — install manually after boot"
 fi
 
 # ZFS from backports
 apt-get install -y -t bookworm-backports zfsutils-linux 2>/dev/null || \
-    warn "ZFS install failed — may need reboot for kernel modules"
+    echo "WARN: ZFS install failed — may need reboot for kernel modules"
 
 # Docker
 if ! command -v docker &>/dev/null; then
@@ -168,6 +171,15 @@ apt-get install -y -qq cockpit 2>/dev/null || true
 
 # systemd-resolved for DNS
 apt-get install -y -qq systemd-resolved 2>/dev/null || true
+
+# systemd-resolved's postinst replaces /etc/resolv.conf with a symlink to
+# /run/systemd/resolve/stub-resolv.conf, which doesn't exist in a chroot.
+# That kills DNS for any apt-get install after it. Restore a real file before
+# the live-boot fetch (which the script treats as fatal).
+rm -f /etc/resolv.conf
+cp /proc/net/route /dev/null 2>/dev/null  # touch to ensure /proc is mounted
+echo "nameserver 8.8.8.8" > /etc/resolv.conf
+echo "nameserver 1.1.1.1" >> /etc/resolv.conf
 
 # Live boot — handles USB enumeration, squashfs mount, and overlayfs.
 # CRITICAL: if this fails the squashfs kernel-panics at init ("can't open
@@ -299,6 +311,7 @@ info "FreeRAID installed into rootfs"
 step "4/6" "Configuring live system"
 
 chroot "$ROOTFS" bash -s <<CHROOT
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # Hostname
 echo "freeraid" > /etc/hostname
 echo "127.0.1.1  freeraid" >> /etc/hosts
