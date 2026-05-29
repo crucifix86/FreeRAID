@@ -377,6 +377,25 @@ elif [ -f "$SKIP_PARITY_MARKER" ]; then
     echo "FreeRAID: skip-parity active — leaving network on DHCP (imported static IP stays in config for future cutover; run 'freeraid network-apply-config' when ready)"
 fi
 
+# NonRAID staging: when the user has placed /boot/config/.parity-nonraid on
+# the USB (deliberate opt-in for realtime parity matching Unraid's md driver),
+# (a) flip the imported config's parity_method to "nonraid", and (b) stage
+# Unraid's super.dat to /boot/config/super.dat so a subsequent
+# `freeraid nonraid-import` validates the existing array layout and
+# `freeraid start` brings it up via nmdctl. We never auto-start.
+PARITY_NONRAID_MARKER="/boot/config/.parity-nonraid"
+if [ -f "$FLAG" ] && [ -f "$PARITY_NONRAID_MARKER" ]; then
+    if [ -f "$CONFDIR/super.dat" ]; then
+        cp "$CONFDIR/super.dat" /boot/config/super.dat
+        chmod 600 /boot/config/super.dat
+        jq '.array.parity_method = "nonraid"' /boot/config/freeraid.conf.json \
+            > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp /boot/config/freeraid.conf.json
+        echo "FreeRAID: NonRAID enabled. super.dat staged. Next: 'freeraid nonraid-import' (validate), then 'freeraid start' (commit)."
+    else
+        echo "FreeRAID: WARN: .parity-nonraid marker present but no super.dat in backup — NonRAID not enabled."
+    fi
+fi
+
 # Carry over user customizations as inert side-files for review (do not
 # execute — paths are Unraid-specific and may break). The web UI surfaces
 # these as "imported, needs review" so the user can port them deliberately.

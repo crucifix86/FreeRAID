@@ -311,6 +311,17 @@ cmd_status() {
 }
 
 cmd_start() {
+    # Dispatch on parity method. snapraid is the default and runs the existing
+    # mergerfs+snapraid path below; nonraid delegates to cmd_start_nonraid
+    # which uses qvr/nonraid's md driver via nmdctl for Unraid-compatible
+    # realtime parity (drop-in replacement for an Unraid array).
+    local pm
+    pm=$(jq -r '.array.parity_method // "snapraid"' "$CONFIG_FILE")
+    if [ "$pm" = "nonraid" ]; then
+        cmd_start_nonraid
+        return $?
+    fi
+
     info "Starting FreeRAID array..."
 
     require jq
@@ -3533,6 +3544,128 @@ PYEOF
     echo "{\"ok\":true,\"iface\":\"$iface\",\"mode\":\"$mode\"}"
 }
 
+# ── NonRAID (Unraid-compatible realtime parity via qvr/nonraid) ──────────────
+# These wrappers delegate to nmdctl when array.parity_method == "nonraid".
+# Workflow for migrating from a live Unraid box:
+#   1. Copy Unraid's /boot/config/super.dat to /boot/config/super.dat on the
+#      FreeRAID USB (firstboot does this automatically when importing a backup
+#      AND .nonraid-enabled marker is set).
+#   2. freeraid parity-method nonraid
+#   3. freeraid nonraid-import   # validates without committing
+#   4. freeraid start            # cmd_start dispatches to cmd_start_nonraid
+
+cmd_parity_method() {
+    local action="${1:-show}"
+    case "$action" in
+        show|"")
+            jq -r '.array.parity_method // "snapraid"' "$CONFIG_FILE"
+            ;;
+        snapraid|nonraid)
+            if [ "$action" = "nonraid" ] && ! command -v nmdctl &>/dev/null; then
+                die "nmdctl not installed — NonRAID kernel module + tools missing from this image"
+            fi
+            jq --arg m "$action" '.array.parity_method = $m' "$CONFIG_FILE" \
+                > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+            info "parity method set to: $action"
+            ;;
+        *)
+            die "Usage: freeraid parity-method [snapraid|nonraid]"
+            ;;
+    esac
+}
+
+cmd_nonraid_status() {
+    require nmdctl
+    nmdctl status -o json
+}
+
+cmd_nonraid_import() {
+    require nmdctl
+    local super="/boot/config/super.dat"
+    if [ ! -f "$super" ]; then
+        die "no super.dat at $super — copy your Unraid super.dat to /boot/config/ first (firstboot does this automatically when importing an Unraid backup and parity_method=nonraid is set)"
+    fi
+    if [ ! -f /nonraid.dat ] || ! cmp -s "$super" /nonraid.dat; then
+        info "staging $super → /nonraid.dat"
+        cp "$super" /nonraid.dat
+        chmod 600 /nonraid.dat
+    fi
+    if ! lsmod | grep -q '^md_nonraid '; then
+        info "loading md-nonraid kernel module"
+        modprobe md-nonraid super=/nonraid.dat || die "modprobe md-nonraid failed — module missing from this image"
+    fi
+    info "validating array (nmdctl import)…"
+    if nmdctl import; then
+        info "Array validated. Run 'freeraid start' to commit."
+    else
+        warn "nmdctl import returned a non-zero status. If you saw a size-mismatch warning, DO NOT force-start — it will corrupt data. Filing a bug at github.com/qvr/nonraid is the recommended path."
+        return 1
+    fi
+}
+
+cmd_start_nonraid() {
+    require nmdctl
+    require mergerfs
+
+    info "Starting FreeRAID array (NonRAID realtime parity)…"
+    if [ ! -f /nonraid.dat ]; then
+        die "/nonraid.dat missing — run 'freeraid nonraid-import' first"
+    fi
+    if ! lsmod | grep -q '^md_nonraid '; then
+        modprobe md-nonraid super=/nonraid.dat || die "modprobe md-nonraid failed"
+    fi
+
+    nmdctl -u start  || die "nmdctl start failed"
+    nmdctl    mount  || warn "nmdctl mount reported issues — inspect per-disk state"
+
+    # Mount cache + build mergerfs pool on top of the nmd-mounted disks so
+    # users still get /mnt/user as a unified pool (parity-protected reads on
+    # the nmdN side, mergerfs scatter writes on top — same UX as snapraid path).
+    local pool branches=""
+    pool=$(cfg_pool_mountpoint)
+    while IFS=' ' read -r slot dev mnt fstype; do
+        [ -z "$mnt" ] && continue
+        mountpoint -q "$mnt" 2>/dev/null && branches="${branches:+$branches:}$mnt"
+    done < <(cfg_cache_disks 2>/dev/null || true)
+    for d in /mnt/disk*; do
+        mountpoint -q "$d" 2>/dev/null && branches="${branches:+$branches:}$d"
+    done
+    if [ -n "$branches" ]; then
+        local opts
+        opts=$(cfg_mergerfs_opts)
+        mkdir -p "$pool"
+        info "Mounting mergerfs pool: $branches → $pool"
+        mergerfs "$branches" "$pool" -o "$opts" || warn "mergerfs pool failed (per-disk mounts still usable)"
+    fi
+
+    jq '.array.state = "started"' "$CONFIG_FILE" > /tmp/freeraid.conf.tmp \
+        && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+    info "NonRAID array started. Pool at $pool"
+}
+
+cmd_nonraid_stop() {
+    require nmdctl
+    local pool
+    pool=$(cfg_pool_mountpoint)
+    if mountpoint -q "$pool" 2>/dev/null; then
+        info "Unmounting pool $pool"
+        umount -lf "$pool" 2>/dev/null || true
+    fi
+    info "Unmounting array disks (nmdctl unmount)…"
+    nmdctl unmount 2>&1 || true
+    info "Stopping array (nmdctl stop)…"
+    nmdctl stop 2>&1 || true
+    jq '.array.state = "stopped"' "$CONFIG_FILE" > /tmp/freeraid.conf.tmp \
+        && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+    info "NonRAID array stopped."
+}
+
+cmd_nonraid_check() {
+    require nmdctl
+    local mode="${1:-nocorrect}"   # nocorrect | correct | pause | resume | cancel
+    nmdctl check "$mode"
+}
+
 cmd_network_apply_config() {
     # Apply .network section of /boot/config/freeraid.conf.json to systemd-networkd.
     # Intended for first-boot after an Unraid import: takes the static IP / DHCP
@@ -4566,6 +4699,12 @@ case "${1:-help}" in
     network-info)       cmd_network_info ;;
     network-set)        cmd_network_set "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" ;;
     network-apply-config) cmd_network_apply_config ;;
+    parity-method)      cmd_parity_method "${2:-}" ;;
+    nonraid-import)     cmd_nonraid_import ;;
+    nonraid-start)      cmd_start_nonraid ;;
+    nonraid-stop)       cmd_nonraid_stop ;;
+    nonraid-status)     cmd_nonraid_status ;;
+    nonraid-check)      cmd_nonraid_check "${2:-}" ;;
     users-list)           cmd_users_list ;;
     users-add)            cmd_users_add "${2:-}" "${3:-}" ;;
     users-delete)         cmd_users_delete "${2:-}" ;;
