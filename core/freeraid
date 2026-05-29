@@ -3546,8 +3546,11 @@ cmd_network_apply_config() {
     local conf_file="$conf_dir/20-wired.network"
     mkdir -p "$conf_dir"
 
-    local dhcp ip netmask gateway iface_cfg bond_nics
-    dhcp=$(jq -r '.network.dhcp // true' "$CONFIG_FILE")
+    local dhcp_is_false ip netmask gateway iface_cfg bond_nics
+    # jq's `//` returns the right side when the left is null OR false, so
+    # `.network.dhcp // true` falsely yields "true" for an explicit `false`.
+    # Compare to false directly instead.
+    dhcp_is_false=$(jq -r '.network.dhcp == false' "$CONFIG_FILE")
     ip=$(jq -r '.network.ip // empty' "$CONFIG_FILE")
     netmask=$(jq -r '.network.netmask // empty' "$CONFIG_FILE")
     gateway=$(jq -r '.network.gateway // empty' "$CONFIG_FILE")
@@ -3569,7 +3572,7 @@ cmd_network_apply_config() {
         warn "Imported interface '$iface_cfg' is a bridge/bond; applying network on physical NIC '$match_iface' (bridge not created — VMs needing br0 require manual setup)"
     fi
 
-    if [ "$dhcp" = "true" ] || [ -z "$ip" ]; then
+    if [ "$dhcp_is_false" != "true" ] || [ -z "$ip" ]; then
         cat > "$conf_file" <<NET
 [Match]
 Name=$match_iface

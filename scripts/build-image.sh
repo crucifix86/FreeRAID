@@ -159,6 +159,58 @@ fi
 apt-get install -y -t bookworm-backports zfsutils-linux 2>/dev/null || \
     echo "WARN: ZFS install failed — may need reboot for kernel modules"
 
+# NonRAID — Unraid-compatible realtime parity (qvr/nonraid).
+# Builds md-nonraid + nonraid6_pq as out-of-tree modules. Coexists with stock
+# md/raid6_pq. nmdctl reads Unraid's super.dat directly:
+#   cp /boot/config/super.dat /nonraid.dat
+#   nmdctl import   # validates without committing
+#   nmdctl start    # commits
+#
+# Build directly with `make modules` against the target kernel headers rather
+# than the upstream .deb path — the upstream debian/* has a version mismatch
+# (deb 1.0.0-1 vs dkms.conf PACKAGE_VERSION=1.3.2) that makes dpkg install
+# fail, and tools/debian/rules dh_installsystemd reports a missing-unit error
+# during build. Direct build sidesteps both bugs.
+if ! command -v nmdctl &>/dev/null; then
+    apt-get install -y -qq build-essential git
+    NRBUILD=$(mktemp -d -t nonraid-XXXXXX)
+    if git clone --depth 1 -b main \
+        https://github.com/qvr/nonraid.git "$NRBUILD/nonraid" 2>&1 | tail -3; then
+        KVER=$(ls /lib/modules/ 2>/dev/null | sort -V | tail -1)
+        if [ -n "$KVER" ] && [ -d "/lib/modules/$KVER/build" ]; then
+            (cd "$NRBUILD/nonraid" && \
+                make -C "/lib/modules/$KVER/build" M=$(pwd) modules CONFIG_UBSAN=n 2>&1 | tail -5)
+            if [ -f "$NRBUILD/nonraid/md_nonraid/md-nonraid.ko" ] && \
+               [ -f "$NRBUILD/nonraid/raid6/nonraid6_pq.ko" ]; then
+                DEST="/lib/modules/$KVER/extra/nonraid"
+                mkdir -p "$DEST"
+                cp "$NRBUILD/nonraid/md_nonraid/md-nonraid.ko" "$DEST/"
+                cp "$NRBUILD/nonraid/raid6/nonraid6_pq.ko" "$DEST/"
+                depmod -a "$KVER"
+                # nmdctl CLI + systemd units + udev rules verbatim from tools/
+                cp "$NRBUILD/nonraid/tools/nmdctl" /usr/bin/nmdctl
+                chmod +x /usr/bin/nmdctl
+                [ -d "$NRBUILD/nonraid/tools/systemd" ] && \
+                    cp "$NRBUILD/nonraid/tools/systemd"/*.service \
+                       "$NRBUILD/nonraid/tools/systemd"/*.timer \
+                       /etc/systemd/system/ 2>/dev/null || true
+                [ -f "$NRBUILD/nonraid/tools/systemd/nonraid.default" ] && \
+                    cp "$NRBUILD/nonraid/tools/systemd/nonraid.default" /etc/default/nonraid
+                [ -d "$NRBUILD/nonraid/tools/udev" ] && \
+                    cp "$NRBUILD/nonraid/tools/udev"/*.rules /etc/udev/rules.d/ 2>/dev/null || true
+                echo "FreeRAID: NonRAID installed (kernel $KVER, nmdctl + modules + units)"
+            else
+                echo "WARN: NonRAID module build did not produce expected .ko files"
+            fi
+        else
+            echo "WARN: NonRAID skipped — no kernel headers found"
+        fi
+    else
+        echo "WARN: NonRAID clone failed — realtime parity unavailable"
+    fi
+    rm -rf "$NRBUILD"
+fi
+
 # Docker
 if ! command -v docker &>/dev/null; then
     curl -fsSL https://get.docker.com | sh
@@ -168,6 +220,18 @@ apt-get install -y -qq docker-compose-plugin 2>/dev/null || true
 # Cockpit
 apt-get install -y -qq cockpit 2>/dev/null || true
 
+# Cockpit's `cockpit-networkmanager` recommends pull NetworkManager + ifupdown
+# into the image. That gives us THREE managers fighting for the interface
+# (systemd-networkd vs NetworkManager vs ifupdown's networking.service), so any
+# static IP we apply via networkd gets reverted as soon as NM brings its own
+# DHCP up. FreeRAID has its own Network UI — we don't need Cockpit's NM tab.
+# Purge the NM stack and mask its services so systemd-networkd is the sole
+# owner of network configuration.
+apt-get purge -y -qq cockpit-networkmanager network-manager modemmanager \
+    ifupdown 2>/dev/null || true
+apt-get autoremove -y -qq 2>/dev/null || true
+systemctl mask NetworkManager.service NetworkManager-wait-online.service \
+    NetworkManager-dispatcher.service networking.service 2>/dev/null || true
 
 # systemd-resolved for DNS
 apt-get install -y -qq systemd-resolved 2>/dev/null || true
@@ -302,10 +366,15 @@ python3 /usr/local/lib/freeraid/unraid-import \
     || echo "FreeRAID: import had errors — check /boot/config/freeraid.conf.json"
 
 # Apply imported network (static IP / DHCP / DNS) so the machine comes up
-# on the address the user expects — not on whatever DHCP hands out. Failure
-# is non-fatal: stale DHCP is better than no network.
-if [ -f "$FLAG" ]; then
+# on the address the user expects — but ONLY when this is a true cutover.
+# The .skip-parity marker means the user is test-booting alongside a live
+# Unraid box; stealing its static IP at first boot would knock the source
+# system off the LAN. Failure is non-fatal: stale DHCP is better than no
+# network.
+if [ -f "$FLAG" ] && [ ! -f "$SKIP_PARITY_MARKER" ]; then
     /usr/local/bin/freeraid network-apply-config 2>&1 | logger -t freeraid-firstboot || true
+elif [ -f "$SKIP_PARITY_MARKER" ]; then
+    echo "FreeRAID: skip-parity active — leaving network on DHCP (imported static IP stays in config for future cutover; run 'freeraid network-apply-config' when ready)"
 fi
 
 # Carry over user customizations as inert side-files for review (do not
@@ -542,7 +611,13 @@ SVC
 cat > /etc/systemd/system/freeraid-firstboot.service <<'SVC'
 [Unit]
 Description=FreeRAID First Boot Import
-After=local-fs.target
+# CRITICAL: must run AFTER freeraid-config-mount, otherwise the
+# ConditionPathExists below is evaluated before /boot/config is bound from
+# the USB and silently fails — leaving the imported backup zip on the USB
+# unprocessed forever. systemd evaluates Conditions at activation; once a
+# condition fails the unit is marked skipped and won't retry on its own.
+After=freeraid-config-mount.service local-fs.target
+Requires=freeraid-config-mount.service
 Before=freeraid-array.service
 ConditionPathExists=/boot/config/unraid-backup.zip
 ConditionPathExists=!/boot/config/.unraid-imported
