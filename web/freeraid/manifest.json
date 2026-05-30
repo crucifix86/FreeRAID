@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 6,
   "name": "freeraid",
   "content-security-policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src * data: blob:;",
   "menu": {

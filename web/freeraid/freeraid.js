@@ -1843,13 +1843,27 @@ function searchApps() {
     const cat = document.getElementById('app-category-filter').value;
     const grid = document.getElementById('app-grid');
     grid.innerHTML = '<div class="loading-msg">Searching...</div>';
-    const args = ['apps-search', q || '', '80'];
-    cockpit.spawn(['freeraid', ...args], { superuser: 'require', err: 'out' })
-      .then(out => {
-        let apps;
-        try { apps = JSON.parse(out.trim()); } catch(e) { grid.innerHTML = '<div class="loading-msg">No results.</div>'; return; }
-        if (cat) apps = apps.filter(a => (a.categories || []).some(c => c === cat));
-        renderAppGrid(apps);
+    // Parallel: CA containers + FreeRAID plugins. Plugins are tagged with
+    // _kind='plugin' so renderAppGrid can pick the right card style and
+    // click handler. Containers default to _kind='container'.
+    const appsP    = cockpit.spawn(['freeraid', 'apps-search',    q || '', '80'], { superuser: 'require', err: 'out' });
+    const pluginsP = cockpit.spawn(['freeraid', 'plugins-search', q || ''],       { superuser: 'require', err: 'ignore' });
+    Promise.all([appsP, pluginsP])
+      .then(([appsOut, pluginsOut]) => {
+        let apps = [], plugins = [];
+        try { apps    = JSON.parse(appsOut.trim()) || []; } catch(e) {}
+        try { plugins = JSON.parse(pluginsOut.trim()) || []; } catch(e) {}
+        if (cat) {
+          apps    = apps   .filter(a => (a.categories || []).some(c => c === cat));
+          plugins = plugins.filter(p => (p.category || '') === cat);
+        }
+        // Plugins first so drivers/system-level options surface above containers.
+        const merged = [
+          ...plugins.map(p => ({ ...p, _kind: 'plugin' })),
+          ...apps.map(a => ({ ...a, _kind: 'container' }))
+        ];
+        if (!merged.length) { grid.innerHTML = '<div class="loading-msg">No results.</div>'; return; }
+        renderAppGrid(merged);
       })
       .catch(() => { grid.innerHTML = '<div class="loading-msg">Search failed.</div>'; });
   }, 300);
@@ -1859,21 +1873,158 @@ function renderAppGrid(apps) {
   const grid = document.getElementById('app-grid');
   if (!apps.length) { grid.innerHTML = '<div class="loading-msg">No apps found.</div>'; return; }
   grid.innerHTML = apps.map(a => {
+    const isPlugin = a._kind === 'plugin';
+    const name = a.name || '';
+    const desc = isPlugin ? (a.description || '') : (a.overview || '');
     const icon = a.icon
       ? `<img src="${a.icon}" class="app-icon" onerror="this.style.display='none'">`
-      : `<div class="app-icon-placeholder">${(a.name||'?')[0]}</div>`;
-    const cats = (a.categories || []).slice(0,2).map(c =>
-      `<span class="app-cat-badge">${c.split(':').pop()}</span>`).join('');
-    const dl = a.downloads > 1000 ? `${(a.downloads/1000).toFixed(0)}k` : (a.downloads || '');
-    return `<div class="app-card" onclick="openAppInstall('${encodeURIComponent(a.name)}')">
+      : `<div class="app-icon-placeholder">${(name||'?')[0]}</div>`;
+    const cats = isPlugin
+      ? (a.category ? `<span class="app-cat-badge">${a.category}</span>` : '')
+      : (a.categories || []).slice(0,2).map(c =>
+          `<span class="app-cat-badge">${c.split(':').pop()}</span>`).join('');
+    const dl = isPlugin ? '' : (a.downloads > 1000 ? `${(a.downloads/1000).toFixed(0)}k` : (a.downloads || ''));
+    const typeBadge = isPlugin ? `<span class="app-type-badge app-type-plugin">PLUGIN</span>` : '';
+    const click = isPlugin
+      ? `openPluginInstall('${encodeURIComponent(a.id)}')`
+      : `openAppInstall('${encodeURIComponent(name)}')`;
+    return `<div class="app-card${isPlugin ? ' app-card-plugin' : ''}" onclick="${click}">
       <div class="app-card-icon">${icon}</div>
       <div class="app-card-body">
-        <div class="app-card-name">${a.name}</div>
-        <div class="app-card-desc">${a.overview || ''}</div>
+        <div class="app-card-name">${name}${typeBadge}</div>
+        <div class="app-card-desc">${desc}</div>
         <div class="app-card-footer">${cats}${dl ? `<span class="app-dl-count">↓${dl}</span>` : ''}</div>
       </div>
     </div>`;
   }).join('');
+}
+
+// Plugin install modal — simpler than container install. For supports_picker
+// plugins (nvidia today), shows the driver dropdown sourced from
+// plugins-status's list_command output. Otherwise a single Install button.
+function openPluginInstall(encodedId) {
+  const id = decodeURIComponent(encodedId);
+  const backdrop = document.getElementById('app-install-backdrop');
+  const body     = document.getElementById('app-install-body');
+  const title    = document.getElementById('app-install-title');
+  const iconEl   = document.getElementById('app-install-icon');
+  title.textContent = 'Loading...';
+  body.innerHTML = '<div class="loading-msg">Loading plugin info...</div>';
+  if (iconEl) iconEl.innerHTML = '';
+  backdrop.classList.remove('hidden');
+
+  cockpit.spawn(['freeraid', 'plugins-get', id], { superuser: 'require', err: 'out' })
+    .then(out => {
+      let plugin;
+      try { plugin = JSON.parse(out.trim()); } catch(e) { body.innerHTML = '<div class="loading-msg">Failed to load plugin.</div>'; return; }
+      if (!plugin || plugin === null) { body.innerHTML = '<div class="loading-msg">Plugin not found.</div>'; return; }
+      title.textContent = plugin.name || id;
+      if (iconEl && plugin.icon) iconEl.innerHTML = `<img src="${plugin.icon}" onerror="this.style.display='none'">`;
+      renderPluginInstall(plugin);
+    })
+    .catch(() => { body.innerHTML = '<div class="loading-msg">Failed to load plugin.</div>'; });
+}
+
+function renderPluginInstall(plugin) {
+  const body = document.getElementById('app-install-body');
+  const id = plugin.id;
+  const supportsPicker = plugin.supports_picker === true;
+  const listCmd = plugin.install && plugin.install.list_command;
+
+  // Async: fetch status + (if picker) list of options.
+  const statusP = cockpit.spawn(['freeraid', 'plugins-status', id], { superuser: 'require', err: 'ignore' });
+  const listP   = (supportsPicker && listCmd)
+      ? cockpit.spawn(['freeraid', listCmd], { superuser: 'require', err: 'ignore' })
+      : Promise.resolve('null');
+
+  body.innerHTML = `<div class="loading-msg">Checking install status...</div>`;
+
+  Promise.all([statusP, listP]).then(([statusOut, listOut]) => {
+    let status = {}; let listing = null;
+    try { status = JSON.parse(statusOut.trim()) || {}; } catch(e) {}
+    try { listing = JSON.parse(listOut.trim()); } catch(e) {}
+
+    const installed = !!(status.installed || status.enabled_on_boot || status.driver_loaded || status.toolkit_installed);
+
+    // Hardware gate. For now: if requires.hardware === 'nvidia-gpu' check
+    // status.gpu_detected; extend later for intel-gpu / amd-gpu.
+    let hwOk = true;
+    let hwMsg = '';
+    if (plugin.requires && plugin.requires.hardware === 'nvidia-gpu') {
+      hwOk = status.gpu_detected === true;
+      hwMsg = hwOk ? `Detected: ${status.gpu_model || 'NVIDIA GPU'}` : 'No NVIDIA GPU detected on this system.';
+    }
+
+    // Status badges
+    const statusBadge = installed
+      ? `<span class="app-cat-badge" style="background:#0a3a0a;color:#7fd17f">Installed</span>`
+      : `<span class="app-cat-badge">Not installed</span>`;
+
+    // Driver picker (nvidia only today)
+    let pickerHtml = '';
+    let pickerSelector = '';
+    if (supportsPicker && listing && Array.isArray(listing.drivers) && listing.drivers.length) {
+      const opts = listing.drivers.map(d => {
+        const label = `${d.family.charAt(0).toUpperCase()+d.family.slice(1)} — ${d.package} (${d.version})${d.installed ? ' [installed]' : ''}`;
+        return `<option value="${d.package}"${d.installed ? ' selected' : ''}>${label}</option>`;
+      }).join('');
+      pickerHtml = `
+        <div class="plugin-row">
+          <label class="plugin-label">Driver version</label>
+          <select id="plugin-picker-${id}" class="plugin-select">${opts}</select>
+        </div>`;
+      pickerSelector = `document.getElementById('plugin-picker-${id}').value`;
+    } else if (supportsPicker) {
+      pickerHtml = `<div class="plugin-row" style="color:var(--text-dim);font-size:12px">No driver versions available — apt-cache may need a refresh.</div>`;
+    }
+
+    const installBtn = hwOk
+      ? `<button class="btn btn-primary" onclick="pluginInstall('${id}', ${pickerSelector || 'null'})">${installed ? 'Reinstall / Update' : 'Install'}</button>`
+      : `<button class="btn btn-primary" disabled title="${hwMsg}">Install</button>`;
+    const disableBtn = (installed && plugin.install && (plugin.install.disable_command || plugin.install.uninstall_url))
+      ? `<button class="btn btn-secondary" onclick="pluginDisable('${id}')">Disable</button>`
+      : '';
+
+    body.innerHTML = `
+      <div class="plugin-info">
+        <div class="plugin-desc">${plugin.description || ''}</div>
+        <div class="plugin-meta">${statusBadge}${hwMsg ? `<span class="app-cat-badge" style="background:${hwOk ? '#1a3a1a' : '#3a1a1a'};color:${hwOk ? '#7fd17f' : '#d17f7f'}">${hwMsg}</span>` : ''}</div>
+        ${pickerHtml}
+        <div class="plugin-actions" style="display:flex;gap:8px;margin-top:16px">
+          ${installBtn}
+          ${disableBtn}
+          <button class="btn btn-ghost" onclick="document.getElementById('app-install-backdrop').classList.add('hidden')">Close</button>
+        </div>
+        <div id="plugin-log-${id}" class="log-panel" style="margin-top:12px;max-height:240px;overflow:auto;font-size:12px;display:none"></div>
+      </div>`;
+  }).catch(() => {
+    body.innerHTML = '<div class="loading-msg">Failed to load plugin status.</div>';
+  });
+}
+
+function pluginInstall(id, selectedArg) {
+  const log = document.getElementById('plugin-log-' + id);
+  if (log) { log.style.display = 'block'; log.innerHTML = ''; }
+  const argv = selectedArg ? ['plugins-install', id, selectedArg] : ['plugins-install', id];
+  const proc = cockpit.spawn(['freeraid', ...argv], { superuser: 'require', err: 'out' });
+  proc.stream(d => { if (log) log.textContent += d; });
+  proc.then(() => {
+    showAlert('success', `Plugin ${id} installed.`);
+    // Re-render with refreshed status
+    cockpit.spawn(['freeraid', 'plugins-get', id], { superuser: 'require', err: 'out' })
+      .then(out => { try { renderPluginInstall(JSON.parse(out.trim())); } catch(e) {} });
+  }).catch(err => { showAlert('error', `Install failed: ${err}`); });
+}
+
+function pluginDisable(id) {
+  if (!confirm('Disable plugin ' + id + '? Some plugins only take effect on next reboot.')) return;
+  cockpit.spawn(['freeraid', 'plugins-disable', id], { superuser: 'require', err: 'out' })
+    .then(() => {
+      showAlert('success', `Plugin ${id} disabled.`);
+      cockpit.spawn(['freeraid', 'plugins-get', id], { superuser: 'require', err: 'out' })
+        .then(out => { try { renderPluginInstall(JSON.parse(out.trim())); } catch(e) {} });
+    })
+    .catch(err => { showAlert('error', `Disable failed: ${err}`); });
 }
 
 function refreshAppFeed() {
@@ -3879,11 +4030,27 @@ function plog(level, text) { appendLog('plugins-log-panel', level, text); }
 function refreshPlugins() {
   const el = document.getElementById('plugins-installed');
   if (el) el.innerHTML = '<div class="loading-msg">Loading...</div>';
+  // Parallel: installed list (legacy plugin-list CLI) + available list (new
+  // plugins-search → getfreeraid.com feed). Used together to flag updates.
   let buf = '';
-  cockpit.spawn(['freeraid', 'plugin-list'], { superuser: 'require', err: 'out' })
-    .stream(d => { buf += d; })
-    .then(() => {
+  const installedP = cockpit.spawn(['freeraid', 'plugin-list'], { superuser: 'require', err: 'out' })
+    .stream(d => { buf += d; });
+  const availableP = cockpit.spawn(['freeraid', 'plugins-search', ''], { superuser: 'require', err: 'ignore' });
+  Promise.all([installedP, availableP])
+    .then(([, availOut]) => {
       try { _pluginsInstalled = JSON.parse(buf.trim()); } catch (_) { _pluginsInstalled = []; }
+      // Map new-feed shape (id, install.type, ...) to the field layout the
+      // installed-list update-detector keys on (name, version). Keeps the
+      // installed-side rendering unchanged.
+      try {
+        const feed = JSON.parse(availOut.trim()) || [];
+        _pluginsAvailable = feed.map(p => ({
+          name: p.id,
+          version: p.version || '',
+          description: p.description || '',
+          icon: p.icon || ''
+        }));
+      } catch (_) { _pluginsAvailable = []; }
       renderInstalledPlugins();
     })
     .catch(err => {

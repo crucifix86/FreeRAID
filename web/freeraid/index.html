@@ -1236,25 +1236,17 @@
       <!-- ── PLUGINS TAB ── -->
       <div id="tab-plugins" class="hidden">
 
-        <!-- Installed plugins -->
+        <!-- Installed plugins (management surface — discovery lives in App Browser) -->
         <div class="settings-section">
           <h2 class="settings-section-title">
             Installed Plugins
-            <button class="btn btn-sm btn-ghost" style="margin-left:auto" onclick="refreshPlugins()">Refresh</button>
+            <div style="margin-left:auto;display:flex;gap:8px">
+              <button class="btn btn-sm btn-primary" onclick="switchTab('docker');setTimeout(()=>{const t=document.getElementById('app-browser-panel');if(t&&t.classList.contains('hidden'))toggleAppBrowser();},150)">Browse Plugins</button>
+              <button class="btn btn-sm btn-ghost" onclick="refreshPlugins()">Refresh</button>
+            </div>
           </h2>
           <div id="plugins-installed">
             <div class="loading-msg">Loading...</div>
-          </div>
-        </div>
-
-        <!-- Available plugins -->
-        <div class="settings-section">
-          <h2 class="settings-section-title">
-            Available Plugins
-            <button class="btn btn-sm btn-secondary" style="margin-left:auto" onclick="fetchAvailablePlugins()">Check for plugins</button>
-          </h2>
-          <div id="plugins-available">
-            <div class="loading-msg">Click "Check for plugins" to load the community plugin index.</div>
           </div>
         </div>
 

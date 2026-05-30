@@ -1943,6 +1943,139 @@ PYEOF
 APPFEED_CACHE="/etc/freeraid/appfeed.json"
 APPFEED_URL="https://raw.githubusercontent.com/Squidly271/AppFeed/master/applicationFeed.json"
 
+PLUGIN_FEED_CACHE="/etc/freeraid/plugins.json"
+PLUGIN_FEED_URL="${FREERAID_PLUGIN_FEED:-https://getfreeraid.com/plugins/index.json}"
+
+cmd_plugins_fetch() {
+    require curl
+    require jq
+    info "Fetching plugin index from $PLUGIN_FEED_URL..."
+    local tmp; tmp=$(mktemp /tmp/freeraid-plugins-XXXXXX.json)
+    if ! curl -fsSL --max-time 30 "$PLUGIN_FEED_URL" -o "$tmp"; then
+        rm -f "$tmp"
+        die "Failed to fetch plugin index"
+    fi
+    # Validate before promoting to cache so a broken upstream doesn't break searches.
+    if ! jq -e '.plugins' "$tmp" >/dev/null 2>&1; then
+        rm -f "$tmp"
+        die "Plugin feed is not valid JSON or missing .plugins array"
+    fi
+    mkdir -p "$(dirname "$PLUGIN_FEED_CACHE")"
+    mv "$tmp" "$PLUGIN_FEED_CACHE"
+    local count; count=$(jq '.plugins | length' "$PLUGIN_FEED_CACHE")
+    echo "{\"ok\":true,\"count\":$count,\"cached\":\"$PLUGIN_FEED_CACHE\"}"
+}
+
+cmd_plugins_search() {
+    # Case-insensitive substring match across name + description + tags.
+    # Empty query returns the full list. Falls through to fetch if no cache.
+    local q="${1:-}"
+    [ -f "$PLUGIN_FEED_CACHE" ] || cmd_plugins_fetch >/dev/null 2>&1 || true
+    [ -f "$PLUGIN_FEED_CACHE" ] || { echo "[]"; return; }
+    if [ -z "$q" ]; then
+        jq '.plugins // []' "$PLUGIN_FEED_CACHE"
+    else
+        jq --arg q "$q" '
+            ($q | ascii_downcase) as $ql |
+            .plugins // [] | map(select(
+                ((.name        // "") | ascii_downcase | contains($ql)) or
+                ((.description // "") | ascii_downcase | contains($ql)) or
+                ((.tags        // []) | map(ascii_downcase) | any(contains($ql)))
+            ))' "$PLUGIN_FEED_CACHE"
+    fi
+}
+
+cmd_plugins_get() {
+    local id="${1:-}"
+    [ -z "$id" ] && die "Usage: freeraid plugins-get <id>"
+    [ -f "$PLUGIN_FEED_CACHE" ] || cmd_plugins_fetch >/dev/null 2>&1 || true
+    [ -f "$PLUGIN_FEED_CACHE" ] || { echo "null"; return; }
+    jq --arg id "$id" '.plugins // [] | map(select(.id == $id)) | .[0] // null' "$PLUGIN_FEED_CACHE"
+}
+
+cmd_plugins_status() {
+    # Returns the underlying status-command's JSON output. UI uses this to
+    # render "Installed" vs "Available" + decide whether to enable Install
+    # or Disable buttons. Plugins without a status_command get a stub.
+    local id="${1:-}"
+    [ -z "$id" ] && die "Usage: freeraid plugins-status <id>"
+    local entry status_cmd
+    entry=$(cmd_plugins_get "$id")
+    [ "$entry" = "null" ] && die "Plugin not found: $id"
+    status_cmd=$(echo "$entry" | jq -r '.install.status_command // ""')
+    if [ -n "$status_cmd" ]; then
+        "$0" "$status_cmd"
+    else
+        echo '{"installed":false,"reason":"no status command defined"}'
+    fi
+}
+
+cmd_plugins_install() {
+    # Dispatcher: install.type=cli routes to a built-in freeraid <command>
+    # (used for the things we ship, like nvidia-driver). install.type=script
+    # downloads + executes an install.sh (used for community contributions).
+    # Optional 2nd arg is forwarded to cli commands as their first parameter
+    # (e.g. driver package name for nvidia-install).
+    local id="${1:-}" arg="${2:-}"
+    [ -z "$id" ] && die "Usage: freeraid plugins-install <id> [arg]"
+    local entry type
+    entry=$(cmd_plugins_get "$id")
+    [ "$entry" = "null" ] && die "Plugin not found: $id"
+    type=$(echo "$entry" | jq -r '.install.type')
+    case "$type" in
+        cli)
+            local cmd; cmd=$(echo "$entry" | jq -r '.install.command')
+            info "Plugin '$id' → running: freeraid $cmd $arg"
+            if [ -n "$arg" ]; then
+                "$0" "$cmd" "$arg"
+            else
+                "$0" "$cmd"
+            fi
+            ;;
+        script)
+            local url; url=$(echo "$entry" | jq -r '.install.url')
+            [ -z "$url" ] || [ "$url" = "null" ] && die "Plugin '$id' is type=script but has no install.url"
+            require curl
+            info "Plugin '$id' → fetching install script from $url"
+            local tmpscript; tmpscript=$(mktemp /tmp/freeraid-plugin-XXXXXX.sh)
+            curl -fsSL --max-time 60 "$url" -o "$tmpscript" || { rm -f "$tmpscript"; die "Failed to fetch $url"; }
+            bash "$tmpscript"
+            local rc=$?
+            rm -f "$tmpscript"
+            [ "$rc" -eq 0 ] || die "Plugin '$id' install script exited non-zero ($rc)"
+            ;;
+        *)
+            die "Unknown install type for '$id': $type"
+            ;;
+    esac
+}
+
+cmd_plugins_disable() {
+    local id="${1:-}"
+    [ -z "$id" ] && die "Usage: freeraid plugins-disable <id>"
+    local entry disable_cmd uninstall_url
+    entry=$(cmd_plugins_get "$id")
+    [ "$entry" = "null" ] && die "Plugin not found: $id"
+    disable_cmd=$(echo "$entry" | jq -r '.install.disable_command // ""')
+    if [ -n "$disable_cmd" ]; then
+        "$0" "$disable_cmd"
+        return $?
+    fi
+    uninstall_url=$(echo "$entry" | jq -r '.install.uninstall_url // ""')
+    if [ -n "$uninstall_url" ]; then
+        require curl
+        local tmpscript; tmpscript=$(mktemp /tmp/freeraid-plugin-XXXXXX.sh)
+        curl -fsSL --max-time 60 "$uninstall_url" -o "$tmpscript" || { rm -f "$tmpscript"; die "Failed to fetch $uninstall_url"; }
+        bash "$tmpscript"
+        local rc=$?
+        rm -f "$tmpscript"
+        [ "$rc" -eq 0 ] || die "Plugin '$id' uninstall script exited non-zero ($rc)"
+        return 0
+    fi
+    die "Plugin '$id' has no disable_command or uninstall_url"
+}
+
+
 cmd_apps_fetch() {
     require curl
     require python3
@@ -5109,6 +5242,13 @@ case "${1:-help}" in
     apps-get)          cmd_apps_get "${2:-}" ;;
     apps-install)      cmd_apps_install "${2:-}" "${3:-[]}" ;;
     apps-categories)   cmd_apps_categories ;;
+
+    plugins-fetch)     cmd_plugins_fetch ;;
+    plugins-search)    cmd_plugins_search "${2:-}" ;;
+    plugins-get)       cmd_plugins_get "${2:-}" ;;
+    plugins-status)    cmd_plugins_status "${2:-}" ;;
+    plugins-install)   cmd_plugins_install "${2:-}" "${3:-}" ;;
+    plugins-disable)   cmd_plugins_disable "${2:-}" ;;
     docker-list)           cmd_docker_list ;;
     docker-get-config)     cmd_docker_get_config "${2:-}" ;;
     docker-network-list)   cmd_docker_network_list ;;
