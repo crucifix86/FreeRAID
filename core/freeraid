@@ -3640,15 +3640,34 @@ cmd_start_nonraid() {
     nmdctl -u start  || die "nmdctl start failed"
     nmdctl    mount  || warn "nmdctl mount reported issues — inspect per-disk state"
 
-    # Mount cache + build mergerfs pool on top of the nmd-mounted disks so
-    # users still get /mnt/user as a unified pool (parity-protected reads on
-    # the nmdN side, mergerfs scatter writes on top — same UX as snapraid path).
+    # Mount the cache pool. nmdctl only handles array disks (registered in
+    # super.dat); the cache device is a normal NVMe/SSD that mounts on its
+    # own. Reformat ONLY if the on-disk fs doesn't match what config expects
+    # — for Unraid imports it's already btrfs and stays intact.
+    local cache_dev cache_mnt cache_fs cur_cache_fs
+    cache_dev=$(jq -r '.array.cache[] | select(.enabled==true) | .device' "$CONFIG_FILE" | head -1)
+    cache_mnt=$(jq -r '.array.cache[] | select(.enabled==true) | .mountpoint' "$CONFIG_FILE" | head -1)
+    cache_fs=$(jq -r '.array.cache[] | select(.enabled==true) | .fstype' "$CONFIG_FILE" | head -1)
+    if [ -n "$cache_dev" ] && [ -b "$cache_dev" ]; then
+        mkdir -p "$cache_mnt"
+        cur_cache_fs=$(blkid -o value -s TYPE "$cache_dev" 2>/dev/null || echo "")
+        if [ -n "$cache_fs" ] && [ -n "$cur_cache_fs" ] && [ "$cur_cache_fs" != "$cache_fs" ]; then
+            info "Formatting cache $cache_dev as $cache_fs..."
+            wipefs -af "$cache_dev" &>/dev/null || true
+            mkfs."$cache_fs" -F "$cache_dev" 2>/dev/null || mkfs."$cache_fs" "$cache_dev"
+        fi
+        if ! mountpoint -q "$cache_mnt"; then
+            info "Mounting cache $cache_dev → $cache_mnt"
+            mount "$cache_dev" "$cache_mnt" || warn "cache mount failed — appdata containers won't have their data"
+        fi
+    fi
+
+    # Build mergerfs branches over the nmdN-mounted disks + cache (cache
+    # first so default-mfs scatter-writes prefer the fast tier). UX matches
+    # snapraid path — users still get /mnt/user as the unified pool.
     local pool branches=""
     pool=$(cfg_pool_mountpoint)
-    while IFS=' ' read -r slot dev mnt fstype; do
-        [ -z "$mnt" ] && continue
-        mountpoint -q "$mnt" 2>/dev/null && branches="${branches:+$branches:}$mnt"
-    done < <(cfg_cache_disks 2>/dev/null || true)
+    [ -n "$cache_mnt" ] && mountpoint -q "$cache_mnt" 2>/dev/null && branches="$cache_mnt"
     for d in /mnt/disk*; do
         mountpoint -q "$d" 2>/dev/null && branches="${branches:+$branches:}$d"
     done
@@ -3656,8 +3675,25 @@ cmd_start_nonraid() {
         local opts
         opts=$(cfg_mergerfs_opts)
         mkdir -p "$pool"
-        info "Mounting mergerfs pool: $branches → $pool"
-        mergerfs "$branches" "$pool" -o "$opts" || warn "mergerfs pool failed (per-disk mounts still usable)"
+        if ! mountpoint -q "$pool"; then
+            info "Mounting mergerfs pool: $branches → $pool"
+            mergerfs "$branches" "$pool" -o "$opts" || warn "mergerfs pool failed (per-disk mounts still usable)"
+        fi
+    fi
+
+    # Route /mnt/user/appdata directly to /mnt/cache/appdata (cache-only,
+    # like Unraid's shfs behavior). Without this, SQLite-using containers
+    # (Sonarr, Plex, *arr) hit disk I/O errors over FUSE/mergerfs. The data
+    # is only on /mnt/cache anyway; this bypasses the pool for that subtree.
+    if [ -n "$cache_mnt" ] && [ -d "$cache_mnt" ] && mountpoint -q "$cache_mnt" 2>/dev/null; then
+        local user_appdata="$pool/appdata"
+        local cache_appdata="$cache_mnt/appdata"
+        mkdir -p "$cache_appdata" "$user_appdata"
+        if ! mountpoint -q "$user_appdata"; then
+            info "Bind-mounting $cache_appdata → $user_appdata (cache-only appdata)"
+            mount --bind "$cache_appdata" "$user_appdata" || \
+                warn "appdata bind-mount failed; SQLite-using containers may fail"
+        fi
     fi
 
     jq '.array.state = "started"' "$CONFIG_FILE" > /tmp/freeraid.conf.tmp \
