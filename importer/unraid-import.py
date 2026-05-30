@@ -463,7 +463,18 @@ def main():
                         help="Don't import the parity disk. Use this to test-boot FreeRAID "
                              "without wiping Unraid's parity — you can reboot back to Unraid "
                              "without a full parity rebuild. The array runs unprotected "
-                             "(data + cache only) until you add parity later.")
+                             "(data + cache only) until you add parity later. Has no effect "
+                             "when --parity-method=nonraid, because NonRAID reads Unraid's "
+                             "super.dat verbatim and never formats anything.")
+    parser.add_argument('--parity-method', choices=['snapraid', 'nonraid'],
+                        default='snapraid',
+                        help="Parity strategy in the produced config. 'snapraid' (default) "
+                             "writes the parity entry with fstype=xfs (SnapRAID will format "
+                             "it on start). 'nonraid' marks fstype=raw (NonRAID's md driver "
+                             "uses the device directly via super.dat — no formatting), and "
+                             "honours --skip-parity as a no-op so the parity stays visible "
+                             "in `freeraid status`. Also sets array.parity_method in the "
+                             "output config.")
     args = parser.parse_args()
 
     only_set = {n.strip() for n in args.only_running.split(',') if n.strip()} or None
@@ -492,7 +503,16 @@ def main():
         # Parse all Unraid configs
         print("Reading disk config...")
         array_cfg = import_disks(config_dir)
-        if args.skip_parity and array_cfg['parity']:
+        # For nonraid the parity disk is never reformatted (the md driver
+        # reads Unraid's super.dat directly), so --skip-parity stays a
+        # safety flag for *snapraid* test boots only. Under nonraid we keep
+        # the parity entry in config so `freeraid status` reflects what
+        # nmdctl actually has, and we mark fstype=raw so no part of the
+        # stack tries to mount/format it.
+        if args.parity_method == 'nonraid':
+            for p in array_cfg['parity']:
+                p['fstype'] = 'raw'
+        elif args.skip_parity and array_cfg['parity']:
             print(f"  --skip-parity: dropping {len(array_cfg['parity'])} parity drive(s) "
                   f"(Unraid parity left untouched — array will run unprotected)")
             array_cfg['parity'] = []
@@ -568,7 +588,8 @@ def main():
                 "pool_mountpoint": "/mnt/user",
                 "default_fs_type": disk_tuning['default_fs_type'],
                 "shutdown_timeout": disk_tuning['shutdown_timeout'],
-                "mergerfs_options": "defaults,allow_other,cache.files=partial,dropcacheonclose=true,category.create=mfs,moveonenospc=true,minfreespace=200M"
+                "mergerfs_options": "defaults,allow_other,cache.files=partial,dropcacheonclose=true,category.create=mfs,moveonenospc=true,minfreespace=200M",
+                "parity_method":    args.parity_method
             },
 
             "snapraid": {

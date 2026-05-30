@@ -344,6 +344,16 @@ if [ -f "$SKIP_PARITY_MARKER" ]; then
     IMPORT_ARGS+=(--skip-parity)
     echo "FreeRAID: skip-parity marker found — Unraid parity will be left intact"
 fi
+# Tell the importer about the parity method up-front. For nonraid, the
+# importer keeps the parity entry in the config (no formatting happens
+# either way — NonRAID reads super.dat verbatim) and sets fstype=raw +
+# array.parity_method=nonraid in the output so `freeraid status`
+# reflects what nmdctl will actually have.
+PARITY_NONRAID_MARKER="/boot/config/.parity-nonraid"
+if [ -f "$PARITY_NONRAID_MARKER" ]; then
+    IMPORT_ARGS+=(--parity-method nonraid)
+    echo "FreeRAID: parity-nonraid marker found — importing under NonRAID semantics"
+fi
 
 echo "FreeRAID: importing Unraid backup..."
 TMPDIR=$(mktemp -d /tmp/freeraid-firstboot-XXXXXX)
@@ -377,22 +387,17 @@ elif [ -f "$SKIP_PARITY_MARKER" ]; then
     echo "FreeRAID: skip-parity active — leaving network on DHCP (imported static IP stays in config for future cutover; run 'freeraid network-apply-config' when ready)"
 fi
 
-# NonRAID staging: when the user has placed /boot/config/.parity-nonraid on
-# the USB (deliberate opt-in for realtime parity matching Unraid's md driver),
-# (a) flip the imported config's parity_method to "nonraid", and (b) stage
-# Unraid's super.dat to /boot/config/super.dat so a subsequent
-# `freeraid nonraid-import` validates the existing array layout and
-# `freeraid start` brings it up via nmdctl. We never auto-start.
-PARITY_NONRAID_MARKER="/boot/config/.parity-nonraid"
+# NonRAID super.dat staging. The importer (above) already set
+# array.parity_method=nonraid when --parity-method nonraid was passed; here
+# we just stage the Unraid super.dat to /boot/config/super.dat so that
+# cmd_start_nonraid can copy it to /nonraid.dat at array-start time.
 if [ -f "$FLAG" ] && [ -f "$PARITY_NONRAID_MARKER" ]; then
     if [ -f "$CONFDIR/super.dat" ]; then
         cp "$CONFDIR/super.dat" /boot/config/super.dat
         chmod 600 /boot/config/super.dat
-        jq '.array.parity_method = "nonraid"' /boot/config/freeraid.conf.json \
-            > /tmp/freeraid.conf.tmp && mv /tmp/freeraid.conf.tmp /boot/config/freeraid.conf.json
-        echo "FreeRAID: NonRAID enabled. super.dat staged. Next: 'freeraid nonraid-import' (validate), then 'freeraid start' (commit)."
+        echo "FreeRAID: super.dat staged. cmd_start_nonraid will auto-validate and bring the array up at boot."
     else
-        echo "FreeRAID: WARN: .parity-nonraid marker present but no super.dat in backup — NonRAID not enabled."
+        echo "FreeRAID: WARN: .parity-nonraid marker present but no super.dat in backup — NonRAID won't be able to start."
     fi
 fi
 
