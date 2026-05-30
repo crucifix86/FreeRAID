@@ -3645,7 +3645,11 @@ cmd_nvidia_drivers_list() {
     # validated, so the dropdown can't offer something apt will reject.
     require apt-cache
     local installed_pkg installed_version
-    installed_pkg=$(dpkg -l 2>/dev/null | awk '/^ii\s+nvidia-.*-driver\s/{print $2; exit}' || true)
+    # Prefer cuda-drivers-NNN (from NVIDIA CUDA repo). Fallback to legacy
+    # nvidia-driver detection so a partial-migration system still reports.
+    # Use [[:space:]] not \s — mawk on minimal images doesn't honor PCRE.
+    installed_pkg=$(dpkg -l 2>/dev/null | awk '/^ii[[:space:]]+cuda-drivers-[0-9]+[[:space:]]/{print $2; exit}' || true)
+    [ -z "$installed_pkg" ] && installed_pkg=$(dpkg -l 2>/dev/null | awk '/^ii[[:space:]]+nvidia-.*-driver[[:space:]]/{print $2; exit}' || true)
     installed_version=""
     if [ -n "$installed_pkg" ]; then
         installed_version=$(dpkg -s "$installed_pkg" 2>/dev/null | awk '/^Version:/{print $2; exit}' || true)
@@ -3657,32 +3661,37 @@ cmd_nvidia_drivers_list() {
     fi
 
     # Discover candidate packages. Names match Debian's non-free nvidia-driver
-    # families: nvidia-driver (current), nvidia-tesla-<N>-driver,
-    # nvidia-legacy-<N>xx-driver. Skip everything else to avoid surfacing
-    # nvidia-cuda-* / nvidia-container-* in the picker.
+    # families: cuda-drivers-<N> (NVIDIA CUDA repo). 580 = last branch with
+    # Pascal/P-series support AND the legacy/stable line for older hardware.
+    # 575/595/610 = production branches for Turing+/Ampere/Ada. Skip
+    # everything else so the picker doesn't surface
+    # cuda-drivers / cuda-drivers-fabricmanager-* / nvidia-open-* etc.
     local out="["
     local first=true
     while read -r pkg; do
         [ -z "$pkg" ] && continue
-        case "$pkg" in
-            nvidia-driver|nvidia-tesla-*-driver|nvidia-legacy-*xx-driver) ;;
-            *) continue ;;
-        esac
-        local ver family installed=false
+        # Only top-level branch metas: cuda-drivers-NNN (no further suffixes)
+        [[ "$pkg" =~ ^cuda-drivers-[0-9]+$ ]] || continue
+        local ver family installed=false branch
+        branch="${pkg#cuda-drivers-}"
         ver=$(apt-cache policy "$pkg" 2>/dev/null | awk '/Candidate:/{print $2; exit}')
         [ -z "$ver" ] || [ "$ver" = "(none)" ] && continue
-        case "$pkg" in
-            nvidia-driver)              family="current"  ;;
-            nvidia-tesla-*-driver)      family="tesla"    ;;
-            nvidia-legacy-*xx-driver)   family="legacy"   ;;
-        esac
+        # Family classification: 580 is the Pascal-compatible legacy line;
+        # anything 590+ is "current/production". 470 is the older legacy.
+        if [ "$branch" -le 470 ]; then
+            family="legacy"
+        elif [ "$branch" -le 580 ]; then
+            family="pascal-legacy"
+        else
+            family="current"
+        fi
         [ "$pkg" = "$installed_pkg" ] && installed=true
         $first || out+=","
         first=false
         out+=$(jq -nc --arg pkg "$pkg" --arg ver "$ver" --arg family "$family" \
                      --argjson installed "$installed" \
             '{package:$pkg, version:$ver, family:$family, installed:$installed}')
-    done < <(apt-cache search -n '^nvidia-.*driver$' 2>/dev/null | awk '{print $1}')
+    done < <(apt-cache search -n '^cuda-drivers-[0-9]+$' 2>/dev/null | awk '{print $1}')
     out+="]"
 
     jq -nc --argjson drivers "$out" \
@@ -3708,78 +3717,116 @@ cmd_nvidia_disable() {
 }
 
 cmd_nvidia_install() {
-    # Installs nvidia-driver + nvidia-container-toolkit, configures docker runtime,
-    # and drops /boot/config/.nvidia-enabled so it re-applies at every live boot.
-    # Optional arg: package name (e.g. nvidia-tesla-535-driver) overrides the
-    # default `nvidia-driver`. UI picker (#9) passes the selected package here.
-    local driver_pkg="${1:-nvidia-driver}"
+    # Installs the NVIDIA driver + nvidia-container-toolkit, configures docker
+    # runtime, drops /boot/config/.nvidia-enabled so it re-applies every boot.
+    #
+    # Default: cuda-drivers-580 (the legacy 580.xx branch — last that supports
+    # Pascal/P-series + first that supports the NVENC API recent
+    # jellyfin-ffmpeg + bleeding-edge upstream ffmpeg actually require). Pulls
+    # from NVIDIA's official CUDA repo (developer.download.nvidia.com), NOT
+    # Debian's non-free which caps at 535 — too old for current container ffmpegs.
+    #
+    # Picker arg: pass `cuda-drivers-575`, `cuda-drivers-610`, etc. for the
+    # production branches when the user has Turing+/Ada hardware.
+    local driver_pkg="${1:-cuda-drivers-580}"
     case "$driver_pkg" in
-        nvidia-driver|nvidia-tesla-*-driver|nvidia-legacy-*xx-driver) ;;
-        *) die "Unsupported driver package: $driver_pkg (allowed: nvidia-driver, nvidia-tesla-*-driver, nvidia-legacy-*xx-driver)" ;;
+        cuda-drivers-*) ;;
+        *) die "Unsupported driver package: $driver_pkg (expected cuda-drivers-<branch>, e.g. cuda-drivers-580)" ;;
     esac
+    local branch="${driver_pkg#cuda-drivers-}"
     export DEBIAN_FRONTEND=noninteractive
     require apt-get
+    require curl
 
-    # Blacklist nouveau permanently. Without this, nouveau loads on boot and
-    # claims the GPU before nvidia can attach ("nouveau [...] obtained ownership").
+    # 1) Blacklist nouveau permanently. Without this, nouveau claims the GPU
+    # before nvidia can attach.
     info "Blacklisting nouveau..."
     cat > /etc/modprobe.d/freeraid-blacklist-nouveau.conf <<'BL'
 blacklist nouveau
 options nouveau modeset=0
 BL
 
-    info "Installing $driver_pkg from Debian non-free (this builds the kernel module via DKMS — 2-5 min)..."
+    # 2) Add NVIDIA's CUDA repo (idempotent — only fetches keyring if missing).
+    # `--batch --yes` is required because gpg on a service-running system has
+    # no /dev/tty (validated 2026-05-30 — earlier omission killed the install).
+    info "Ensuring NVIDIA CUDA repo is configured..."
+    local cuda_key=/usr/share/keyrings/nvidia-cuda-keyring.gpg
+    if [ ! -f "$cuda_key" ]; then
+        curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/3bf863cc.pub \
+            | gpg --batch --yes --dearmor -o "$cuda_key"
+    fi
+    echo "deb [signed-by=$cuda_key] https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/ /" \
+        > /etc/apt/sources.list.d/nvidia-cuda.list
+
+    # 3) Purge any pre-existing Debian-apt nvidia-driver (535-class) — these
+    # conflict at the dependency level with the CUDA repo's 580+ package set
+    # and apt's solver can't reconcile them cleanly. Skip purge entirely if
+    # the running driver is already from the CUDA repo (idempotent re-run).
+    local current_driver
+    current_driver=$(dpkg -s nvidia-driver 2>/dev/null | awk '/^Version:/{print $2}' || echo "")
+    if [ -n "$current_driver" ] && [[ ! "$current_driver" =~ ^"$branch" ]]; then
+        info "Purging existing nvidia-driver $current_driver to make room for $driver_pkg..."
+        apt-get purge -y \
+            "nvidia*" "libnvidia*" "libcuda*" "libegl-nvidia*" "libgles-nvidia*" \
+            "libglx-nvidia*" "libxnvctrl*" "firmware-nvidia*" "cuda*" \
+            "xserver-xorg-video-nvidia*" 2>&1 | tail -3 || true
+        apt-get autoremove -y 2>&1 | tail -2 || true
+    fi
+
+    # 4) Refresh apt cache against the CUDA repo, then install the driver
+    # meta-package + NVIDIA-supplied apt pin file (forces the whole branch
+    # to track together).
+    info "Installing $driver_pkg + nvidia-driver-pinning-$branch + firmware..."
     apt-get update -qq 2>&1 | tail -3
-    # On a live-boot system, /boot/vmlinuz-* doesn't exist in the root overlay,
-    # so initramfs-tools postinst always fails. That failure is harmless — the
-    # nvidia DKMS module still gets built and installed. Detect the real
-    # outcome by checking for the built .ko file afterwards.
-    apt-get install -y -qq "$driver_pkg" firmware-misc-nonfree 2>&1 | tail -10 || true
+    apt-get install -y "$driver_pkg" "nvidia-driver-pinning-$branch" firmware-misc-nonfree 2>&1 | tail -5 || true
+
+    # 5) full-upgrade --allow-downgrades aligns any stragglers that apt may
+    # have left at a newer version (e.g. nvidia-settings sneaking in at 610).
+    # Without this the kernel module's NVML version drifts from userspace libs
+    # → "Driver/library version mismatch" on nvidia-smi.
+    info "Aligning all nvidia packages to the $branch branch..."
+    apt-get full-upgrade -y --allow-downgrades 2>&1 | tail -5 || true
+
+    # 6) Real-outcome check (don't trust dpkg exit codes — initramfs-tools
+    # postinst always fails on the live overlay).
     local kver; kver=$(uname -r)
     if ! find "/lib/modules/$kver/updates/dkms" -name "nvidia*.ko*" 2>/dev/null | grep -q .; then
-        die "nvidia-driver install failed — no DKMS module found for kernel $kver"
+        die "nvidia driver install failed — no DKMS module found for kernel $kver"
     fi
 
-    info "Live-loading nvidia module (no reboot needed)..."
+    info "Live-loading nvidia module..."
     rmmod nouveau 2>/dev/null || true
+    rmmod nvidia_uvm nvidia_drm nvidia_modeset nvidia 2>/dev/null || true
     modprobe nvidia 2>&1 || warn "nvidia modprobe failed — reboot may be required"
 
-    info "Adding NVIDIA container-toolkit repo..."
-    local key=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-    if [ ! -f "$key" ]; then
-        curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey 2>/dev/null \
-            | gpg --dearmor -o "$key"
+    # 7) Container toolkit (separate NVIDIA repo at nvidia.github.io)
+    info "Ensuring nvidia-container-toolkit repo is configured..."
+    local ct_key=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+    if [ ! -f "$ct_key" ]; then
+        curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+            | gpg --batch --yes --dearmor -o "$ct_key"
     fi
-    curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list 2>/dev/null \
-        | sed "s#deb https://#deb [signed-by=$key] https://#g" \
+    curl -fsSL https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+        | sed "s#deb https://#deb [signed-by=$ct_key] https://#g" \
         > /etc/apt/sources.list.d/nvidia-container-toolkit.list
-
-    info "Installing nvidia-container-toolkit..."
     apt-get update -qq 2>&1 | tail -3
-    # Same pattern as the nvidia-driver block above: on a live-boot system the
-    # root overlay has no /boot/vmlinuz-*, so any postinst chained into
-    # initramfs-tools fails and dpkg returns non-zero — but the toolkit itself
-    # installed cleanly. Detect via the `nvidia-ctk` binary, not dpkg's exit
-    # code (#8). The previous `|| die` was skipping nvidia-ctk runtime
-    # configure, the .nvidia-enabled marker, and the docker restart.
-    apt-get install -y --no-install-recommends -qq nvidia-container-toolkit 2>&1 | tail -5 || true
+    apt-get install -y --no-install-recommends -qq nvidia-container-toolkit 2>&1 | tail -3 || true
     command -v nvidia-ctk &>/dev/null || \
-        die "nvidia-container-toolkit install failed — nvidia-ctk binary not present after apt-get"
+        die "nvidia-container-toolkit install failed — nvidia-ctk binary missing"
 
     info "Registering nvidia runtime with Docker..."
-    # nvidia-ctk writes the runtime block into daemon.json preserving other keys
-    nvidia-ctk runtime configure --runtime=docker --set-as-default=false 2>&1 | tail -3 || \
+    nvidia-ctk runtime configure --runtime=docker --set-as-default=false 2>&1 | tail -2 || \
         warn "nvidia-ctk runtime configure failed — Docker may need manual config"
 
     info "Marking nvidia enabled on boot (/boot/config/.nvidia-enabled)..."
     touch /boot/config/.nvidia-enabled
 
     info "Restarting Docker..."
-    systemctl restart docker 2>&1 | tail -3
+    systemctl restart docker 2>&1 | tail -2 || true
 
-    # Verify
-    if nvidia-smi &>/dev/null; then
+    if nvidia-smi --query-gpu=driver_version,name --format=csv,noheader &>/dev/null; then
         info "✓ nvidia-smi works — GPU is ready for containers."
+        nvidia-smi --query-gpu=driver_version,name --format=csv,noheader | head -3
     else
         warn "nvidia-smi not responding yet — a reboot will finalize."
     fi
