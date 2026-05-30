@@ -3772,15 +3772,28 @@ cmd_network_apply_config() {
 
     # Resolve the actual phys nic to match on. Imported configs from Unraid
     # often name br0/bond0 — we can't write a .network for an interface that
-    # doesn't exist yet, so collapse to the underlying NIC.
+    # doesn't exist yet, so collapse to the underlying NIC. Even after that
+    # collapse the name may be wrong: Unraid kernel-naming gave "eth0",
+    # Debian's predictable naming gives e.g. "enp34s0". Validate against
+    # /sys/class/net and fall back to the first real en*/eth* device.
     local match_iface="$iface_cfg"
     if [[ "$iface_cfg" == br* || "$iface_cfg" == bond* ]]; then
-        if [ -n "$bond_nics" ]; then
-            match_iface="${bond_nics%% *}"
+        match_iface="${bond_nics%% *}"
+        [ -z "$match_iface" ] && match_iface="$iface_cfg"
+    fi
+    if [ ! -d "/sys/class/net/$match_iface" ]; then
+        local fallback
+        fallback=$(ls /sys/class/net 2>/dev/null | \
+                   grep -E '^(en|eth)' | grep -vE '(v[0-9]+$|^veth)' | head -1 || true)
+        if [ -n "$fallback" ]; then
+            warn "Imported NIC name '$match_iface' doesn't exist on this system; applying on first discovered physical NIC '$fallback'"
+            match_iface="$fallback"
         else
-            match_iface=$(ls /sys/class/net 2>/dev/null | grep -E '^(en|eth)' | head -1 || echo "eth0")
+            die "No usable physical NIC found (looking for /sys/class/net/$match_iface or any en*/eth* device)"
         fi
-        warn "Imported interface '$iface_cfg' is a bridge/bond; applying network on physical NIC '$match_iface' (bridge not created — VMs needing br0 require manual setup)"
+    fi
+    if [[ "$iface_cfg" == br* || "$iface_cfg" == bond* ]]; then
+        warn "Imported interface '$iface_cfg' is a bridge/bond — applying on physical NIC '$match_iface' (bridge not created; VMs needing br0 require manual setup)"
     fi
 
     if [ "$dhcp_is_false" != "true" ] || [ -z "$ip" ]; then
