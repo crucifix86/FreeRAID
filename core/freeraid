@@ -149,7 +149,23 @@ cmd_status_json() {
     local last_sync
     last_sync=$(journalctl -u freeraid-sync --no-pager -n 1 --output=short 2>/dev/null | grep -oP '\d{4}-\d{2}-\d{2}' | head -1 || echo "never")
 
-    # Parity drives JSON
+    # Parity drives JSON.
+    # "mounted" historically meant `mountpoint -q $mnt`. Under NonRAID the
+    # parity disk is a raw block device managed by the md driver and never
+    # mounted as a filesystem — but the UI was rendering that as a yellow
+    # "not mounted" warning even though parity was actively protecting the
+    # array. For NonRAID we instead report "mounted" iff the kernel md
+    # module is loaded (and therefore using super.dat → the parity disk).
+    local pm
+    pm=$(jq -r '.array.parity_method // "snapraid"' "$CONFIG_FILE")
+    local nonraid_active=false
+    # Read /proc/modules directly — `lsmod | grep` doesn't reliably fire
+    # the success branch under `set -euo pipefail`, and we don't need the
+    # extra process anyway.
+    if [ "$pm" = "nonraid" ] && [ -e /proc/modules ] && \
+       grep -q '^md_nonraid ' /proc/modules 2>/dev/null; then
+        nonraid_active=true
+    fi
     local parity_json="["
     local first=true
     while IFS=' ' read -r slot dev mnt fstype label; do
@@ -157,7 +173,11 @@ cmd_status_json() {
         [ -b "$dev" ] && present=true
         $present && size=$(lsblk -dn -o SIZE "$dev" 2>/dev/null || echo "?")
         $present && temp=$(get_disk_temp "$dev")
-        mountpoint -q "$mnt" 2>/dev/null && synced=true
+        if $nonraid_active; then
+            $present && synced=true
+        else
+            mountpoint -q "$mnt" 2>/dev/null && synced=true
+        fi
         $first || parity_json+=","
         first=false
         parity_json+="{\"slot\":\"$slot\",\"device\":\"$dev\",\"mountpoint\":\"$mnt\",\"size\":\"$size\",\"present\":$present,\"mounted\":$synced,\"label\":\"$label\",\"temp\":\"$temp\"}"
