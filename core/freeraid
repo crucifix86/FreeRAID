@@ -97,9 +97,25 @@ get_disk_temp() {
     local dev="$1"
     [ -b "$dev" ] || { echo ""; return; }
     local temp
-    # 3s timeout — under NonRAID the kernel md driver can hold the device
-    # long enough that smartctl's ATA passthrough hangs for tens of seconds,
-    # which would freeze the entire status query (and the dashboard).
+    # Skip entirely when the device is held by the NonRAID md driver. Under
+    # NonRAID the ATA passthrough that smartctl uses hangs in kernel D-state
+    # — `timeout` only kills the userspace wrapper; the syscall stays stuck
+    # and the proc stays in the cgroup forever (uninterruptible). Enough
+    # accumulated D-state procs jam cockpit-wsinstance's cgroup pids limit
+    # and the whole web UI dies. For nonraid-held disks the device temp is
+    # also available via `nmdctl status -o json` — preferred source.
+    if grep -q '^md_nonraid ' /proc/modules 2>/dev/null; then
+        local sd; sd=$(basename "$(readlink -f "$dev" 2>/dev/null)" 2>/dev/null | sed 's/[0-9]*$//')
+        if [ -n "$sd" ] && grep -qE "(^| )$sd( |$)" /proc/mdstat 2>/dev/null; then
+            echo ""; return
+        fi
+        # Cross-check via nmdctl: any disk it reports as a slot is held by it
+        if command -v nmdctl &>/dev/null && \
+           timeout 2 nmdctl status -o json 2>/dev/null | \
+           jq -e --arg sd "$sd" '.disks[]? | select(.device == $sd)' >/dev/null 2>&1; then
+            echo ""; return
+        fi
+    fi
     temp=$(timeout 3 smartctl -j -x "$dev" 2>/dev/null | jq -r '.temperature.current // empty' 2>/dev/null || true)
     echo "${temp:-}"
 }
