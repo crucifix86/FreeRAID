@@ -1389,6 +1389,19 @@ body {
   padding: 2px 6px;
   border-radius: 4px;
 }
+.docker-update-badge {
+  display: inline-block;
+  background: #2a1e00;
+  color: var(--yellow);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 6px;
+  margin-left: 6px;
+  border-radius: 3px;
+  border: 1px solid var(--yellow);
+}
 .badge-cat {
   background: var(--bg3);
   color: var(--accent);

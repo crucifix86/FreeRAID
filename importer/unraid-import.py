@@ -325,6 +325,30 @@ def import_docker_templates(config_dir: Path, only: set | None = None) -> list:
             webui    = (root.findtext('WebUI', '') or '').strip()
             icon     = (root.findtext('Icon', '') or '').strip()
 
+            # ExtraParams is Unraid's catch-all for raw `docker run` flags.
+            # Plex/Jellyfin/Frigate/Ollama all use it for `--runtime=nvidia
+            # --gpus=all`; skipping it dropped GPU access on import (#17).
+            # Translate runtime/gpus to compose `runtime: nvidia`; flag any
+            # other flags so the user can port them deliberately.
+            extra_params = (root.findtext('ExtraParams', '') or '').strip()
+            nvidia_runtime = False
+            unhandled_extra = []
+            if extra_params:
+                tokens = extra_params.split()
+                i = 0
+                while i < len(tokens):
+                    t = tokens[i]
+                    if t == '--runtime=nvidia' or (t == '--runtime' and i+1 < len(tokens) and tokens[i+1] == 'nvidia'):
+                        nvidia_runtime = True
+                        i += 2 if t == '--runtime' else 1
+                    elif t.startswith('--gpus'):
+                        # `--gpus=all` or `--gpus all` → same as nvidia runtime
+                        nvidia_runtime = True
+                        i += 2 if t == '--gpus' else 1
+                    else:
+                        unhandled_extra.append(t)
+                        i += 1
+
             env_vars = {}
             for env in root.findall('Config[@Type="Variable"]'):
                 k = env.get('Target', '')
@@ -360,8 +384,13 @@ def import_docker_templates(config_dir: Path, only: set | None = None) -> list:
                 "ports": ports,
                 "volumes": volumes,
                 "restart": "unless-stopped",
+                "nvidia_runtime": nvidia_runtime,
+                "extra_params_unhandled": unhandled_extra,
                 "_imported_from_unraid_template": xml_file.name
             })
+            if unhandled_extra:
+                print(f"  Note: {name} has unhandled ExtraParams (no compose equivalent): "
+                      f"{' '.join(unhandled_extra)}", file=sys.stderr)
 
         except ET.ParseError as e:
             print(f"  Warning: could not parse {xml_file.name}: {e}", file=sys.stderr)
@@ -432,6 +461,13 @@ def write_compose_files(apps: list, output_dir: Path, share_map: dict | None = N
             svc["ports"] = app["ports"]
         if app.get("volumes"):
             svc["volumes"] = [_rewrite_volume(v, share_map) for v in app["volumes"]]
+        # `runtime: nvidia` is honored by `docker compose up` when the nvidia
+        # runtime is registered in /etc/docker/daemon.json (which freeraid's
+        # cmd_nvidia_install does). The NVIDIA_VISIBLE_DEVICES /
+        # NVIDIA_DRIVER_CAPABILITIES env vars are already flowing through the
+        # generic environment passthrough above.
+        if app.get("nvidia_runtime"):
+            svc["runtime"] = "nvidia"
 
         # Labels for the FreeRAID web UI — the core reads freeraid.webui off
         # the container's Config.Labels to render the "Open Web UI" button.
@@ -459,6 +495,11 @@ def main():
     parser.add_argument('--only-running', default='',
                         help='Comma-separated container names to include (from `docker ps`). '
                              'Other templates are skipped. Empty = import all templates.')
+    parser.add_argument('--only-running-file', default='',
+                        help='Path to a file with one container name per line (lines starting '
+                             "with # are ignored). Equivalent to --only-running but reads from "
+                             'disk so the active-set can ride along in the backup. Merges with '
+                             '--only-running if both are given.')
     parser.add_argument('--skip-parity', action='store_true',
                         help="Don't import the parity disk. Use this to test-boot FreeRAID "
                              "without wiping Unraid's parity — you can reboot back to Unraid "
@@ -477,7 +518,18 @@ def main():
                              "output config.")
     args = parser.parse_args()
 
-    only_set = {n.strip() for n in args.only_running.split(',') if n.strip()} or None
+    only_set = {n.strip() for n in args.only_running.split(',') if n.strip()}
+    if args.only_running_file:
+        try:
+            with open(args.only_running_file) as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        only_set.add(line)
+        except OSError as e:
+            print(f"Warning: could not read --only-running-file {args.only_running_file}: {e}",
+                  file=sys.stderr)
+    only_set = only_set or None
 
     source = Path(args.source)
     mounted_tmp = None

@@ -2685,11 +2685,38 @@ function refreshDocker() {
         const containers = JSON.parse(buf.slice(jsonStart));
         const autoupdate = JSON.parse(auOut || '{}');
         renderDocker(containers, autoupdate);
+        // Update check is slow (per-image registry round trip). Fire async
+        // after render so containers paint immediately, then decorate cards.
+        decorateUpdateBadges();
       } catch(e) {
         el.innerHTML = '<div class="loading-msg">Could not load containers.</div>';
       }
     })
     .catch(() => { el.innerHTML = '<div class="loading-msg">docker-list failed.</div>'; });
+}
+
+function decorateUpdateBadges() {
+  cockpit.spawn(['freeraid', 'docker-check-updates'], { superuser: 'require', err: 'ignore' })
+    .then(out => {
+      let report;
+      try { report = JSON.parse(out.trim()); } catch(e) { return; }
+      report.forEach(r => {
+        if (!r.update_available) return;
+        const card = document.getElementById('dcard-' + r.name);
+        if (!card) return;
+        const header = card.querySelector('.docker-header');
+        if (!header || header.querySelector('.docker-update-badge')) return;
+        const badge = document.createElement('span');
+        badge.className = 'docker-update-badge';
+        badge.title = 'Image update available — click ⋮ → Update';
+        badge.textContent = 'Update';
+        // Place just before the context-menu button
+        const ctxBtn = header.querySelector('.btn-ctx-menu');
+        if (ctxBtn) header.insertBefore(badge, ctxBtn);
+        else header.appendChild(badge);
+      });
+    })
+    .catch(() => {});
 }
 
 let _dockerSelection = new Set();

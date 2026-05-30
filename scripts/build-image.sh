@@ -107,8 +107,11 @@ export DEBIAN_FRONTEND=noninteractive
 # so chpasswd, smbpasswd, systemctl, etc. resolve.
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-# Enable contrib + non-free-firmware for NIC firmware
-sed -i 's|^deb http://deb.debian.org/debian bookworm main$|deb http://deb.debian.org/debian bookworm main contrib non-free-firmware|' /etc/apt/sources.list
+# Enable contrib + non-free + non-free-firmware. non-free is needed for
+# nvidia-driver packages so `freeraid nvidia-drivers-list` returns results
+# (#9 — POUGHKEEPSIE returned empty drivers[] on 2026-05-30 with only
+# non-free-firmware enabled).
+sed -i 's|^deb http://deb.debian.org/debian bookworm main$|deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware|' /etc/apt/sources.list
 
 # Add backports (for ZFS)
 echo "deb http://deb.debian.org/debian bookworm-backports main contrib non-free" \
@@ -355,6 +358,16 @@ if [ -f "$PARITY_NONRAID_MARKER" ]; then
     echo "FreeRAID: parity-nonraid marker found — importing under NonRAID semantics"
 fi
 
+# Auto-filter container templates to those the user actually had running. If
+# the user dropped `active-containers.txt` (one container name per line, from
+# `docker ps --format '{{.Names}}'` on Unraid) into /boot/config/ before
+# backing up, the importer skips templates for deleted/stale containers (#16).
+ACTIVE_CONTAINERS="/boot/config/active-containers.txt"
+if [ -f "$ACTIVE_CONTAINERS" ]; then
+    IMPORT_ARGS+=(--only-running-file "$ACTIVE_CONTAINERS")
+    echo "FreeRAID: filtering Docker templates to active set in $ACTIVE_CONTAINERS"
+fi
+
 echo "FreeRAID: importing Unraid backup..."
 TMPDIR=$(mktemp -d /tmp/freeraid-firstboot-XXXXXX)
 trap "rm -rf '$TMPDIR'" EXIT
@@ -375,6 +388,24 @@ python3 /usr/local/lib/freeraid/unraid-import \
     && echo "FreeRAID: import complete." \
     || echo "FreeRAID: import had errors — check /boot/config/freeraid.conf.json"
 
+# Apply imported hostname immediately so the post-firstboot mDNS announce
+# uses it rather than the live-image default. Without this, find-the-box
+# kept showing freeraid-N until cmd_start ran (POUGHKEEPSIE, 2026-05-30, #25).
+# hostnamectl emits a DBus signal; avahi-daemon listens and re-announces.
+if [ -f "$FLAG" ] && [ -f /boot/config/freeraid.conf.json ]; then
+    H=$(jq -r '.system.hostname // empty' /boot/config/freeraid.conf.json 2>/dev/null || true)
+    if [ -n "$H" ] && [ "$H" != "$(hostname)" ]; then
+        hostnamectl set-hostname "$H" 2>/dev/null || true
+        sed -i "s/127\.0\.1\.1.*/127.0.1.1\t$H/" /etc/hosts 2>/dev/null || true
+        # hostnamectl emits a DBus signal but avahi-daemon doesn't reliably
+        # rebind from it (validated 2026-05-30 on POUGHKEEPSIE — boot 1 came
+        # up announcing freeraid-25.local even after hostname=POUGHKEEPSIE).
+        # An explicit restart forces the re-announcement under the new name.
+        systemctl try-restart avahi-daemon 2>/dev/null || true
+        echo "FreeRAID: hostname set to $H"
+    fi
+fi
+
 # Apply imported network (static IP / DHCP / DNS) so the machine comes up
 # on the address the user expects — but ONLY when this is a true cutover.
 # The .skip-parity marker means the user is test-booting alongside a live
@@ -382,7 +413,12 @@ python3 /usr/local/lib/freeraid/unraid-import \
 # system off the LAN. Failure is non-fatal: stale DHCP is better than no
 # network.
 if [ -f "$FLAG" ] && [ ! -f "$SKIP_PARITY_MARKER" ]; then
-    /usr/local/bin/freeraid network-apply-config 2>&1 | logger -t freeraid-firstboot || true
+    # The pre-NM-purge version piped through `logger -t freeraid-firstboot` and
+    # silently produced no journal entries (#14) — most likely an NM-reload
+    # race that killed freeraid before its stdout flushed. Now NM is gone, the
+    # firstboot.service unit captures stdout via SyslogIdentifier, so the
+    # pipe is redundant; drop it to eliminate the race surface entirely.
+    /usr/local/bin/freeraid network-apply-config 2>&1 || true
 elif [ -f "$SKIP_PARITY_MARKER" ]; then
     echo "FreeRAID: skip-parity active — leaving network on DHCP (imported static IP stays in config for future cutover; run 'freeraid network-apply-config' when ready)"
 fi
@@ -495,6 +531,18 @@ LoginTitle = FreeRAID
 CONF
 # Empty disallowed-users so root can log in
 > /etc/cockpit/disallowed-users
+
+# Defense in depth: raise cockpit-wsinstance's TasksMax so a slow/hung helper
+# subprocess can't pile up forks into the per-session cgroup's pids.max
+# (default ~512), starving cockpit-bridge spawns and killing the TLS handshake
+# for the whole web UI. We hit this on POUGHKEEPSIE when smartctl wedged in
+# kernel D-state on every dashboard refresh (#23). The status-side guard
+# lives in cmd_status_json / get_disk_temp; this is the systemd-level safety net.
+mkdir -p /etc/systemd/system/cockpit-wsinstance-https@.service.d
+cat > /etc/systemd/system/cockpit-wsinstance-https@.service.d/freeraid.conf <<'CONF'
+[Service]
+TasksMax=4096
+CONF
 
 # MOTD at SSH login
 cat > /etc/profile.d/freeraid-motd.sh <<'MOTD'
@@ -615,11 +663,16 @@ SVC
 
 cat > /etc/systemd/system/freeraid-docker-update.service <<'SVC'
 [Unit]
-Description=FreeRAID Docker Auto-Update
+Description=FreeRAID Docker check-for-updates + auto-update enabled containers
 After=docker.service
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/freeraid docker-update-all
+# Check first so we fire update_available notifications for containers the
+# user has NOT marked for auto-update (they decide when to click). Then
+# auto-update the ones explicitly opted in. Both calls swallow failures so
+# one bad container doesn't block the other path.
+ExecStart=/bin/sh -c '/usr/local/bin/freeraid docker-check-and-notify || true'
+ExecStart=/bin/sh -c '/usr/local/bin/freeraid docker-update-all || true'
 SVC
 
 cat > /etc/systemd/system/freeraid-docker-update.timer <<'SVC'
@@ -630,6 +683,25 @@ OnCalendar=*-*-* 04:00:00
 Persistent=true
 [Install]
 WantedBy=timers.target
+SVC
+
+cat > /etc/systemd/system/freeraid-set-hostname.service <<'SVC'
+[Unit]
+Description=FreeRAID — apply imported hostname before mDNS announces
+# Boots 2+: config already on USB. Run before avahi so the very first mDNS
+# announce uses POUGHKEEPSIE (not the build-time "freeraid" / "freeraid-N"
+# disambiguation), eliminating the stale-hostname clutter on the LAN.
+# Boot 1 is handled by freeraid-firstboot setting the hostname after import.
+After=freeraid-config-mount.service
+Requires=freeraid-config-mount.service
+Before=avahi-daemon.service freeraid-array.service
+ConditionPathExists=/boot/config/freeraid.conf.json
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'h=\$(jq -r ".system.hostname // empty" /boot/config/freeraid.conf.json 2>/dev/null); [ -n "\$h" ] && [ "\$h" != "\$(hostname)" ] && hostnamectl set-hostname "\$h" && sed -i "s/127\\.0\\.1\\.1.*/127.0.1.1\\t\$h/" /etc/hosts; exit 0'
+[Install]
+WantedBy=multi-user.target
 SVC
 
 cat > /etc/systemd/system/freeraid-firstboot.service <<'SVC'
@@ -651,6 +723,7 @@ RemainAfterExit=yes
 ExecStart=/usr/local/bin/freeraid-firstboot
 StandardOutput=journal+console
 StandardError=journal+console
+SyslogIdentifier=freeraid-firstboot
 [Install]
 WantedBy=multi-user.target
 SVC
@@ -680,6 +753,7 @@ systemctl enable freeraid-scrub.timer          2>/dev/null || true
 systemctl enable freeraid-mover.timer          2>/dev/null || true
 systemctl enable freeraid-docker-update.timer  2>/dev/null || true
 systemctl enable freeraid-firstboot.service    2>/dev/null || true
+systemctl enable freeraid-set-hostname.service 2>/dev/null || true
 systemctl enable freeraid-nvidia.service       2>/dev/null || true
 
 # Mount config/ from USB flash drive to /boot/config (persistent config)
@@ -752,8 +826,18 @@ info "Kernel: $(basename $KERNEL)"
 
 info "Building rootfs.squashfs (this takes a few minutes)..."
 rm -f "$BUILD_DIR/rootfs.squashfs"
+# Stopgap for #20 — build the squashfs UNCOMPRESSED. With xz-compressed
+# blocks, every page read decompresses; a single bit-flip in non-ECC RAM
+# fails the block CRC and the kernel returns -EIO, cascading into "binary
+# vanished mid-session" errors (POUGHKEEPSIE containerd, 2026-05-30).
+# Uncompressed blocks have no per-block CRC — a bit-flip just returns
+# corrupt bytes (the affected process may crash, but neighbours survive).
+# Full architectural fix (cpio.gz → tmpfs, drop live-boot) is in
+# docs/design-image-build-cpio.md.
+# RAM cost: ~3-4× the xz size (acknowledged in bug note as acceptable
+# tradeoff for fresh tmpfs-class robustness).
 mksquashfs "$ROOTFS" "$BUILD_DIR/rootfs.squashfs" \
-    -comp xz \
+    -noI -noD -noF -noX \
     -e "$ROOTFS/boot" \
     -noappend \
     -quiet \

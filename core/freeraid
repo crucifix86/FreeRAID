@@ -97,22 +97,19 @@ get_disk_temp() {
     local dev="$1"
     [ -b "$dev" ] || { echo ""; return; }
     local temp
-    # Skip entirely when the device is held by the NonRAID md driver. Under
-    # NonRAID the ATA passthrough that smartctl uses hangs in kernel D-state
-    # — `timeout` only kills the userspace wrapper; the syscall stays stuck
-    # and the proc stays in the cgroup forever (uninterruptible). Enough
-    # accumulated D-state procs jam cockpit-wsinstance's cgroup pids limit
-    # and the whole web UI dies. For nonraid-held disks the device temp is
-    # also available via `nmdctl status -o json` — preferred source.
+    # Skip entirely when md_nonraid is loaded UNLESS the device is the cache
+    # (the cache NVMe isn't in any nmd array — smartctl on it is fine).
+    # Under NonRAID the ATA passthrough hangs in kernel D-state for every
+    # md-held disk (parity AND data), and `timeout` only kills the userspace
+    # wrapper — the syscall stays stuck and the proc never exits. Enough of
+    # those jam cockpit-wsinstance's cgroup and the whole web UI dies.
+    # Conservative: skip all parity+data, only smartctl the cache. Tradeoff
+    # is no temperature column for the array disks until cmd_status_json
+    # sources temps from `nmdctl status -o json` (separate change).
     if grep -q '^md_nonraid ' /proc/modules 2>/dev/null; then
-        local sd; sd=$(basename "$(readlink -f "$dev" 2>/dev/null)" 2>/dev/null | sed 's/[0-9]*$//')
-        if [ -n "$sd" ] && grep -qE "(^| )$sd( |$)" /proc/mdstat 2>/dev/null; then
-            echo ""; return
-        fi
-        # Cross-check via nmdctl: any disk it reports as a slot is held by it
-        if command -v nmdctl &>/dev/null && \
-           timeout 2 nmdctl status -o json 2>/dev/null | \
-           jq -e --arg sd "$sd" '.disks[]? | select(.device == $sd)' >/dev/null 2>&1; then
+        local cache_dev
+        cache_dev=$(jq -r '.array.cache[]? | select(.enabled==true) | .device' "$CONFIG_FILE" 2>/dev/null | head -1)
+        if [ "$dev" != "$cache_dev" ]; then
             echo ""; return
         fi
     fi
@@ -164,11 +161,7 @@ cmd_status_json() {
         read -r pool_size pool_used pool_free pool_pct < <(df -h "$pool" 2>/dev/null | awk 'NR==2{print $2,$3,$4,$5}' || echo "? ? ? ?")
     fi
 
-    # Last sync
-    local last_sync
-    last_sync=$(journalctl -u freeraid-sync --no-pager -n 1 --output=short 2>/dev/null | grep -oP '\d{4}-\d{2}-\d{2}' | head -1 || echo "never")
-
-    # Parity drives JSON.
+    # Parity method detection (used for last_sync semantics + parity entries).
     # "mounted" historically meant `mountpoint -q $mnt`. Under NonRAID the
     # parity disk is a raw block device managed by the md driver and never
     # mounted as a filesystem — but the UI was rendering that as a yellow
@@ -184,6 +177,16 @@ cmd_status_json() {
     if [ "$pm" = "nonraid" ] && [ -e /proc/modules ] && \
        grep -q '^md_nonraid ' /proc/modules 2>/dev/null; then
         nonraid_active=true
+    fi
+
+    # Last sync. SnapRAID is the timer-driven model — "never" is meaningful.
+    # NonRAID is realtime — there is no sync event to surface, and "never"
+    # was misleading users into thinking parity wasn't working (#12).
+    local last_sync
+    if $nonraid_active; then
+        last_sync="realtime"
+    else
+        last_sync=$(journalctl -u freeraid-sync --no-pager -n 1 --output=short 2>/dev/null | grep -oP '\d{4}-\d{2}-\d{2}' | head -1 || echo "never")
     fi
     local parity_json="["
     local first=true
@@ -343,13 +346,30 @@ cmd_status() {
         df -h "$pool" 2>/dev/null | awk 'NR==2{printf "  Size: %s  Used: %s  Free: %s  (%s used)\n",$2,$3,$4,$5}' || echo "  [error reading pool]"
     fi
 
-    local last_sync
-    last_sync=$(journalctl -u freeraid-sync --no-pager -n 1 --output=short 2>/dev/null | grep -oP '\d{4}-\d{2}-\d{2}' | head -1 || echo "never")
+    local pm_h
+    pm_h=$(jq -r '.array.parity_method // "snapraid"' "$CONFIG_FILE")
     echo ""
-    echo -e "Last parity sync: ${last_sync}"
+    if [ "$pm_h" = "nonraid" ] && [ -e /proc/modules ] && grep -q '^md_nonraid ' /proc/modules 2>/dev/null; then
+        echo -e "Parity: Realtime (NonRAID)"
+    else
+        local last_sync
+        last_sync=$(journalctl -u freeraid-sync --no-pager -n 1 --output=short 2>/dev/null | grep -oP '\d{4}-\d{2}-\d{2}' | head -1 || echo "never")
+        echo -e "Last parity sync: ${last_sync}"
+    fi
 }
 
 cmd_start() {
+    # Reapply imported hostname on every array start. The live overlay tmpfs
+    # wipes /etc/hostname on each boot, and firstboot-only application
+    # reverts to the build-time default `freeraid` after reboot
+    # (POUGHKEEPSIE, 2026-05-30, #10).
+    local imported_host
+    imported_host=$(jq -r '.system.hostname // empty' "$CONFIG_FILE" 2>/dev/null)
+    if [ -n "$imported_host" ] && [ "$(hostname)" != "$imported_host" ]; then
+        info "Reapplying imported hostname: $imported_host"
+        cmd_set_hostname "$imported_host" >/dev/null 2>&1 || warn "set-hostname failed"
+    fi
+
     # Dispatch on parity method. snapraid is the default and runs the existing
     # mergerfs+snapraid path below; nonraid delegates to cmd_start_nonraid
     # which uses qvr/nonraid's md driver via nmdctl for Unraid-compatible
@@ -2145,6 +2165,20 @@ if webui:
 compose = '\n'.join(lines) + '\n'
 os.makedirs(compose_dir, exist_ok=True)
 out_path = os.path.join(compose_dir, f'{slug}.docker-compose.yml')
+
+# Refuse to overwrite an existing compose — that's what `docker-update` is for.
+# Re-installing would silently clobber user customizations (GPU runtime,
+# custom env vars, path overrides). UI surfaces this as a hint to either
+# update (preserving config) or uninstall first.
+if os.path.exists(out_path):
+    print(json.dumps({
+        'error': f'Already installed: {slug}. Use docker-update to update without losing config, '
+                 f'or docker-delete to remove before re-installing.',
+        'existing_path': out_path,
+        'slug': slug,
+    }))
+    sys.exit(1)
+
 with open(out_path, 'w') as f:
     f.write(compose)
 
@@ -2454,11 +2488,34 @@ except Exception: print('')
     [ -z "$container_name" ] && container_name="$name"
 
     # If the container already exists (e.g. inherited from an Unraid import),
-    # just start it. `compose up` would try to CREATE a new one and collide on
-    # the name. Only create via compose when no container exists yet.
+    # the fast path is `docker start`. But if the compose file has been edited
+    # since the container was created (Edit panel, importer fix, GPU runtime
+    # add for #17), `docker start` silently runs the stale config — users on
+    # POUGHKEEPSIE had to manually `docker compose up -d --force-recreate` for
+    # every edit (#19). Detect compose mtime vs container CreatedAt and
+    # promote to a force-recreate when newer.
     if docker inspect "$container_name" &>/dev/null; then
-        info "Starting existing container $container_name..."
-        docker start "$container_name" >/dev/null
+        local compose_mtime created_at created_epoch recreate=false
+        compose_mtime=$(stat -c %Y "$f" 2>/dev/null || echo 0)
+        created_at=$(docker inspect -f '{{.Created}}' "$container_name" 2>/dev/null || echo "")
+        if [ -n "$created_at" ]; then
+            # docker's Created is RFC3339 with nanoseconds — date -d handles it.
+            created_epoch=$(date -d "$created_at" +%s 2>/dev/null || echo 0)
+            [ "$compose_mtime" -gt "$created_epoch" ] && recreate=true
+        fi
+        if $recreate; then
+            info "Compose file newer than container — force-recreating $name..."
+            # `docker compose up --force-recreate` only recreates containers
+            # *created by compose*. Unraid-imported containers were created by
+            # `docker run`, so compose sees the name as foreign and errors
+            # with a Conflict. Explicit rm first lets compose claim the name
+            # cleanly (validated on POUGHKEEPSIE 2026-05-30, binhex-plexpass).
+            docker rm -f "$container_name" >/dev/null 2>&1 || true
+            docker_compose -f "$f" up -d --force-recreate
+        else
+            info "Starting existing container $container_name..."
+            docker start "$container_name" >/dev/null
+        fi
     else
         info "Creating and starting $name from compose..."
         docker_compose -f "$f" up -d
@@ -2592,6 +2649,69 @@ cmd_docker_update_all() {
     done <<< "$autoupdate"
 
     info "Auto-update complete: $updated checked, $failed failed."
+}
+
+cmd_docker_check_updates() {
+    # Iterate compose files; for each image compare the LOCAL manifest digest
+    # (RepoDigests) against the REMOTE manifest digest (docker manifest
+    # inspect). Multi-arch images: filter to linux/amd64. Output: JSON array
+    # of {name, image, local_digest, remote_digest, update_available}.
+    # Powers the "Update Available" badge in the container list and the
+    # nightly notification path.
+    require docker
+    local results="["
+    local first=true
+    for f in "$COMPOSE_DIR"/*.docker-compose.yml; do
+        [ -f "$f" ] || continue
+        local name image local_id remote_id update_available
+        name=$(basename "$f" .docker-compose.yml)
+        image=$(python3 -c "
+import json
+try:
+    d = json.load(open('$f'))
+    svc = next(iter(d.get('services', {}).values()), {})
+    print(svc.get('image', ''))
+except Exception: print('')
+" 2>/dev/null)
+        [ -z "$image" ] && continue
+        # Local: first RepoDigest after the @
+        local_id=$(docker inspect --format '{{index .RepoDigests 0}}' "$image" 2>/dev/null | awk -F@ '{print $2}')
+        # Remote: pick the linux/amd64 manifest from a list, else the single config digest
+        remote_id=$(docker manifest inspect "$image" 2>/dev/null | \
+            jq -r 'if has("manifests")
+                   then ([.manifests[]? | select(.platform.architecture=="amd64" and .platform.os=="linux") | .digest][0] // empty)
+                   elif has("config") then .config.digest
+                   else empty end' 2>/dev/null)
+        update_available=false
+        if [ -n "$local_id" ] && [ -n "$remote_id" ] && [ "$local_id" != "$remote_id" ]; then
+            update_available=true
+        fi
+        $first || results+=","
+        first=false
+        results+=$(jq -nc \
+            --arg name "$name" --arg image "$image" \
+            --arg local_d "${local_id:-}" --arg remote_d "${remote_id:-}" \
+            --argjson upd "$update_available" \
+            '{name:$name, image:$image, local_digest:$local_d, remote_digest:$remote_d, update_available:$upd}')
+    done
+    results+="]"
+    echo "$results"
+}
+
+cmd_docker_check_and_notify() {
+    # Scheduler entry point — runs the check, fires a container_updated_available
+    # notification per container needing an update. Designed to ride alongside
+    # docker-update-all in freeraid-docker-update.service.
+    local report
+    report=$(cmd_docker_check_updates 2>/dev/null)
+    [ -z "$report" ] && return 0
+    local need
+    need=$(echo "$report" | jq -r '.[] | select(.update_available == true) | .name')
+    [ -z "$need" ] && return 0
+    local count
+    count=$(echo "$need" | wc -l)
+    cmd_notify_send "update_available" "Container updates available: $(echo "$need" | tr '\n' ',' | sed 's/,$//')" 2>/dev/null || true
+    info "Container update check: $count update(s) available"
 }
 
 cmd_install_deps() {
@@ -3385,9 +3505,85 @@ cmd_nvidia_status() {
           enabled_on_boot:$enabled_on_boot}'
 }
 
+cmd_nvidia_drivers_list() {
+    # Enumerate available nvidia-driver packages from apt. The UI picker (#9)
+    # consumes this to populate the driver-version dropdown. We deliberately
+    # only surface packages whose Architecture and current state can be
+    # validated, so the dropdown can't offer something apt will reject.
+    require apt-cache
+    local installed_pkg installed_version
+    installed_pkg=$(dpkg -l 2>/dev/null | awk '/^ii\s+nvidia-.*-driver\s/{print $2; exit}' || true)
+    installed_version=""
+    if [ -n "$installed_pkg" ]; then
+        installed_version=$(dpkg -s "$installed_pkg" 2>/dev/null | awk '/^Version:/{print $2; exit}' || true)
+    fi
+    # Also surface live module version (may differ if a reboot is pending).
+    local loaded_version=""
+    if [ -r /proc/driver/nvidia/version ]; then
+        loaded_version=$(grep -oP 'Kernel Module\s+\K[\d.]+' /proc/driver/nvidia/version 2>/dev/null | head -1 || true)
+    fi
+
+    # Discover candidate packages. Names match Debian's non-free nvidia-driver
+    # families: nvidia-driver (current), nvidia-tesla-<N>-driver,
+    # nvidia-legacy-<N>xx-driver. Skip everything else to avoid surfacing
+    # nvidia-cuda-* / nvidia-container-* in the picker.
+    local out="["
+    local first=true
+    while read -r pkg; do
+        [ -z "$pkg" ] && continue
+        case "$pkg" in
+            nvidia-driver|nvidia-tesla-*-driver|nvidia-legacy-*xx-driver) ;;
+            *) continue ;;
+        esac
+        local ver family installed=false
+        ver=$(apt-cache policy "$pkg" 2>/dev/null | awk '/Candidate:/{print $2; exit}')
+        [ -z "$ver" ] || [ "$ver" = "(none)" ] && continue
+        case "$pkg" in
+            nvidia-driver)              family="current"  ;;
+            nvidia-tesla-*-driver)      family="tesla"    ;;
+            nvidia-legacy-*xx-driver)   family="legacy"   ;;
+        esac
+        [ "$pkg" = "$installed_pkg" ] && installed=true
+        $first || out+=","
+        first=false
+        out+=$(jq -nc --arg pkg "$pkg" --arg ver "$ver" --arg family "$family" \
+                     --argjson installed "$installed" \
+            '{package:$pkg, version:$ver, family:$family, installed:$installed}')
+    done < <(apt-cache search -n '^nvidia-.*driver$' 2>/dev/null | awk '{print $1}')
+    out+="]"
+
+    jq -nc --argjson drivers "$out" \
+           --arg installed_pkg "$installed_pkg" \
+           --arg installed_version "$installed_version" \
+           --arg loaded_version "$loaded_version" \
+        '{installed_package:$installed_pkg, installed_version:$installed_version,
+          loaded_version:$loaded_version, drivers:$drivers}'
+}
+
+cmd_nvidia_disable() {
+    # Tear down the marker so future boots don't re-install. Does NOT
+    # uninstall the driver from the running session (avoid surprise reboots);
+    # the next boot lacks the marker and starts clean. Symmetric with
+    # cmd_nvidia_install's marker-based opt-in.
+    if [ -f /boot/config/.nvidia-enabled ]; then
+        rm -f /boot/config/.nvidia-enabled
+        info "Disabled NVIDIA on next boot (current session unchanged)."
+    else
+        info "NVIDIA already disabled (no marker present)."
+    fi
+    echo '{"ok":true}'
+}
+
 cmd_nvidia_install() {
     # Installs nvidia-driver + nvidia-container-toolkit, configures docker runtime,
     # and drops /boot/config/.nvidia-enabled so it re-applies at every live boot.
+    # Optional arg: package name (e.g. nvidia-tesla-535-driver) overrides the
+    # default `nvidia-driver`. UI picker (#9) passes the selected package here.
+    local driver_pkg="${1:-nvidia-driver}"
+    case "$driver_pkg" in
+        nvidia-driver|nvidia-tesla-*-driver|nvidia-legacy-*xx-driver) ;;
+        *) die "Unsupported driver package: $driver_pkg (allowed: nvidia-driver, nvidia-tesla-*-driver, nvidia-legacy-*xx-driver)" ;;
+    esac
     export DEBIAN_FRONTEND=noninteractive
     require apt-get
 
@@ -3399,13 +3595,13 @@ blacklist nouveau
 options nouveau modeset=0
 BL
 
-    info "Installing NVIDIA driver from Debian non-free (this builds the kernel module via DKMS — 2-5 min)..."
+    info "Installing $driver_pkg from Debian non-free (this builds the kernel module via DKMS — 2-5 min)..."
     apt-get update -qq 2>&1 | tail -3
     # On a live-boot system, /boot/vmlinuz-* doesn't exist in the root overlay,
     # so initramfs-tools postinst always fails. That failure is harmless — the
     # nvidia DKMS module still gets built and installed. Detect the real
     # outcome by checking for the built .ko file afterwards.
-    apt-get install -y -qq nvidia-driver firmware-misc-nonfree 2>&1 | tail -10 || true
+    apt-get install -y -qq "$driver_pkg" firmware-misc-nonfree 2>&1 | tail -10 || true
     local kver; kver=$(uname -r)
     if ! find "/lib/modules/$kver/updates/dkms" -name "nvidia*.ko*" 2>/dev/null | grep -q .; then
         die "nvidia-driver install failed — no DKMS module found for kernel $kver"
@@ -3427,8 +3623,15 @@ BL
 
     info "Installing nvidia-container-toolkit..."
     apt-get update -qq 2>&1 | tail -3
-    apt-get install -y --no-install-recommends -qq nvidia-container-toolkit 2>&1 | tail -5 || \
-        die "nvidia-container-toolkit install failed"
+    # Same pattern as the nvidia-driver block above: on a live-boot system the
+    # root overlay has no /boot/vmlinuz-*, so any postinst chained into
+    # initramfs-tools fails and dpkg returns non-zero — but the toolkit itself
+    # installed cleanly. Detect via the `nvidia-ctk` binary, not dpkg's exit
+    # code (#8). The previous `|| die` was skipping nvidia-ctk runtime
+    # configure, the .nvidia-enabled marker, and the docker restart.
+    apt-get install -y --no-install-recommends -qq nvidia-container-toolkit 2>&1 | tail -5 || true
+    command -v nvidia-ctk &>/dev/null || \
+        die "nvidia-container-toolkit install failed — nvidia-ctk binary not present after apt-get"
 
     info "Registering nvidia runtime with Docker..."
     # nvidia-ctk writes the runtime block into daemon.json preserving other keys
@@ -3532,54 +3735,49 @@ PYEOF
 cmd_network_set() {
     # Usage: freeraid network-set <iface> dhcp
     #        freeraid network-set <iface> static <ip/prefix> <gateway> <dns>
+    #
+    # Writes the .network section of freeraid.conf.json, then delegates to
+    # cmd_network_apply_config which emits the systemd-networkd .network file
+    # and reloads networkd. The old implementation wrote /etc/network/interfaces
+    # and called ifup/ifdown — both gone after the NetworkManager + ifupdown
+    # purge in d00a70b. Result: UI "Apply" was silently no-op (#11).
     local iface="${1:-}" mode="${2:-}"
     [ -z "$iface" ] || [ -z "$mode" ] && die "Usage: freeraid network-set <iface> <dhcp|static> [ip/prefix gateway dns]"
 
-    local conf_file="/etc/network/interfaces"
-
+    local tmp=/tmp/freeraid.conf.tmp.$$
     if [ "$mode" = "dhcp" ]; then
-        python3 - "$conf_file" "$iface" << 'PYEOF'
-import sys, re
-path, iface = sys.argv[1], sys.argv[2]
-txt = open(path).read()
-# Remove existing iface block
-txt = re.sub(rf'\n?(allow-hotplug|auto)\s+{re.escape(iface)}\n', '\n', txt)
-txt = re.sub(rf'\niface\s+{re.escape(iface)}\s+inet\s+\w+.*?(?=\niface\s|\n\s*\n|\Z)', '', txt, flags=re.DOTALL)
-txt = txt.rstrip() + f'\n\nauto {iface}\niface {iface} inet dhcp\n'
-open(path,'w').write(txt)
-print('ok')
-PYEOF
-    else
+        jq --arg iface "$iface" \
+           '.network.interface = $iface
+            | .network.dhcp = true
+            | .network.ip = ""
+            | .network.netmask = ""
+            | .network.gateway = ""
+            | .network.dns = []' \
+           "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+    elif [ "$mode" = "static" ]; then
         local cidr="${3:-}" gateway="${4:-}" dns="${5:-8.8.8.8}"
         [ -z "$cidr" ] || [ -z "$gateway" ] && die "static requires: ip/prefix gateway [dns]"
-        # split cidr into ip and prefix
         local ip="${cidr%%/*}" prefix="${cidr##*/}"
         [ "$prefix" = "$ip" ] && prefix=24
-        # Convert prefix to netmask
         local netmask
         netmask=$(python3 -c "import ipaddress; print(str(ipaddress.IPv4Network(f'0.0.0.0/${prefix}',False).netmask))" 2>/dev/null || echo "255.255.255.0")
-
-        python3 - "$conf_file" "$iface" "$ip" "$netmask" "$gateway" "$dns" << 'PYEOF'
-import sys, re
-path, iface, ip, netmask, gateway, dns = sys.argv[1:]
-txt = open(path).read()
-txt = re.sub(rf'\n?(allow-hotplug|auto)\s+{re.escape(iface)}\n', '\n', txt)
-txt = re.sub(rf'\niface\s+{re.escape(iface)}\s+inet\s+\w+.*?(?=\niface\s|\n\s*\n|\Z)', '', txt, flags=re.DOTALL)
-block = (f'\nauto {iface}\n'
-         f'iface {iface} inet static\n'
-         f'    address {ip}\n'
-         f'    netmask {netmask}\n'
-         f'    gateway {gateway}\n'
-         f'    dns-nameservers {dns}\n')
-txt = txt.rstrip() + block
-open(path,'w').write(txt)
-print('ok')
-PYEOF
+        # DNS may be comma-, space-, or semicolon-separated from the UI.
+        local dns_json
+        dns_json=$(python3 -c "import sys,json,re; print(json.dumps([s for s in re.split(r'[,;\s]+', sys.argv[1]) if s]))" "$dns")
+        jq --arg iface "$iface" --arg ip "$ip" --arg netmask "$netmask" \
+           --arg gateway "$gateway" --argjson dns "$dns_json" \
+           '.network.interface = $iface
+            | .network.dhcp = false
+            | .network.ip = $ip
+            | .network.netmask = $netmask
+            | .network.gateway = $gateway
+            | .network.dns = $dns' \
+           "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+    else
+        die "Unknown mode: $mode (expected dhcp|static)"
     fi
 
-    # Re-apply without taking down SSH if it's the current connection iface
-    # Use ifup --force in background so we don't kill the calling process
-    nohup bash -c "sleep 1; ifdown '$iface' 2>/dev/null; ifup '$iface' 2>/dev/null" &>/dev/null &
+    cmd_network_apply_config
     echo "{\"ok\":true,\"iface\":\"$iface\",\"mode\":\"$mode\"}"
 }
 
@@ -3615,7 +3813,35 @@ cmd_parity_method() {
 
 cmd_nonraid_status() {
     require nmdctl
-    nmdctl status -o json
+    # Pass through nmdctl's JSON, augmented with a `freeraid_health` field
+    # that suppresses the well-known single-parity false-DEGRADED (#15):
+    # when only one parity is configured, the empty Q slot is counted as
+    # Invalid+Disabled even though the array is healthy by design. The raw
+    # nmdctl fields are preserved so UIs can still surface them; the
+    # derived field is what dashboards should key off.
+    # nmdctl returns exit code 1 whenever the array isn't HEALTHY (e.g. the
+    # single-parity false-DEGRADED we're suppressing here), but the JSON it
+    # prints is still complete and valid. `|| true` keeps the captured output
+    # without appending a placeholder doc, so jq sees exactly one input.
+    local raw
+    raw=$(nmdctl status -o json 2>/dev/null || true)
+    [ -z "$raw" ] && raw='{}'
+    echo "$raw" | jq '
+        . as $r |
+        ($r.array.size.has_second_parity // false)        as $dual |
+        ($r.array.counters.missing       // 0)            as $missing |
+        ($r.array.counters.disk_errors   // 0)            as $errors |
+        ($r.array.counters.invalid       // 0)            as $invalid |
+        ($r.array.counters.disabled      // 0)            as $disabled |
+        ($r.array.health.status          // "UNKNOWN")    as $raw_status |
+        . + { freeraid_health:
+            (if $raw_status == "STARTED" or $raw_status == "HEALTHY"
+                then $raw_status
+             elif ($dual == false) and $missing == 0 and $errors == 0
+                  and $invalid <= 1 and $disabled <= 1
+                then "HEALTHY"   # single-parity by design — empty Q slot ignored
+             else $raw_status
+             end) }'
 }
 
 cmd_nonraid_import() {
@@ -3687,6 +3913,20 @@ cmd_start_nonraid() {
     cache_dev=$(jq -r '.array.cache[] | select(.enabled==true) | .device' "$CONFIG_FILE" | head -1)
     cache_mnt=$(jq -r '.array.cache[] | select(.enabled==true) | .mountpoint' "$CONFIG_FILE" | head -1)
     cache_fs=$(jq -r '.array.cache[] | select(.enabled==true) | .fstype' "$CONFIG_FILE" | head -1)
+    # Cache device path may be a /dev/disk/by-id/* symlink that udev hasn't
+    # materialised yet — particularly NVMe on AMD platforms with many PCIe
+    # devices, where enumeration can lag SATA by seconds. Without waiting
+    # we silently skip the cache mount → mergerfs comes up without it →
+    # appdata bind misses → every container loses its data on next start
+    # (POUGHKEEPSIE boot 2, 2026-05-30).
+    if [ -n "$cache_dev" ]; then
+        udevadm settle --timeout=15 2>/dev/null || true
+        local _i
+        for _i in 1 2 3 4 5; do
+            [ -b "$cache_dev" ] && break
+            sleep 1
+        done
+    fi
     if [ -n "$cache_dev" ] && [ -b "$cache_dev" ]; then
         mkdir -p "$cache_mnt"
         cur_cache_fs=$(blkid -o value -s TYPE "$cache_dev" 2>/dev/null || echo "")
@@ -3699,7 +3939,26 @@ cmd_start_nonraid() {
             info "Mounting cache $cache_dev → $cache_mnt"
             mount "$cache_dev" "$cache_mnt" || warn "cache mount failed — appdata containers won't have their data"
         fi
+    elif [ -n "$cache_dev" ]; then
+        warn "Cache device $cache_dev not present after udev settle + 5s retry — appdata containers will have no data; check /dev/disk/by-id and slot/cable"
     fi
+
+    # Mount any additional enabled cache disks beyond the primary. They join
+    # the mergerfs pool as extra fast-tier branches; the primary cache keeps
+    # its role for appdata bind + Docker data-root. Skips devices whose udev
+    # node hasn't materialised (logs and continues, doesn't fail the array).
+    local extra_cache_mnts=""
+    while IFS=$'\t' read -r xdev xmnt xfs; do
+        [ -z "$xdev" ] || [ "$xdev" = "null" ] && continue
+        [ "$xdev" = "$cache_dev" ] && continue
+        [ -b "$xdev" ] || { warn "Extra cache $xdev not present, skipping"; continue; }
+        mkdir -p "$xmnt"
+        if ! mountpoint -q "$xmnt"; then
+            info "Mounting extra cache $xdev → $xmnt"
+            mount "$xdev" "$xmnt" || { warn "extra cache mount failed: $xdev"; continue; }
+        fi
+        extra_cache_mnts="${extra_cache_mnts:+$extra_cache_mnts:}$xmnt"
+    done < <(jq -r '.array.cache[]? | select(.enabled==true) | .device + "\t" + .mountpoint + "\t" + .fstype' "$CONFIG_FILE")
 
     # Build mergerfs branches over the nmdN-mounted disks + cache (cache
     # first so default-mfs scatter-writes prefer the fast tier). UX matches
@@ -3707,6 +3966,7 @@ cmd_start_nonraid() {
     local pool branches=""
     pool=$(cfg_pool_mountpoint)
     [ -n "$cache_mnt" ] && mountpoint -q "$cache_mnt" 2>/dev/null && branches="$cache_mnt"
+    [ -n "$extra_cache_mnts" ] && branches="${branches:+$branches:}$extra_cache_mnts"
     for d in /mnt/disk*; do
         mountpoint -q "$d" 2>/dev/null && branches="${branches:+$branches:}$d"
     done
@@ -3735,8 +3995,76 @@ cmd_start_nonraid() {
         fi
     fi
 
+    # Docker storage setup — mirrors the snapraid path:
+    #   1. Unraid import: if /mnt/cache/system/docker/docker.img exists, loop-mount
+    #      it and use it as Docker's data-root with the btrfs driver.
+    #   2. Fresh/no docker.img → overlay2 on the cache pool.
+    # Without this the live image's build-time daemon.json (storage-driver=vfs,
+    # data-root=/var/lib/docker = the live overlay tmpfs) stays put, and the
+    # first big pull fills overlay → ENOSPC, container stack dies
+    # (POUGHKEEPSIE boot 2, 2026-05-30).
+    if command -v docker &>/dev/null && [ -n "$cache_mnt" ] && mountpoint -q "$cache_mnt" 2>/dev/null; then
+        local unraid_docker_img="${cache_mnt}/system/docker/docker.img"
+        local docker_loop_mnt="/mnt/docker-img"
+        local cur_driver="" cur_root=""
+        cur_driver=$(docker info --format '{{.Driver}}' 2>/dev/null || echo "")
+        cur_root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo "")
+
+        if [ -f "$unraid_docker_img" ]; then
+            mkdir -p "$docker_loop_mnt"
+            if ! mountpoint -q "$docker_loop_mnt" 2>/dev/null; then
+                info "Loop-mounting Unraid docker.img → $docker_loop_mnt"
+                mount -o loop "$unraid_docker_img" "$docker_loop_mnt" || \
+                    warn "Failed to mount $unraid_docker_img (docker will fall back to overlay2)"
+            fi
+            if mountpoint -q "$docker_loop_mnt" 2>/dev/null; then
+                if [ "$cur_driver" != "btrfs" ] || [ "$cur_root" != "$docker_loop_mnt" ]; then
+                    info "Switching Docker to btrfs on $docker_loop_mnt (Unraid docker.img)"
+                    systemctl stop docker 2>/dev/null || true
+                    local tmp=/tmp/freeraid-daemon.json.$$
+                    if [ -f /etc/docker/daemon.json ]; then
+                        jq --arg root "$docker_loop_mnt" \
+                           '.["data-root"]=$root | .["storage-driver"]="btrfs"' \
+                           /etc/docker/daemon.json > "$tmp"
+                    else
+                        jq -n --arg root "$docker_loop_mnt" \
+                            '{"data-root":$root, "storage-driver":"btrfs"}' > "$tmp"
+                    fi
+                    mv "$tmp" /etc/docker/daemon.json
+                    systemctl start docker 2>/dev/null || true
+                    info "Docker: btrfs on $docker_loop_mnt"
+                fi
+            fi
+        else
+            local docker_data="${cache_mnt}/appdata/docker"
+            if [ "$cur_driver" != "overlay2" ] || [ "$cur_root" != "$docker_data" ]; then
+                info "Switching Docker to overlay2 at $docker_data ..."
+                systemctl stop docker 2>/dev/null || true
+                mkdir -p "$docker_data"
+                local tmp=/tmp/freeraid-daemon.json.$$
+                if [ -f /etc/docker/daemon.json ]; then
+                    jq --arg root "$docker_data" \
+                       '.["data-root"]=$root | .["storage-driver"]="overlay2"' \
+                       /etc/docker/daemon.json > "$tmp"
+                else
+                    jq -n --arg root "$docker_data" \
+                        '{"storage-driver":"overlay2","data-root":$root}' > "$tmp"
+                fi
+                mv "$tmp" /etc/docker/daemon.json
+                systemctl start docker 2>/dev/null || true
+                info "Docker: overlay2 at $docker_data"
+            fi
+        fi
+    fi
+
     jq '.array.state = "started"' "$CONFIG_FILE" > /tmp/freeraid.conf.tmp \
         && mv /tmp/freeraid.conf.tmp "$CONFIG_FILE"
+
+    # Start extra named pools (.pools[]) — same as snapraid cmd_start. Users
+    # with secondary pools (e.g. an NVMe scratch pool) had them silently
+    # ignored under NonRAID before this.
+    cmd_pool_start_all 2>/dev/null || true
+
     info "NonRAID array started. Pool at $pool"
 }
 
@@ -3775,6 +4103,14 @@ cmd_network_apply_config() {
     local conf_dir="/etc/systemd/network"
     local conf_file="$conf_dir/20-wired.network"
     mkdir -p "$conf_dir"
+
+    # Always start clean. If an earlier run wrote a config keyed on a stale
+    # interface name (e.g. eth0 before predictable naming kicked in), networkd
+    # will process both files in lexical order, fight itself, and drop the
+    # working DHCP lease while trying to set static on a non-existent NIC.
+    # POUGHKEEPSIE went off the LAN on 2026-05-30 from this exact case
+    # (eth0 → enp34s0 transition). Recovery required IPv6 link-local SSH.
+    rm -f "$conf_file"
 
     local dhcp_is_false ip netmask gateway iface_cfg bond_nics
     # jq's `//` returns the right side when the left is null OR false, so
@@ -4783,8 +5119,10 @@ case "${1:-help}" in
     docker-stop)   cmd_docker_stop "${2:-}" ;;
     docker-logs)   cmd_docker_logs "${2:-}" ;;
     docker-delete) cmd_docker_delete "${2:-}" ;;
-    docker-update)           cmd_docker_update "${2:-}" ;;
-    docker-update-all)       cmd_docker_update_all ;;
+    docker-update)             cmd_docker_update "${2:-}" ;;
+    docker-update-all)         cmd_docker_update_all ;;
+    docker-check-updates)      cmd_docker_check_updates ;;
+    docker-check-and-notify)   cmd_docker_check_and_notify ;;
     docker-autoupdate-set)   cmd_docker_autoupdate_set "${2:-}" "${3:-}" ;;
     docker-autoupdate-get)   cmd_docker_autoupdate_get ;;
     smart)               cmd_smart "${2:-}" ;;
@@ -4804,8 +5142,10 @@ case "${1:-help}" in
     timezone-get)       cmd_timezone_get ;;
     timezone-list)      cmd_timezone_list ;;
     timezone-set)       cmd_timezone_set "${2:-}" ;;
-    nvidia-status)      cmd_nvidia_status ;;
-    nvidia-install)     cmd_nvidia_install ;;
+    nvidia-status)        cmd_nvidia_status ;;
+    nvidia-install)       cmd_nvidia_install "${2:-}" ;;
+    nvidia-drivers-list)  cmd_nvidia_drivers_list ;;
+    nvidia-disable)       cmd_nvidia_disable ;;
     network-info)       cmd_network_info ;;
     network-set)        cmd_network_set "${2:-}" "${3:-}" "${4:-}" "${5:-}" "${6:-}" ;;
     network-apply-config) cmd_network_apply_config ;;

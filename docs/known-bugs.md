@@ -53,6 +53,14 @@ at worst give weird content (not an error).
 **Fix**: rebuild as `cpio.gz` like Unraid; initramfs extracts directly to / on
 tmpfs; drop live-boot dependency. Cost: ~1-2× RAM at boot for uncompressed
 image. Major `scripts/build-image.sh` refactor.
+**Status (2026-05-30):**
+- **Stopgap landed**: `mksquashfs -noI -noD -noF -noX` (uncompressed). Removes
+  per-block CRC so bit-flips no longer cascade to -EIO; affected page returns
+  corrupt bytes that may crash one process instead of taking down the whole
+  docker stack. Same RAM cost the bug note already accepted.
+- **Full refactor**: design captured in `docs/design-image-build-cpio.md`.
+  Pending POUGHKEEPSIE validation pass + needs to land bundled with #22
+  (otherwise re-build-re-burn is the only way to ship fixes).
 
 ### 22 — Every committed fix requires re-squashfs + re-burn USB to land
 Workflow gap that cost most of tonight. Live-patch via scp dies on next reboot
@@ -103,6 +111,14 @@ current box. Imported hostname (POUGHKEEPSIE) isn't applied until after
 firstboot, so during the find-the-box window it's still `freeraid-N`.
 **Fix**: bake imported hostname into the initial mDNS announce, and/or use a
 fixed Device Info host so the entry stays consistent across boots.
+**Status (2026-05-30):** First-cut shipped (freeraid-set-hostname.service +
+firstboot hostnamectl). Real-world test on POUGHKEEPSIE found avahi-daemon
+does NOT reliably rebind on the hostnamectl DBus signal alone — boot 1 came
+up announcing `freeraid-25.local` even after kernel hostname was POUGHKEEPSIE.
+Follow-up fix added: firstboot now does `systemctl try-restart avahi-daemon`
+after `hostnamectl set-hostname`, which forces re-announcement under the
+new name (validated by a manual restart on POUGHKEEPSIE → "Host name is
+POUGHKEEPSIE.local").
 
 ---
 
@@ -123,6 +139,14 @@ status` doesn't surface this today so it's invisible, but worth: (a) confirm
 Invalid+Disabled is the empty Q slot, (b) decide suppress vs pass-through,
 (c) if passed through, distinguish "single-parity by design" from "second
 parity failed."
+**Status (2026-05-30):** RESOLVED on real-data capture from POUGHKEEPSIE.
+Schema confirmed: `.array.size.has_second_parity == false` distinguishes
+single-parity-by-design from second-parity-failed. Empty Q slot surfaces as
+`counters.invalid == 1, counters.disabled == 1` while `counters.missing == 0`
+and `counters.disk_errors == 0` — that's the suppressible pattern.
+`cmd_nonraid_status` now emits a derived `freeraid_health` field
+("HEALTHY" when the pattern matches) alongside the raw nmdctl status, so
+dashboards key off the derived value while keeping the raw fields visible.
 
 ### 23 — Cockpit-wsinstance cgroup TasksMax safety against any hung tool
 Tonight's cascade: smartctl on the NonRAID parity disk hangs in kernel
@@ -192,6 +216,18 @@ Unraid's ich777/nvidia-driver plugin: UI dropdown for driver version
 version, "Install Now" / "Update" / "Disable" buttons. Settings → Hardware
 currently has an install option but no version control. Roadmap §9 only
 covers existing binary install; the picker is the gap. Pair with #17.
+**Status (2026-05-30):**
+- **Backend landed**: `freeraid nvidia-drivers-list` (JSON enumeration),
+  `freeraid nvidia-install <package>` (parameterized), `freeraid nvidia-disable`
+  (marker tear-down).
+- **Drivers-list empty fix (2026-05-30 follow-up)**: POUGHKEEPSIE test boot
+  returned `{"drivers":[]}` from `nvidia-drivers-list`. Root cause: the apt
+  sources line written by build-image.sh enabled `non-free-firmware` but
+  not `non-free`. `nvidia-driver` packages live in `non-free`. Added
+  `non-free` to the bookworm main sources line so apt-cache surfaces the
+  candidate packages.
+- **UI**: pending design in `docs/design-nvidia-picker.md`. Frontend swap is
+  the only remaining work; backend is consumable as-is.
 
 ---
 
